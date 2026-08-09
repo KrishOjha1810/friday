@@ -31,11 +31,25 @@ def test_the_search_terms_survive_the_verbs():
 
 
 def test_an_unconfigured_connector_explains_itself():
-    """It must never fail silently, and never pretend."""
-    sl = connectors.get("slack")
-    if not sl.ready():
-        hint = sl.setup_hint()
-        assert "api.slack.com" in hint and "connect slack" in hint
+    """It must never fail silently, and never pretend. The wording differs
+    between the MCP path (one browser approval) and the token path, so assert
+    that it tells you HOW, not which words it uses."""
+    for name in ("slack", "gmail", "jira"):
+        c = connectors.get(name)
+        if c and not c.ready():
+            hint = c.setup_hint()
+            assert hint and ("connect" in hint.lower() or "token" in hint.lower()), \
+                f"{name} gave no way forward: {hint!r}"
+
+
+def test_a_connector_that_cannot_be_used_is_not_reported_as_ready():
+    """Gmail's MCP server handshakes and lists tools with no credentials, then
+    fails on the first real call. 'Connected' has to mean usable."""
+    from friday import mcp
+    for name, cfg in mcp.servers().items():
+        c = connectors.get(name)
+        if c and hasattr(c, "_c") and not cfg.get("token"):
+            assert c.ready() is False, f"{name} claims ready with no token"
 
 
 def test_a_token_is_never_saved_world_readable():
