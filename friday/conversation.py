@@ -29,7 +29,7 @@ import re
 import time
 from pathlib import Path
 
-from . import actions, connectors, engine, memory
+from . import actions, connectors, engine, memory, nearest
 
 # What kind of thing the user just said.
 ASK_FLEET = "fleet"        # "what's running", "who needs me"
@@ -298,8 +298,10 @@ class Friday:
         self.pending = None        # an action awaiting your yes
         self._last_found = []      # sessions a search turned up
         self._last_slack = []      # slack messages just read out
-        self._channel_guess = ""   # a channel name that was misheard, awaiting
-                                   # a yes or a second try
+        # An offer Friday just made ("did you mean X?"), and what to do about
+        # the answer. One mechanism for every kind of name, so a session, a
+        # channel and a connector all behave the same way when misheard.
+        self._offered = None
         self.history = []          # [{role, text, ts, kind}]
         self.focus = (engine.routing.new_focus()
                       if engine.AVAILABLE else {"mentioned": [], "ts": 0})
@@ -322,17 +324,22 @@ class Friday:
         self.add("user", text)
         intent, payload = classify(text)
 
-        # A channel Friday offered a moment ago: "yes" means read that one, and
-        # a short reply is another go at the name. Falling through to the model
-        # instead produced the same invented refusal three times ("I can't
-        # access channels I don't have access to"), while the channel was
-        # sitting in a list Friday had already fetched.
-        if self._channel_guess and intent not in (READ_CHANNEL, CONNECT):
-            guess, self._channel_guess = self._channel_guess, ""
+        # Something Friday offered a moment ago ("did you mean X?"). A yes takes
+        # it; a short reply is another go at the name. Letting either fall
+        # through to the model produced the same invented refusal three times
+        # while the answer sat in a list Friday had already fetched.
+        if self._offered and intent in (CONFIRM, CANCEL, CHAT):
+            offer, self._offered = self._offered, None
             if intent == CONFIRM:
-                return self._read_channel(guess)
-            if intent == CHAT and len(text.split()) <= 4:
-                return self._read_channel(text)
+                return offer["yes"]()
+            if intent == CANCEL:
+                return self._say(offer.get("no") or "Okay. Which one did you "
+                                                   "mean?")
+            if len(text.split()) <= 4 and offer.get("again"):
+                return offer["again"](text)
+            self._offered = offer          # not an answer; the offer stands
+        elif self._offered:
+            self._offered = None           # you moved on; it is no longer live
 
         # A pending offer takes precedence: "yes" means yes to THAT.
         if self.pending and intent in (CONFIRM, CANCEL):
@@ -544,10 +551,24 @@ class Friday:
             c0 = builtin or connectors.get(which)
             if c0:
                 return self._say(c0.setup_hint())
-            return self._say(f"I don't know a connector called {which}.")
+            guess = nearest.suggest(which, list(connectors.all_connectors()))
+            if guess:
+                return self._offer(
+                    f"I don't have a connector called {which}. Did you mean "
+                    f"{guess}?",
+                    yes=lambda g=guess: self._connect(g, ""),
+                    again=lambda t: self._connect(t.strip().lower(), ""))
+            return self._say(f"I don't know a connector called {which}. I have: "
+                             + ", ".join(sorted(connectors.all_connectors())))
         c = connectors.get(which)
         if not c:
-            return self._say(f"I don't have a {which} connector.")
+            guess = nearest.suggest(which, list(connectors.all_connectors()))
+            if guess:
+                return self._offer(
+                    f"I don't have a {which} connector. Did you mean {guess}?",
+                    yes=lambda g=guess, tk=token: self._connect(g, tk))
+            return self._say(f"I don't have a {which} connector. I have: "
+                             + ", ".join(sorted(connectors.all_connectors())))
         # A Slack App Configuration Token is not a credential to store, it is
         # permission to BUILD. Given one, do the six manual screens (create the
         # app, add ten scopes, install, copy the token) automatically, and leave
@@ -649,21 +670,17 @@ class Friday:
             # Friday HAS the list, so "I can't find it" on its own is withholding
             # the answer. Saying the real names turns a dead end into a choice,
             # which is what three rounds of 'Munsheer' actually needed.
-            names = sl.channel_names() if hasattr(sl, "channel_names") else []
-            best = (sl.closest_channel(name) if hasattr(sl, "closest_channel")
-                    else {})
-            if not best and names:
-                import difflib
-                near = difflib.get_close_matches(name.lower(), names, 1, 0.4)
-                best = {"name": near[0]} if near else {}
-            if best:
-                self._channel_guess = best["name"]
-                return self._say(f"I don't have a channel called {name}. Did "
-                                 f"you mean #{best['name']}? Say yes and I'll "
-                                 f"read it.")
+            names = sl.channel_names(40) if hasattr(sl, "channel_names") else []
+            guess = nearest.suggest(name, names)
+            if guess:
+                return self._offer(
+                    f"I don't have a channel called {name}. Did you mean "
+                    f"#{guess}?",
+                    yes=lambda g=guess: self._read_channel(g),
+                    again=lambda t: self._read_channel(t))
             if names:
                 return self._say(f"I don't have a channel called {name}. What I "
-                                 f"can see: " + ", ".join("#" + n for n in names))
+                                 f"can see: " + ", ".join("#" + n for n in names[:8]))
             return self._say(f"I can't find a Slack channel called {name}.")
         rows = sl.read_channel(ch["id"], limit=15)
         if not rows:
@@ -911,12 +928,35 @@ class Friday:
                          "what they're doing: another account's work isn't "
                          "readable from here, and shouldn't be.")
 
+    def _no_session(self, name: str, retry) -> dict:
+        """A session name Friday does not recognise, handled like every other
+        unrecognised name: offer the closest, or say what does exist."""
+        names = self._names_of_sessions()
+        guess = nearest.suggest(name, names)
+        if guess:
+            return self._offer(
+                f"I don't have a session called {name}. Did you mean {guess}?",
+                yes=lambda g=guess: retry(g), again=retry)
+        if names:
+            return self._say(f"I don't have a session called {name}. Running "
+                             f"now: " + ", ".join(names[:8]))
+        return self._say(f"I can't find a session called {name}, and nothing "
+                         f"is running.")
+
     def _what_needs(self, name: str) -> dict:
         """Report exactly what one agent is waiting on, and remember that it is
         waiting, so your very next message can just be the answer."""
-        hit, _ = self._find_how(name)
+        hit, how = self._find_how(name)
         if not hit:
-            return self._say(f"I can't find a session called {name}.")
+            return self._no_session(name, self._what_needs)
+        if how == "maybe":
+            # A weak match must be ASKED about, never answered as though it were
+            # the thing you named: "what is fridey waiting on" reported on
+            # voicebridge, which reads as Friday mishearing you and hiding it.
+            return self._offer(f"Did you mean {hit.get('label', name)}?",
+                               yes=lambda h=hit: self._what_needs(
+                                   h.get("label", name)),
+                               again=self._what_needs)
         label = hit.get("label", name)
         q = (hit.get("question") or hit.get("permission") or "").strip()
         if not q:
@@ -940,9 +980,17 @@ class Friday:
             names = self._session_names()
             return self._say("Which one? " + (", ".join(names) if names
                                               else "nothing is running."))
-        hit, _how = self._find_how(name)
+        hit, how = self._find_how(name)
         if not hit:
-            return self._say(f"I can't find a session called {name}.")
+            return self._no_session(name, self._propose_open)
+        if how == "maybe":
+            # Close enough to mention, not close enough to act on unasked.
+            return self._offer(
+                f"Did you mean {hit.get('label', name)}?",
+                yes=lambda h=hit: self._perform(
+                    {"kind": "open", "sid": h.get("sid", ""),
+                     "label": h.get("label", name)}),
+                again=self._propose_open)
         return self._perform({"kind": "open", "sid": hit.get("sid", ""),
                               "label": hit.get("label", name)})
 
@@ -951,12 +999,14 @@ class Friday:
         confirmation), TIER 1 when Friday had to guess which one you meant."""
         hit, how = self._find_how(name)
         if not hit:
-            return self._say(f"I can't find a session called {name}.")
+            return self._no_session(
+                name, lambda n: self._propose_tell(n, message))
         act = {"kind": "tell", "sid": hit.get("sid", ""),
                "label": hit.get("label", name), "message": message}
         if how == "exact":
             return self._perform(act)
         self.pending = act
+        self._offered = None     # likewise: the newer question owns "yes"
         return self._say(f'Did you mean {hit.get("label", name)}? '
                          f'I\'ll send "{message}".', needs_confirm=True)
 
@@ -1155,7 +1205,11 @@ class Friday:
             return []
 
     def _find(self, name: str):
-        """Match a spoken/typed name to a session.
+        """Match a spoken/typed name to a session, EXCLUDING weak matches.
+
+        This drops `how`, so a caller cannot tell a solid match from a guess.
+        That makes it the wrong tool for anything that acts, and it must
+        therefore never return a 'maybe'.
 
         Searches the FLEET first, deliberately: those are the names Friday
         shows you, and an assistant that displays "krishojha-7f" then claims it
@@ -1164,8 +1218,8 @@ class Friday:
         cannot see."""
         if not (name and engine.AVAILABLE):
             return None
-        hit, _ = self._find_how(name)
-        return hit
+        hit, how = self._find_how(name)
+        return hit if how in ("exact", "fuzzy") else None
 
     def _find_how(self, name: str):
         """(session, how) where how is 'exact' | 'fuzzy' | ''. The caller uses
@@ -1190,7 +1244,34 @@ class Friday:
         # Deliberately NO fallback to the older roster lookup: it labels
         # sessions by their first prompt, so it happily "finds" a session
         # called "Reply with exactly ALPHA". A miss is better than nonsense.
+        #
+        # But a miss is not the end. Session names get misheard exactly like
+        # channel names do, so if one sounds close, say which and let the user
+        # decide. 'sounds-like' may be acted on; 'maybe' may only be offered.
+        labels = [(r.get("label") or "") for r in rows]
+        how, label = nearest.resolve(name, labels)
+        if how in ("sounds-like", "maybe"):
+            for r in rows:
+                if (r.get("label") or "") == label:
+                    return r, ("fuzzy" if how == "sounds-like" else "maybe")
         return None, ""
+
+    def _offer(self, question: str, yes, again=None, no: str = "") -> dict:
+        """Ask "did you mean X?" and remember what a yes means.
+
+        Withholding a name Friday already has is the failure this replaces: it
+        knows the real list, so the honest move is to put the closest one to you
+        rather than report that you said something unrecognisable."""
+        self._offered = {"yes": yes, "again": again, "no": no}
+        self.pending = None      # a "yes" must have exactly one meaning
+        return self._say(question)
+
+    def _names_of_sessions(self) -> list:
+        try:
+            return [r.get("label") or "" for r in
+                    engine.fleet.snapshot().values() if r.get("label")]
+        except Exception:
+            return []
 
     def _say(self, text: str, needs_confirm: bool = False,
              action: dict = None) -> dict:

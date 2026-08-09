@@ -411,29 +411,17 @@ class Slack:
             return near[0]
         return self.closest_channel(q, rows)
 
-    # A heard name only has to be close, but it does have to WIN. Acting on a
-    # 0.62-vs-0.61 tie would be guessing, and guessing which channel to read is
-    # worse than asking.
-    SOUNDS_LIKE = 0.62
-    MUST_BEAT_RUNNER_UP_BY = 0.08
-
     def closest_channel(self, heard: str, rows: list = None) -> dict:
-        """The one channel that clearly sounds like what was said, or nothing."""
-        import difflib
-        rows = self.channels() if rows is None else rows
-        flat = _despace(heard)
-        if not flat:
-            return {}
-        scored = sorted(
-            ((difflib.SequenceMatcher(None, flat, _despace(c["name"])).ratio(), c)
-             for c in rows), key=lambda t: -t[0])
-        if not scored or scored[0][0] < self.SOUNDS_LIKE:
-            return {}
-        if len(scored) > 1 and scored[0][0] - scored[1][0] < self.MUST_BEAT_RUNNER_UP_BY:
-            return {}
-        return scored[0][1]
+        """The one channel that clearly sounds like what was said, or nothing.
 
-    def channel_names(self, limit: int = 8) -> list:
+        The thresholds live in friday.nearest, so a channel, a session and a
+        connector are all judged by the same standard."""
+        from . import nearest
+        rows = self.channels() if rows is None else rows
+        name = nearest.pick(heard, [c["name"] for c in rows])
+        return next((c for c in rows if c["name"] == name), {}) if name else {}
+
+    def channel_names(self, limit: int = 40) -> list:
         """What is actually there, for when nothing matched. Naming the real
         options beats asking someone to rephrase a name they said correctly."""
         return [c["name"] for c in self.channels()[:limit]]
@@ -474,11 +462,6 @@ class Slack:
                  "when": float(m.get("ts") or 0)}
                 for m in (d.get("messages") or [])]
 
-
-def _despace(s: str) -> str:
-    """Letters and digits only. Speech splits a compound name at the wrong
-    place, so comparing word-by-word is comparing the wrong things."""
-    return "".join(ch for ch in (s or "").lower() if ch.isalnum())
 
 # ------------------------------------------------------- Slack self-setup ----
 # Connecting Slack by hand takes six screens: create an app, find User Token

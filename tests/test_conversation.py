@@ -156,11 +156,55 @@ def test_a_failed_action_is_reported_not_swallowed():
         C.actions.focus_session = orig
 
 
-def test_sending_to_an_unknown_session_refuses_clearly():
+def test_a_misheard_name_is_offered_back_for_any_kind_of_name():
+    """The same three outcomes everywhere: act on a clear match, ask about a
+    plausible one, name the real options otherwise. This used to exist only for
+    Slack channels, so a misheard session name was a flat refusal."""
+    _fake_engine()
+    f = Friday()
+    r = f.handle("what is jobhnt waiting on")
+    assert "did you mean" in r["reply"].lower() or "jobhunt" in r["reply"], r["reply"]
+    # and a yes takes the offer, rather than being small talk
+    if "did you mean" in r["reply"].lower():
+        r2 = f.handle("yes")
+        assert "jobhunt" in r2["reply"].lower(), r2["reply"]
+
+
+def test_an_abandoned_offer_cannot_hijack_a_later_yes():
+    """'Did you mean X?' expires the moment you talk about something else.
+    Keeping it live meant a yes several messages later would answer a question
+    you had already walked away from, and act on a session you never named."""
+    _fake_engine()
+    f = Friday()
+    f.handle("what is jobhnt waiting on")       # makes an offer
+    f.handle("what's running")                  # you moved on
+    r = f.handle("yes")
+    assert "jobhunt" not in r["reply"].lower(), "a stale offer was taken: " + r["reply"]
+
+
+def test_a_weak_match_is_never_acted_on_only_asked_about():
+    """A name that merely shares some letters must produce a question. Acting on
+    it reads as Friday mishearing you and hiding it: 'what is fridey waiting on'
+    answered about voicebridge. 'jbhnt' IS a solid match for jobhunt (every
+    consonant, in order) and may be acted on; 'jonathan' is not."""
+    _fake_engine()
+    f = Friday()
+    r = f.handle("what is jonathan waiting on")
+    low = r["reply"].lower()
+    assert "did you mean" in low or "don't have" in low, r["reply"]
+    assert "doesn't need anything" not in low, "answered about the wrong session"
+
+
+def test_sending_to_an_unknown_session_never_guesses_but_does_help():
+    """It must not send to some other session, and it must not stop at 'no'
+    either: Friday knows the real names, so withholding them is withholding the
+    answer. Either the closest name is offered, or the list is."""
     _fake_engine()
     f = Friday()
     r = f.handle("tell nonexistent to stop")
-    assert "can't find" in r["reply"].lower()
+    low = r["reply"].lower()
+    assert "sent" not in low, "acted on a name that does not exist"
+    assert ("did you mean" in low or "jobhunt" in low), r["reply"]
     assert f.pending is None
 
 
