@@ -93,6 +93,15 @@
   }
   .icon.on{background:var(--accent); color:#04211c; border-color:transparent}
   .hint{color:var(--dim); font-size:11.5px; text-align:center; margin-top:7px}
+  /* Scrolled up reading something? New messages must not yank you away, but
+     you still need to know they arrived. */
+  #jump{
+    position:fixed; right:16px; bottom:96px; z-index:5; cursor:pointer;
+    background:var(--panel); color:var(--ink); border:1px solid var(--line);
+    border-radius:999px; padding:8px 14px; font:inherit; font-size:13px;
+    box-shadow:0 6px 20px rgba(0,0,0,.45);
+  }
+  #jump.needs{background:#2a1518; border-color:#7f3a3a; color:#ffd9d9}
 </style>
 </head>
 <body>
@@ -107,6 +116,7 @@
 </header>
 
 <main id="thread"></main>
+<button id="jump" hidden>0 new</button>
 
 <footer>
   <div class="row">
@@ -126,6 +136,22 @@ let pendingConfirm = false;
 function atBottom(){ return thread.scrollHeight - thread.scrollTop - thread.clientHeight < 80; }
 function scroll(force){ if(force || atBottom()) thread.scrollTop = thread.scrollHeight; }
 
+let unread = 0, unreadNeedsYou = false;
+function noteUnread(isAsk){
+  if(atBottom()) return;
+  unread++; unreadNeedsYou = unreadNeedsYou || !!isAsk;
+  const j = $('jump');
+  j.hidden = false;
+  j.classList.toggle('needs', unreadNeedsYou);
+  j.textContent = unread + ' new' + (unreadNeedsYou ? ' · needs you' : '');
+}
+function clearUnread(){
+  unread = 0; unreadNeedsYou = false;
+  const j = $('jump'); j.hidden = true; j.classList.remove('needs');
+}
+$('jump').onclick = () => { thread.scrollTop = thread.scrollHeight; clearUnread(); };
+thread.addEventListener('scroll', () => { if(atBottom()) clearUnread(); });
+
 function bubble(role, text, kind){
   const wrap = document.createElement('div');
   wrap.className = 'msg ' + (role === 'user' ? 'user' : 'friday')
@@ -139,6 +165,7 @@ function bubble(role, text, kind){
   b.appendChild(document.createTextNode(text));
   wrap.appendChild(b);
   thread.appendChild(wrap);
+  if(!atBottom() && role !== 'user') noteUnread(kind === 'proactive');
   scroll();
   return wrap;
 }
@@ -252,8 +279,20 @@ function renderFleet(rows){
   if(!rows || !rows.length){
     const s = document.createElement('span');
     s.className = 'empty-fleet'; s.textContent = 'no sessions yet';
-    el.appendChild(s); return;
+    el.appendChild(s);
+    document.title = 'Friday';
+    return;
   }
+  /* The count of things waiting on you goes in the TAB TITLE, so it is
+     answerable without switching to this window at all. */
+  const needs = rows.filter(r => r.status === 'needs').length;
+  document.title = needs ? ('(' + needs + ') Friday') : 'Friday';
+  const label = document.createElement('span');
+  label.className = 'empty-fleet';
+  label.style.cssText = 'margin-right:2px;align-self:center';
+  label.textContent = needs ? (needs + ' need' + (needs > 1 ? '' : 's') + ' you')
+                            : (rows.length + ' running');
+  el.appendChild(label);
   rows.forEach(r => {
     const c = document.createElement('button');
     c.className = 'chip ' + (r.status === 'needs' ? 'needs'
