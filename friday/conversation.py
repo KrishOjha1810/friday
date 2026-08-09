@@ -450,6 +450,26 @@ class Friday:
             return self._say(" ".join(bits) or "Nothing is connected yet.")
         # no token: try the browser flow (MCP), which is the one-time approval
         if not token:
+            # If Friday already built your Slack app, the only thing left is the
+            # click, so "connect slack" should just re-open that page. Asking
+            # for a fresh configuration token to retry a click you missed is
+            # punishing you for reading slowly.
+            if which == "slack" and connectors.can_resume():
+                def _again():
+                    r = connectors.resume_setup()
+                    if r.get("ok"):
+                        who = r.get("who") or ""
+                        self.announce("Slack is connected"
+                                      + (f", I can see you as {who}." if who
+                                         else "."))
+                    else:
+                        self.announce("Slack setup stopped: "
+                                      + r.get("error", "") + ".")
+                import threading
+                threading.Thread(target=_again, daemon=True).start()
+                return self._say("Your Slack app is already built, so all "
+                                 "that's left is the click. Opening that page "
+                                 "now, press Allow. No rush.")
             from . import mcp as _mcp
             cfg = _mcp.servers().get(which)
             # Only open a browser if the flow can actually succeed. Otherwise
@@ -475,6 +495,28 @@ class Friday:
         c = connectors.get(which)
         if not c:
             return self._say(f"I don't have a {which} connector.")
+        # A Slack App Configuration Token is not a credential to store, it is
+        # permission to BUILD. Given one, do the six manual screens (create the
+        # app, add ten scopes, install, copy the token) automatically, and leave
+        # one click for you. Storing it instead was the dead end: it passes
+        # auth.test and can read nothing.
+        if which == "slack" and connectors.is_config_token(token):
+            def _build():
+                r = connectors.setup_from_config_token(token)
+                if r.get("ok"):
+                    who = r.get("who") or ""
+                    self.announce("Slack is connected"
+                                  + (f", I can see you as {who}." if who else ".")
+                                  + " Try: go to my <channel> group in slack "
+                                    "and read the chat.")
+                else:
+                    self.announce("Slack setup stopped: " + r.get("error", "") + ".")
+            import threading
+            threading.Thread(target=_build, daemon=True).start()
+            return self._say("That's a configuration token, which is even "
+                             "better: I'll build the Slack app myself with the "
+                             "right permissions. A browser tab is opening now. "
+                             "Press Allow and you're done.")
         if not connectors.save_secret(f"{which}_token", token):
             return self._say(f"I couldn't save the {which} token.")
         # Verify against the BUILT-IN connector (the token path), not the MCP

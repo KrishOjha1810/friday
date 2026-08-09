@@ -20,10 +20,14 @@ Design rules, all of them learned the hard way elsewhere in this codebase:
 
 import json
 import os
+import secrets
 import subprocess
+import threading
 import time
 import urllib.parse
 import urllib.request
+import webbrowser
+from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
 CONF_DIR = Path.home() / ".friday"
@@ -221,13 +225,17 @@ class Slack:
         if not t:
             return "there's no token saved yet"
         if t.startswith("xoxe.xoxp-") or t.startswith("xoxe-"):
-            # These DO authenticate, but they rotate, so the usual reason one
-            # stops working is age rather than shape. Say that, instead of
-            # sending you to change settings that were never the problem.
-            return ("that token has expired. It's a rotating one (Token "
-                    "Rotation is on for your app), so it needs refreshing: "
-                    "reinstall the app under OAuth & Permissions and paste me "
-                    "the new User OAuth Token")
+            # Guessing "expired" from the prefix was wrong twice: these are
+            # usually App Configuration Tokens, which are perfectly valid and
+            # simply cannot read messages. Ask Slack which it is.
+            if is_config_token(t):
+                return ("that's an App Configuration Token, which can build "
+                        "apps but not read messages. Say \"connect slack\" and "
+                        "paste it again and I'll use it to set everything up "
+                        "for you")
+            return ("that token is no longer valid. It's a rotating one, so it "
+                    "needs refreshing: say \"connect slack\" and I'll take it "
+                    "from there")
         if t.startswith("xoxb-"):
             return ("that's a BOT token. I need the User OAuth Token (xoxp-) so "
                     "I can see what you see, including your DMs")
@@ -278,13 +286,13 @@ class Slack:
             if why:
                 return ("Right now " + why + ".\n"
                         "Your apps are at https://api.slack.com/apps")
-        return ("Three steps:\n"
-                "1. Open this and press Create:\n" + self.MANIFEST_URL + "\n"
-                "2. Then OAuth & Permissions, Install to Workspace, and copy "
-                "the User OAuth Token (it starts with xoxp-).\n"
-                "3. TYPE it into the box here (don't say it out loud, a token "
-                "can't survive being dictated). Just paste the token on its "
-                "own, I'll work out the rest.")
+        return ("Two steps, and I do the rest:\n"
+                "1. Open https://api.slack.com/apps and press Generate Token "
+                "(top of the page, under App Configuration Tokens). Copy it.\n"
+                "2. Paste it here on its own. I'll build the app with the right "
+                "permissions, then open one page for you to press Allow.\n"
+                "Type it rather than saying it out loud; a token can't survive "
+                "being dictated.")
 
     def setup_link(self) -> str:
         return self.MANIFEST_URL
@@ -420,6 +428,218 @@ class Slack:
                  "when": float(m.get("ts") or 0)}
                 for m in (d.get("messages") or [])]
 
+
+# ------------------------------------------------------- Slack self-setup ----
+# Connecting Slack by hand takes six screens: create an app, find User Token
+# Scopes, add ten of them one at a time, install, find the token, copy it
+# without picking up whitespace. Every one of those steps is a place to get it
+# wrong, and getting it wrong looked identical to every other way of getting it
+# wrong.
+#
+# Slack has one credential that makes all of that unnecessary: an App
+# Configuration Token, which is generated with a single button at the top of
+# api.slack.com/apps and can create apps. Given one, Friday builds the app
+# itself with exactly the read scopes it needs, then runs the ordinary OAuth
+# click. Two actions for you: generate a token, press Allow.
+SCOPE_LIST = ["search:read", "channels:history", "groups:history", "im:history",
+              "mpim:history", "channels:read", "groups:read", "im:read",
+              "mpim:read", "users:read"]
+
+SETUP_PORT = 7391
+CONFIG_TOKEN_SCOPES = "app_configurations"
+
+
+def is_config_token(token: str) -> bool:
+    """Whether this is an App Configuration Token rather than a workspace one.
+
+    Both start with xoxe.xoxp-, so the prefix cannot tell them apart, and a
+    config token passes auth.test happily while being unable to read a single
+    message. Asking Slack which scopes it carries is the only honest test, and
+    Slack returns them in a response header."""
+    if not token:
+        return False
+    try:
+        req = urllib.request.Request(
+            "https://slack.com/api/auth.test",
+            headers={"Authorization": "Bearer " + token}, method="POST")
+        with urllib.request.urlopen(req, timeout=TIMEOUT) as r:
+            return CONFIG_TOKEN_SCOPES in (r.headers.get("x-oauth-scopes") or "")
+    except Exception:
+        return False
+
+
+def _post(method: str, token: str, body: dict) -> dict:
+    try:
+        req = urllib.request.Request(
+            "https://slack.com/api/" + method,
+            data=json.dumps(body).encode(),
+            headers={"Authorization": "Bearer " + token,
+                     "Content-Type": "application/json; charset=utf-8"})
+        with urllib.request.urlopen(req, timeout=20) as r:
+            return json.loads(r.read())
+    except Exception as e:
+        return {"ok": False, "error": str(e)[:120]}
+
+
+def _form(method: str, body: dict) -> dict:
+    try:
+        req = urllib.request.Request(
+            "https://slack.com/api/" + method,
+            data=urllib.parse.urlencode(body).encode(),
+            headers={"Content-Type": "application/x-www-form-urlencoded"})
+        with urllib.request.urlopen(req, timeout=20) as r:
+            return json.loads(r.read())
+    except Exception as e:
+        return {"ok": False, "error": str(e)[:120]}
+
+
+def _manifest(redirect: str) -> str:
+    return json.dumps({
+        "display_information": {
+            "name": "Friday",
+            "description": "Reads your Slack for you. Read-only.",
+            "background_color": "#0b0d12"},
+        "oauth_config": {
+            "redirect_urls": [redirect],
+            # USER scopes only, and every one is a read. There is no chat:write
+            # anywhere in here, so Friday physically cannot post as you.
+            "scopes": {"user": SCOPE_LIST}},
+        "settings": {"org_deploy_enabled": False,
+                     "socket_mode_enabled": False,
+                     # Rotation off, so the result is a plain xoxp- token that
+                     # keeps working instead of expiring in twelve hours.
+                     "token_rotation_enabled": False}})
+
+
+class _Catch(BaseHTTPRequestHandler):
+    code = None
+    state = ""
+
+    def do_GET(self):
+        q = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
+        got = (q.get("state") or [""])[0]
+        if got and got == _Catch.state:
+            _Catch.code = (q.get("code") or [""])[0]
+        self.send_response(200)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.end_headers()
+        body = ("<h2>Slack connected.</h2><p>Close this tab and go back to "
+                "Friday.</p>" if _Catch.code else
+                "<h2>That didn't match.</h2><p>Go back to Friday and try "
+                "connecting again.</p>")
+        self.wfile.write(("<html><body style='font:16px system-ui;padding:40px;"
+                          "background:#0b0d12;color:#e6e8ef'>" + body +
+                          "</body></html>").encode())
+
+    def log_message(self, *a):
+        pass
+
+
+def setup_from_config_token(config_token: str, timeout: float = 600) -> dict:
+    """Build the app, then take you through one click. Returns {'ok'} or {'error'}.
+
+    BLOCKS while waiting for you to approve in the browser, so a caller on a
+    request path must run it in a thread: a four-minute HTTP request is
+    indistinguishable from a hang."""
+    redirect = f"http://localhost:{SETUP_PORT}/slack/callback"
+    old_app = app_config().get("app_id")
+    if old_app:
+        # Tidy up the one from the last attempt rather than leaving a trail of
+        # identical half-finished apps behind.
+        _post("apps.manifest.delete", config_token, {"app_id": old_app})
+    made = _post("apps.manifest.create", config_token,
+                 {"manifest": _manifest(redirect)})
+    if not made.get("ok"):
+        err = str(made.get("error") or "")
+        if err in ("invalid_auth", "not_authed", "token_expired"):
+            return {"error": "that configuration token has expired (they last "
+                             "12 hours). Generate a fresh one at "
+                             "https://api.slack.com/apps and paste it again"}
+        return {"error": "Slack wouldn't create the app: " + (err or "unknown")}
+
+    creds = made.get("credentials") or {}
+    cid, secret = creds.get("client_id", ""), creds.get("client_secret", "")
+    app_id = made.get("app_id", "")
+    if not (cid and secret):
+        return {"error": "Slack made the app but returned no credentials"}
+    # Keep the secret too. Without it, a click you did not get to in time meant
+    # generating a new configuration token AND creating a second app, which is
+    # how one workspace ends up with four apps called Friday.
+    save_secret("slack_app", json.dumps({"app_id": app_id, "client_id": cid,
+                                         "client_secret": secret}))
+
+    return _approve(cid, secret, app_id, timeout)
+
+
+def app_config() -> dict:
+    """The app Friday built for you last time, if it did."""
+    try:
+        return json.loads(_secret("slack_app") or "{}")
+    except Exception:
+        return {}
+
+
+def can_resume() -> bool:
+    """Whether the Allow click can be retried with nothing new from you."""
+    d = app_config()
+    return bool(d.get("client_id") and d.get("client_secret"))
+
+
+def resume_setup(timeout: float = 600) -> dict:
+    """Re-open the Allow page for the app Friday already built.
+
+    The click is the one step Friday cannot do for you, so missing it must cost
+    nothing: no new token, no second app, just the page again."""
+    d = app_config()
+    if not can_resume():
+        return {"error": "I haven't built your Slack app yet"}
+    return _approve(d["client_id"], d["client_secret"], d.get("app_id", ""),
+                    timeout)
+
+
+def _approve(cid: str, secret: str, app_id: str, timeout: float) -> dict:
+    """Open Slack's Allow page, catch the redirect, keep the user token."""
+    redirect = f"http://localhost:{SETUP_PORT}/slack/callback"
+    _Catch.code, _Catch.state = None, secrets.token_urlsafe(16)
+    try:
+        srv = HTTPServer(("127.0.0.1", SETUP_PORT), _Catch)
+    except OSError as e:
+        return {"error": f"port {SETUP_PORT} is busy, so I can't catch the "
+                         f"approval ({e})"}
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        webbrowser.open("https://slack.com/oauth/v2/authorize?" +
+                        urllib.parse.urlencode({
+                            "client_id": cid,
+                            "user_scope": ",".join(SCOPE_LIST),
+                            "redirect_uri": redirect,
+                            "state": _Catch.state}))
+        t0 = time.time()
+        while time.time() - t0 < timeout and not _Catch.code:
+            time.sleep(0.4)
+    finally:
+        srv.shutdown()
+    if not _Catch.code:
+        return {"error": "nobody pressed Allow, so nothing changed"}
+
+    got = _form("oauth.v2.access", {"client_id": cid, "client_secret": secret,
+                                    "code": _Catch.code,
+                                    "redirect_uri": redirect})
+    if not got.get("ok"):
+        return {"error": "Slack refused the final exchange: "
+                         + str(got.get("error") or "unknown")}
+    tok = ((got.get("authed_user") or {}).get("access_token") or "")
+    if not tok.startswith("xoxp-"):
+        return {"error": "Slack returned no user token, only a bot one"}
+    save_secret("slack_token", tok)
+
+    sl = REGISTRY.get("slack")
+    if sl is not None:
+        sl._checked = {}                 # the old verdict is about the old token
+        if not sl.ready():
+            return {"error": "the new token still can't read: " + sl.last_error()}
+        return {"ok": True, "who": sl.whoami(), "app_id": app_id}
+    return {"ok": True, "who": "", "app_id": app_id}
 
 # ----------------------------------------------------------------- Gmail ----
 class Gmail:

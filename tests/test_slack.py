@@ -101,6 +101,32 @@ def test_the_fix_it_message_says_what_to_change_not_to_start_over():
     assert "read permission" in hint, hint
 
 
+def test_a_missed_click_can_be_retried_with_nothing_new():
+    """The Allow click is the one step Friday cannot do for you, so missing it
+    must cost nothing. It used to mean generating another configuration token
+    and creating a second app, which is how a workspace ends up with four apps
+    all called Friday."""
+    saved = connectors._secret
+    try:
+        connectors._secret = lambda n: (
+            '{"app_id": "A1", "client_id": "c", "client_secret": "s"}'
+            if n == "slack_app" else "")
+        assert connectors.can_resume() is True
+        connectors._secret = lambda n: '{"app_id": "A1", "client_id": "c"}'
+        assert connectors.can_resume() is False, "no secret means no retry"
+    finally:
+        connectors._secret = saved
+
+
+def test_the_instructions_describe_the_short_path():
+    """Friday used to hand out the six-screen version (create an app, add ten
+    scopes by hand, install, copy a token) after it had become able to do all of
+    that itself."""
+    hint = connectors.Slack().setup_hint()
+    assert "Generate Token" in hint, hint
+    assert "scopes" not in hint.lower(), "still telling you to add scopes"
+
+
 class _Fake:
     def __init__(self, ok):
         self._ok = ok
