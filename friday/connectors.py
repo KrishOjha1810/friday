@@ -20,6 +20,7 @@ Design rules, all of them learned the hard way elsewhere in this codebase:
 
 import json
 import os
+import re
 import secrets
 import subprocess
 import threading
@@ -437,7 +438,44 @@ class Slack:
                  "when": float(m.get("ts") or 0), "ts": m.get("ts", "")}
                 for m in (d.get("messages") or []) if m.get("text")]
         rows.reverse()
-        return self._name_users(rows)
+        return self._unmarkup(self._name_users(rows))
+
+    # Slack sends markup, not prose: <@U08MBL3RPL2> for a person, <#C1|name>
+    # for a channel, <url|label> for a link. Left alone it reaches the summary
+    # and then the speaker, where a user id is read out one character at a time.
+    _MENTION = re.compile(r"<@([UW][A-Z0-9]+)>")
+    _CHANREF = re.compile(r"<#C[A-Z0-9]+\|([^>]*)>")
+    _LINK = re.compile(r"<(https?://[^|>]+)(?:\|([^>]*))?>")
+
+    def _unmarkup(self, rows: list) -> list:
+        """Turn Slack's markup into something a person (or a voice) can follow."""
+        ids = {m for r in rows for m in self._MENTION.findall(r.get("text", ""))}
+        names = self._user_names(ids)
+        for r in rows:
+            t = r.get("text", "")
+            t = self._MENTION.sub(
+                lambda m: "@" + names.get(m.group(1), "someone"), t)
+            t = self._CHANREF.sub(lambda m: "#" + m.group(1), t)
+            t = self._LINK.sub(lambda m: m.group(2) or m.group(1), t)
+            r["text"] = t.replace("&amp;", "&").replace("&lt;", "<") \
+                         .replace("&gt;", ">")
+        return rows
+
+    _NAME_CACHE = {}
+
+    def _user_names(self, ids) -> dict:
+        out = {}
+        for uid in ids:
+            if uid in self._NAME_CACHE:
+                out[uid] = self._NAME_CACHE[uid]
+                continue
+            d = self._call("users.info", user=uid)
+            u = (d.get("user") or {}) if d.get("ok") else {}
+            nm = u.get("real_name") or u.get("name") or ""
+            if nm:
+                self._NAME_CACHE[uid] = nm
+                out[uid] = nm
+        return out
 
     def _name_users(self, rows: list) -> list:
         """Swap user ids for real names: 'U03AB' means nothing spoken aloud."""

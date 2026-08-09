@@ -156,6 +156,35 @@ def test_a_name_that_matches_nothing_is_not_forced_onto_a_channel():
     assert sl.closest_channel("alphc", rows) == {}, "acted on a near-tie"
 
 
+def test_slack_markup_never_reaches_you_raw():
+    """Slack sends <@U08MBL3RPL2>, not a name. Left alone it lands in the
+    summary and then the speaker, which reads a user id out one character at a
+    time."""
+    sl = connectors.Slack()
+    sl._user_names = lambda ids: {"U08MBL3RPL2": "Krish Ojha"}
+    rows = [{"text": "Hey <@U08MBL3RPL2> see <#C1ABC|general> "
+                     "and <https://x.com|the doc> &amp; reply"}]
+    out = sl._unmarkup(rows)[0]["text"]
+    assert "U08MBL3RPL2" not in out, out
+    assert "@Krish Ojha" in out and "#general" in out and "the doc" in out, out
+    assert "&amp;" not in out, out
+
+
+def test_a_named_question_is_answered_not_just_summarised():
+    """Asked what one person said, returning the same general summary is a way
+    of not listening. The question has to reach the summariser."""
+    from friday.conversation import Friday
+    seen = {}
+    f = Friday()
+    f._summarise_thread = lambda convo, question="": seen.setdefault(
+        "q", question) or "ok"
+    sl = connectors.get("slack")
+    if not sl.ready():
+        return                      # nothing connected in this environment
+    f._read_channel_named(sl.channel_names(1)[0], "what did sam say")
+    assert "sam" in (seen.get("q") or "").lower(), seen
+
+
 def test_the_suite_cannot_touch_your_real_credentials():
     """A test wrote a fake token over ~/.friday/slack_token and deleted it in
     cleanup, so every run of the suite destroyed a live Slack credential that

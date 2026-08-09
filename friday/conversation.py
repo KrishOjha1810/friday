@@ -108,6 +108,26 @@ _READCHAN_RE = re.compile(
     r"|\b(?:group|channel)\s+(?:called\s+|named\s+)?#?([\w.\-]+)\b"
     r"|\bslack\b[^.]*?#?([\w.\-]+(?:\s+[\w.\-]+){0,3}?)\s+(?:group|channel)\b",
     re.I)
+# You do not always say the word "channel". "Can you read about my chat from
+# moon shot?" names a source with "from", and requiring the literal word
+# channel or group meant that sentence never reached Slack at all: it fell
+# through to the model, which invented "I don't have access to personal chat
+# histories" while Friday was connected and could read it.
+# Saying any of these IS asking to be caught up, with no need to also name a
+# noun: "what was discussed in X" has no word like chat or messages in it.
+_TALKREAD_RE = re.compile(
+    r"\b(?:what (?:was|were|got) (?:talked|discussed|said|asked)|"
+    r"what (?:did|does)\s+[\w']+\s+(?:say|ask|want)|"
+    r"catch me up|what happened|what'?s new)\b", re.I)
+# These are about reading, but could be about anything, so they need a subject.
+_READVERB_RE = re.compile(r"\b(?:read|summar(?:ise|ize)|go through)\b", re.I)
+_SUBJECT_RE = re.compile(
+    r"\b(?:chat|chats|messages?|conversation|thread|dms?|talk)\b", re.I)
+# The source of it: "from moon shot", "in moonshot".
+_SOURCE_RE = re.compile(
+    r"\b(?:from|in|on)\s+(?:my\s+|the\s+|our\s+)?"
+    r"([\w.\-]+(?:\s+[\w.\-]+){0,2})", re.I)
+
 # Words that ride along with a spoken channel name but are never part of it.
 # "read the chat in slack moonshot group" otherwise yields the channel name
 # "chat in slack moonshot".
@@ -223,6 +243,18 @@ def classify(text: str) -> tuple:
         name = _clean_channel(next((g for g in m.groups() if g), ""))
         if name:
             return READ_CHANNEL, {"channel": name}
+    # "read my chat from X" / "what was discussed in X": a read verb, something
+    # to read, and a named source, with no need to say the word channel.
+    if _TALKREAD_RE.search(t) or (_READVERB_RE.search(t)
+                                  and _SUBJECT_RE.search(t)):
+        # Hand over the sentence as well as the best guess at the name. Pulling
+        # the name out by grammar picks the wrong preposition often enough that
+        # the sentence itself has to stay available: the real channel list is a
+        # far better anchor than the shape of the request.
+        srcs = [_clean_channel(m.group(1)) for m in _SOURCE_RE.finditer(t)]
+        srcs = [x for x in srcs if x]
+        return READ_CHANNEL, {"channel": srcs[-1] if srcs else "",
+                              "said": t}
     if _JIRA_RE.search(t):
         return JIRA, {}
     m = _MAIL_RE.search(t)
@@ -374,7 +406,8 @@ class Friday:
         if intent == CONNECT:
             return self._connect(payload["which"], payload["token"])
         if intent == READ_CHANNEL:
-            return self._read_channel(payload["channel"])
+            return self._read_channel(payload["channel"],
+                                      payload.get("said", ""))
         if intent == ENGINE:
             return self._engine()
         if intent == DID_WE:
@@ -650,7 +683,29 @@ class Friday:
                 for n in notes))
         return self._say("\n\n".join(bits))
 
-    def _read_channel(self, name: str) -> dict:
+    def _read_channel(self, name: str, said: str = "") -> dict:
+        # Look for a real channel name anywhere in what was actually said,
+        # before falling back to whatever the grammar suggested.
+        if said:
+            sl = connectors.get("slack")
+            if sl.ready() and hasattr(sl, "channel_names"):
+                found = nearest.best_window(said, sl.channel_names(40))
+                if found:
+                    return self._read_channel_named(found, said)
+        if not (name or "").strip():
+            sl = connectors.get("slack")
+            if not sl.ready():
+                return self._say("Slack isn't connected yet. " + sl.setup_hint())
+            names = (sl.channel_names(40) if hasattr(sl, "channel_names") else [])
+            if names:
+                return self._offer(
+                    "Which one? I can see: " + ", ".join("#" + n for n in names[:8]),
+                    yes=lambda: self._read_channel(names[0]),
+                    again=lambda t: self._read_channel(t))
+            return self._say("Which channel?")
+        return self._read_channel_named(name, said)
+
+    def _read_channel_named(self, name: str, said: str = "") -> dict:
         """Read an actual channel and tell you what is being asked.
 
         This is the front of the chain: read the thread, then 'did we ever talk
@@ -676,7 +731,7 @@ class Friday:
                 return self._offer(
                     f"I don't have a channel called {name}. Did you mean "
                     f"#{guess}?",
-                    yes=lambda g=guess: self._read_channel(g),
+                    yes=lambda g=guess, q=said: self._read_channel_named(g, q),
                     again=lambda t: self._read_channel(t))
             if names:
                 return self._say(f"I don't have a channel called {name}. What I "
@@ -690,18 +745,41 @@ class Friday:
             return self._say(f"#{ch['name']} is empty.")
         self._last_slack = rows
         convo = "\n".join(f"{r['who']}: {r['text']}" for r in rows[-12:])
-        summary = self._summarise_thread(convo)
-        return self._say(f"In #{ch['name']}:\n{summary}")
+        summary = self._summarise_thread(convo, said)
+        # Say WHICH messages were read. Asked what was discussed yesterday and
+        # given a summary with no timeframe, you cannot tell whether Friday
+        # honoured "yesterday" or quietly ignored it.
+        span = ""
+        stamps = [r.get("when") or 0 for r in rows if r.get("when")]
+        if stamps:
+            span = (f" (last {len(rows)} messages, "
+                    f"{memory.ago(min(stamps))} to {memory.ago(max(stamps))})")
+        return self._say(f"In #{ch['name']}{span}:\n{summary}")
 
-    def _summarise_thread(self, convo: str) -> str:
-        """What is actually being ASKED, in a sentence or two."""
+    def _summarise_thread(self, convo: str, question: str = "") -> str:
+        """What is actually being ASKED, in a sentence or two.
+
+        If you asked something specific ("what did Sam say"), answer THAT
+        from the thread. Returning the same general summary whatever was asked
+        is a way of not listening."""
         if not (engine.AVAILABLE and engine.brain.up()):
             return convo[:600]
+        # Names, never he or she: these are real colleagues and the messages do
+        # not say anyone's pronouns, so guessing gets it wrong about a person.
+        RULES = (" Refer to people by name, and never use he, she, his or her."
+                 " Two or three short sentences, no lists.")
+        task = ("Summarise this chat for someone who has not read it. Say who is "
+                "asking what, and what they need. Only use what is in the "
+                "messages." + RULES)
+        q = (question or "").strip()
+        if q and len(q.split()) > 2:
+            task = ("Answer this question using ONLY these messages: " + q[:160]
+                    + "\nAnswer it directly. If the messages genuinely do not "
+                      "cover it, say only that and summarise what they do say. "
+                      "Never do both: do not open by denying something you then "
+                      "answer." + RULES)
         out = engine.brain._chat(
-            [{"role": "system", "content":
-              "Summarise this chat for someone who has not read it. Say who is "
-              "asking what, and what they need. Two or three short sentences. "
-              "Only use what is in the messages."},
+            [{"role": "system", "content": task},
              {"role": "user", "content": convo[:4000]}],
             timeout=engine.brain.TIMEOUT_SLOW, max_tokens=180)
         return engine.brain._clean(out) if out else convo[:600]
@@ -1099,6 +1177,21 @@ class Friday:
         The model never answers about the machine from its own head: the live
         facts are handed to it, and anything outside its abilities must be an
         honest 'I can't do that yet' rather than an invention."""
+        # Last line of defence against the bluff. If you mention messages AND
+        # name a channel that really exists, this is a Slack request however it
+        # was phrased, and it must not reach a model that will answer "I don't
+        # have access to personal chat histories" about a channel Friday can
+        # read. Both conditions are required, so "moonshot is annoying" stays
+        # ordinary conversation.
+        if _SUBJECT_RE.search(text):
+            try:
+                sl = connectors.get("slack")
+                if sl.ready() and hasattr(sl, "channel_names"):
+                    found = nearest.best_window(text, sl.channel_names(40))
+                    if found:
+                        return self._read_channel_named(found, text)
+            except Exception:
+                pass
         if not engine.AVAILABLE or not engine.brain.model_ready():
             return self._say("I'm here, but my brain isn't loaded yet.")
         sessions = self._session_facts() or "none"
