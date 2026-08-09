@@ -29,7 +29,8 @@ import re
 import time
 from pathlib import Path
 
-from . import actions, connectors, engine, memory, nearest, replies
+from . import (actions, connectors, engine, memory, nearest, replies,
+               watchtower)
 
 # What kind of thing the user just said.
 ASK_FLEET = "fleet"        # "what's running", "who needs me"
@@ -57,6 +58,8 @@ OPEN_FOUND = "openfound"   # "open that one" after a search
 NEW_SESSION = "newsession" # "start a new session on this"
 ENGINE = "engine"          # "are you using claude for this?"
 ASK_ALL = "askall"         # "ask everyone what they're working on"
+MORE = "more"              # "say more", "what exactly did it say"
+WHO = "who"                # "who am I talking to?"
 WATCH = "watch"            # "tell me when voicebridge is done"
 STOP = "stop"              # "stop voicebridge"
 CHAT = "chat"              # anything else: a real conversation
@@ -64,6 +67,17 @@ CHAT = "chat"              # anything else: a real conversation
 # Conducting more than one agent at a time. Asking each of five sessions the
 # same question by hand, then going to five windows for the answers, is the work
 # Friday is supposed to remove.
+# A summary you cannot check is a summary you have to trust. These give you the
+# agent's own words, and tell you who a bare reply would reach.
+_MORE_RE = re.compile(
+    r"\b(?:say|tell me)\s+more\b|\bthe\s+(?:full|whole|exact)\s+"
+    r"(?:thing|version|message|reply)\b|\bwhat\s+exactly\s+did\s+"
+    r"(?:it|he|she|they|\S+)\s+say\b|\bin\s+full\b|\bverbatim\b", re.I)
+_WHO_RE = re.compile(
+    r"\bwho\s+am\s+i\s+(?:talking|speaking)\s+to\b|"
+    r"\bwhich\s+(?:one|session)\s+(?:am\s+i|are\s+we)\b|"
+    r"\bwho'?s?\s+(?:the\s+)?target\b", re.I)
+
 _ASKALL_RE = re.compile(
     r"\b(?:ask|tell)\s+(?:them\s+all|everyone|everybody|all(?:\s+the)?"
     r"(?:\s+sessions?|\s+agents?)?|each\s+(?:session|agent|one))\b\s*"
@@ -299,6 +313,10 @@ def classify(text: str) -> tuple:
         return CONNECT, {"which": m.group(1), "token": m.group(2) or ""}
     if _ENGINE_RE.search(t):
         return ENGINE, {}
+    if _WHO_RE.search(t):
+        return WHO, {}
+    if _MORE_RE.search(t):
+        return MORE, {}
     m = _ASKALL_RE.search(t)
     if m:
         return ASK_ALL, {"joiner": (m.group(1) or "").lower(),
@@ -422,6 +440,11 @@ class Friday:
         # when it's done" are how people speak once a session is in play, and
         # making you say the name every time is making you do the bookkeeping.
         self.target = ""
+        # One place watches every session and reports what it said, so nothing
+        # is announced twice and nothing is missed.
+        self.watch = watchtower.Watchtower(
+            self.announce,
+            log=(engine.core.log if engine.AVAILABLE else None))
         self.history = []          # [{role, text, ts, kind}]
         self.focus = (engine.routing.new_focus()
                       if engine.AVAILABLE else {"mentioned": [], "ts": 0})
@@ -516,6 +539,10 @@ class Friday:
             return self._slack(payload.get("query", ""))
         if intent == OPEN:
             return self._propose_open(payload["name"])
+        if intent == WHO:
+            return self._who()
+        if intent == MORE:
+            return self._more()
         if intent == ASK_ALL:
             return self._ask_all(payload["message"], payload.get("joiner", ""))
         if intent == WATCH:
@@ -604,6 +631,38 @@ class Friday:
         return ("Answer in one or two sentences, no tool calls if you can help "
                 "it: " + q + "?" if not q.endswith("?") else q)
 
+    def _who(self) -> dict:
+        """Who a bare reply would reach. Guessing wrong sends your words to the
+        wrong agent, so this has to be askable."""
+        if not self.target:
+            names = self._names_of_sessions()
+            return self._say("Nobody in particular yet. " +
+                             ("Running: " + ", ".join(names[:8]) if names
+                              else "Nothing is running."))
+        return self._say(f"{self.target}. Anything you say without naming a "
+                         f"session goes there.")
+
+    def _more(self) -> dict:
+        """The agent's own words, unsummarised.
+
+        A summary is only useful if you can check it, and the one time you need
+        the exact wording is the one time a summary has dropped the detail that
+        mattered."""
+        if not self.target:
+            return self._say("More about what? Nobody has said anything yet.")
+        sid = ""
+        try:
+            sid = next((r["sid"] for r in engine.fleet.snapshot().values()
+                        if (r.get("label") or "") == self.target), "")
+        except Exception:
+            sid = ""
+        full = self.watch.last.get(sid, "")
+        if not full:
+            return self._say(f"I don't have {self.target}'s exact words. Say "
+                             f"\"open {self.target}\" and I'll bring the window "
+                             f"up.")
+        return self._say(f"{self.target}, in full:\n{full}")
+
     def _ask_all(self, tail: str, joiner: str = "") -> dict:
         """Put one question to every running session and collect the answers.
 
@@ -627,7 +686,11 @@ class Friday:
                 asked.append(r)
         if not asked:
             return self._say("I couldn't reach any of them.")
-        self._collect(asked, marks)
+        if self.watch.running:
+            for r in asked:
+                self.watch.expect(r["sid"])
+        else:
+            self._collect(asked, marks)
         names = ", ".join(r.get("label", "?") for r in asked)
         missed = [r.get("label", "?") for r in rows if r not in asked]
         note = (" I couldn't reach " + ", ".join(missed) + ".") if missed else ""
@@ -1432,7 +1495,12 @@ class Friday:
                         mark = ""
                 ok = actions.send_to_session(act["sid"], act["message"])
                 if ok and act.get("await") and act.get("path"):
-                    self._bring_back(act["path"], mark, label)
+                    # The watchtower is already reading this session, so let it
+                    # do the reporting. Two watchers means saying it twice.
+                    if self.watch.running:
+                        self.watch.expect(act["sid"])
+                    else:
+                        self._bring_back(act["path"], mark, label)
                     return self._say(f"Asked {label}. I'll tell you what it "
                                      f"says.",
                                      action={"kind": "tell",
@@ -1466,6 +1534,11 @@ class Friday:
         "watch a session and tell you when it finishes "
         "(say: tell me when it is done)",
         "stop what a session is doing (say: stop <name>)",
+        "tell you, unprompted, whenever any session replies, summarised, with "
+        "the ones waiting on you first",
+        "give you a session's exact words instead of the summary (say: say more)",
+        "tell you which session a bare reply would reach (say: who am I "
+        "talking to)",
         "take your answer to a session that asked you a question",
         "go quiet, or start speaking again",
     ]
@@ -1744,6 +1817,11 @@ class Friday:
                 self.focus = engine.routing.note_spoken(self.focus, items)
             except Exception:
                 pass
+        # Whoever Friday just reported on is who you are talking to. Otherwise
+        # "ask it to do X" after an announcement means nothing, and you are back
+        # to naming a session you were just told about.
+        if items and len(items) == 1:
+            self.target = items[0].get("label") or self.target
         return self.add("friday", text, kind="proactive")
 
 

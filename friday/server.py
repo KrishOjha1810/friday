@@ -313,6 +313,13 @@ def run(port: int = PORT, expose: bool = False):
     LOCAL_ONLY = not expose
     host = "0.0.0.0" if expose else HOST
     threading.Thread(target=supervisor_loop, daemon=True).start()
+    # Watch what every session SAYS, not just when one needs you. Without this,
+    # an agent finishes something and you only find out by opening its window.
+    # It must PUSH as well as record: an announcement that only lands in history
+    # is one you see the next time you reload, which is not being told.
+    _friday.watch.announce = lambda text, items=None: _push(
+        {"kind": "message", "message": _friday.announce(text, items)})
+    _friday.watch.start()
     srv = ThreadingHTTPServer((host, port), Handler)
     if expose:
         print(f"Friday is listening on http://{host}:{port}?k={SECRET}")
