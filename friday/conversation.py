@@ -127,7 +127,37 @@ class Friday:
         if intent in (CONFIRM, CANCEL):
             return self._say("Nothing was waiting on you." if intent == CONFIRM
                              else "Okay.")
+
+        # An agent asked you something a moment ago and this reads like the
+        # answer: send it there rather than treating it as small talk. This is
+        # the whole point of a supervisor, you answer once, in the thread, and
+        # it reaches the right session.
+        routed = self._maybe_route_answer(text)
+        if routed is not None:
+            return routed
         return self._chat(text)
+
+    def _maybe_route_answer(self, text: str):
+        """Return a reply if this belongs to a waiting agent, else None."""
+        if not engine.AVAILABLE:
+            return None
+        try:
+            r = engine.routing.route(text, self.focus, active_sid="",
+                                     find=self._find)
+        except Exception:
+            return None
+        if r.get("ask"):
+            # Two agents are waiting: ask which, never guess. A wrong answer
+            # delivered to the wrong agent is a wrong instruction it will act on.
+            return self._say(r["ask"])
+        sid = r.get("sid")
+        if not sid or "answering" not in (r.get("why") or ""):
+            return None
+        label = r.get("label") or "it"
+        ok = actions.send_to_session(sid, text)
+        return self._say(f"Told {label}." if ok
+                         else f"I couldn't reach {label}.",
+                         action={"kind": "tell", "sid": sid})
 
     # ---- what it knows ----------------------------------------------------
     def fleet_summary(self) -> str:
@@ -271,10 +301,19 @@ class Friday:
         return {"reply": text, "needs_confirm": needs_confirm,
                 "action": action or {}}
 
-    def announce(self, text: str) -> dict:
+    def announce(self, text: str, items: list = None) -> dict:
         """Something Friday brings up on its own (the attention engine decided
         it was worth it). Marked distinctly so the UI can show it as Friday
-        starting the conversation, not answering."""
+        starting the conversation, not answering.
+
+        `items` are the underlying events. Remembering which of them are
+        WAITING on an answer is what lets you reply "use the redis one" and
+        have it reach the agent that asked, instead of being chat."""
+        if items and engine.AVAILABLE:
+            try:
+                self.focus = engine.routing.note_spoken(self.focus, items)
+            except Exception:
+                pass
         return self.add("friday", text, kind="proactive")
 
 

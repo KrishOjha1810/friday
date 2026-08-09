@@ -178,6 +178,66 @@ def test_an_ambiguous_name_is_not_guessed():
     assert hit is None or hit.get("label") in ("jobhunt", "api")
 
 
+# ---- answering an agent from the thread -----------------------------------
+def _with_routing():
+    """Use the real routing module against the fake fleet."""
+    import sys
+    sys.path.insert(0, "/Users/krishojha/voicebridge")
+    from vb import routing
+    C.engine.routing = routing
+    return routing
+
+
+def test_a_bare_answer_reaches_the_agent_that_asked():
+    """Friday says 'api is asking which token store', you say 'use redis', and
+    it must reach api. Having to retype the session name defeats the point."""
+    _fake_engine(); routing = _with_routing()
+    sent = {}
+    orig = C.actions.send_to_session
+    try:
+        C.actions.send_to_session = lambda sid, msg: sent.update(sid=sid, msg=msg) or True
+        f = Friday()
+        f.announce("api is asking: which token store?",
+                   items=[{"sid": "s2", "label": "api", "kind": "blocked"}])
+        r = f.handle("use the redis one")
+        assert sent.get("sid") == "s2", "the answer never reached api"
+        assert "told api" in r["reply"].lower()
+    finally:
+        C.actions.send_to_session = orig
+
+
+def test_ordinary_conversation_is_not_mistaken_for_an_answer():
+    _fake_engine(); _with_routing()
+    sent = {}
+    orig = C.actions.send_to_session
+    try:
+        C.actions.send_to_session = lambda sid, msg: sent.update(sid=sid) or True
+        f = Friday()
+        f.announce("api is asking: which token store?",
+                   items=[{"sid": "s2", "label": "api", "kind": "blocked"}])
+        f.handle("what's running?")          # a command, not an answer
+        assert not sent
+    finally:
+        C.actions.send_to_session = orig
+
+
+def test_two_waiting_agents_are_never_guessed_between():
+    _fake_engine(); _with_routing()
+    sent = {}
+    orig = C.actions.send_to_session
+    try:
+        C.actions.send_to_session = lambda sid, msg: sent.update(sid=sid) or True
+        f = Friday()
+        f.announce("two agents need you",
+                   items=[{"sid": "s1", "label": "jobhunt", "kind": "blocked"},
+                          {"sid": "s2", "label": "api", "kind": "blocked"}])
+        r = f.handle("use the redis one")
+        assert not sent, "guessed a target instead of asking"
+        assert "which" in r["reply"].lower()
+    finally:
+        C.actions.send_to_session = orig
+
+
 # ---- what it knows --------------------------------------------------------
 def test_it_answers_what_is_going_on_in_plain_english():
     _fake_engine()

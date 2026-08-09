@@ -249,7 +249,9 @@ def supervisor_loop():
             engine.attention.claim_supervisor("friday")
             said = sup.tick(state)
             for text in said:
-                msg = _friday.announce(text)
+                # Hand the underlying events along, so an unqualified reply in
+                # the thread can reach whichever agent actually asked.
+                msg = _friday.announce(text, items=state.get("_last_spoken"))
                 _push({"kind": "message", "message": msg})
         except Exception as e:
             engine.core.log(f"friday supervisor: {e}")
