@@ -29,7 +29,7 @@ import re
 import time
 from pathlib import Path
 
-from . import actions, connectors, engine, memory, nearest
+from . import actions, connectors, engine, memory, nearest, replies
 
 # What kind of thing the user just said.
 ASK_FLEET = "fleet"        # "what's running", "who needs me"
@@ -76,6 +76,9 @@ _FILLER = {"the", "a", "an", "my", "your", "of", "to", "and", "session"}
 # People do not phrase instructions as clean commands. "Can you go to the
 # voicebridge session and tell him that the design looks good" must work, not
 # fall through to chat and come back as a rephrasing of itself.
+# "ask" means you want the answer, "tell" means you want it done. Both send a
+# prompt; only one is worth waiting on.
+_ASKED_RE = re.compile(r"\b(?:ask|reply to|answer)\b", re.I)
 _TELL_RE = re.compile(
     r"(?:^|\b)(?:go to|open)?\s*(?:the\s+)?(?:session\s+(?:of|called)\s+)?"
     r"(?:tell|ask|reply to|answer|send(?:\s+a\s+message)?\s+to|message)\s+"
@@ -285,14 +288,25 @@ def classify(text: str) -> tuple:
         msg = (m2.group(3) or "").strip()
         msg = re.sub(r"^(?:him|her|it|them)\s+(?:that\s+)?", "", msg, flags=re.I)
         if name.lower() not in _PRONOUNS | _FILLER and msg:
-            return TELL, {"name": name, "message": msg}
+            want = bool(_ASKED_RE.search(t[:m2.start(3)] if m2.group(3)
+                                         else t))
+            # "ask X for a summary" leaves the message as "for a summary",
+            # which is not a sentence anyone would type into an agent.
+            if want and msg.lower().startswith("for "):
+                msg = "Give me " + msg[4:]
+            return TELL, {"name": name, "message": msg, "await": want}
     m = _TELL_RE.search(t)
     if m:
         name, msg = m.group(1), m.group(2).strip()
         # "tell voicebridge him that X" / "tell it that X": drop the pronoun
         msg = re.sub(r"^(?:him|her|it|them)\s+(?:that\s+)?", "", msg, flags=re.I)
         if name.lower() not in _PRONOUNS and msg:
-            return TELL, {"name": name, "message": msg}
+            want = bool(_ASKED_RE.search(t[:m.start(1)]))
+            # "ask X for a summary" leaves the message as "for a summary",
+            # which is not a sentence anyone would type into an agent.
+            if want and msg.lower().startswith("for "):
+                msg = "Give me " + msg[4:]
+            return TELL, {"name": name, "message": msg, "await": want}
     m = _OPEN_RE.search(t)
     if m and len(t.split()) <= 6:      # a command, not a sentence about opening
         name = m.group(2)
@@ -429,7 +443,8 @@ class Friday:
         if intent == OPEN:
             return self._propose_open(payload["name"])
         if intent == TELL:
-            return self._propose_tell(payload["name"], payload["message"])
+            return self._propose_tell(payload["name"], payload["message"],
+                                      payload.get("await", False))
         if intent in (CONFIRM, CANCEL):
             return self._say("Nothing was waiting on you." if intent == CONFIRM
                              else "Okay.")
@@ -1072,14 +1087,16 @@ class Friday:
         return self._perform({"kind": "open", "sid": hit.get("sid", ""),
                               "label": hit.get("label", name)})
 
-    def _propose_tell(self, name: str, message: str) -> dict:
+    def _propose_tell(self, name: str, message: str,
+                      want_answer: bool = False) -> dict:
         """TIER 0 when you named the session exactly (that was your
         confirmation), TIER 1 when Friday had to guess which one you meant."""
         hit, how = self._find_how(name)
         if not hit:
             return self._no_session(
-                name, lambda n: self._propose_tell(n, message))
+                name, lambda n: self._propose_tell(n, message, want_answer))
         act = {"kind": "tell", "sid": hit.get("sid", ""),
+               "await": want_answer, "path": hit.get("path", ""),
                "label": hit.get("label", name), "message": message}
         if how == "exact":
             return self._perform(act)
@@ -1106,7 +1123,21 @@ class Friday:
                 return self._say("Started it in a new window." if ok else
                                  "I couldn't open a new window.")
             if act["kind"] == "tell":
+                # Note where the transcript ends BEFORE sending, or the agent's
+                # answer cannot be told apart from what it said a minute ago.
+                mark = ""
+                if act.get("await") and act.get("path"):
+                    try:
+                        mark = replies.mark(act["path"])
+                    except Exception:
+                        mark = ""
                 ok = actions.send_to_session(act["sid"], act["message"])
+                if ok and act.get("await") and act.get("path"):
+                    self._bring_back(act["path"], mark, label)
+                    return self._say(f"Asked {label}. I'll tell you what it "
+                                     f"says.",
+                                     action={"kind": "tell",
+                                             "sid": act["sid"], "undo": True})
                 return self._say(f"Sent it to {label}." if ok else
                                  f"I couldn't reach {label}.",
                                  action={"kind": "tell", "sid": act["sid"],
@@ -1127,6 +1158,8 @@ class Friday:
         "tell you what a specific session is waiting on",
         "bring a session's window to the front (say: open <name>)",
         "send an instruction to a session (say: tell <name> to <something>)",
+        "ask a session a question and bring its answer back here "
+        "(say: ask <name> for a summary of changes)",
         "take your answer to a session that asked you a question",
         "go quiet, or start speaking again",
     ]
@@ -1348,6 +1381,26 @@ class Friday:
                 if (r.get("label") or "") == label:
                     return r, ("fuzzy" if how == "sounds-like" else "maybe")
         return None, ""
+
+    def _bring_back(self, path: str, mark: str, label: str) -> None:
+        """Watch for the agent's answer and say it here, in this thread.
+
+        Delivering a question and then leaving the answer in a terminal you are
+        not looking at is half a conversation, and it is the half that saves you
+        nothing: you still have to go to the window to find out."""
+        import threading
+
+        def _watch():
+            try:
+                said = replies.wait_for_reply(path, mark)
+            except Exception:
+                said = ""
+            if said:
+                self.announce(f"{label} says: " + said[:700])
+            else:
+                self.announce(f"{label} hasn't answered yet. It may be waiting "
+                              f"on something, or still working.")
+        threading.Thread(target=_watch, daemon=True).start()
 
     def _offer(self, question: str, yes, again=None, no: str = "") -> dict:
         """Ask "did you mean X?" and remember what a yes means.
