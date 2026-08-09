@@ -103,7 +103,10 @@ _DIDWE_RE = re.compile(
     r"\b(?:did (?:we|i) (?:ever )?(?:talk|discuss|work)|have (?:we|i) "
     r"(?:ever )?(?:talked|discussed|worked)|look into claude|check claude|"
     r"any (?:past )?session about)\b", re.I)
-_CONNECT_RE = re.compile(r"^\s*connect\s+(\w+)\s+(\S+)", re.I)
+_CONNECT_RE = re.compile(r"^\s*connect\s+(\w+)(?:\s+(\S+))?", re.I)
+_CONNS_RE = re.compile(
+    r"\b(?:what(?:'s| is)? connected|connections?|integrations?|"
+    r"what (?:tools|apps) (?:do you have|are connected))\b", re.I)
 # Anchored to the END on purpose: "open that one" is this intent, but "go to
 # the session of voicebridge and tell him…" is an instruction to that session,
 # and an unanchored pattern swallowed it.
@@ -190,9 +193,11 @@ def classify(text: str) -> tuple:
         if name.lower() in _PRONOUNS:
             return OPEN, {"name": ""}   # "open it": we must ask which
         return OPEN, {"name": name}
+    if _CONNS_RE.search(t):
+        return CONNECT, {"which": "", "token": ""}
     m = _CONNECT_RE.match(t)
     if m:
-        return CONNECT, {"which": m.group(1), "token": m.group(2)}
+        return CONNECT, {"which": m.group(1), "token": m.group(2) or ""}
     if _SLACK_RE.search(t):
         return SLACK, {"query": _strip_verbs(_SLACK_RE.search(t).group(1) or t)}
     m = _GITHUB_RE.search(t)
@@ -394,6 +399,31 @@ class Friday:
 
     # ---- connectors: Friday's own eyes on your tools ---------------------
     def _connect(self, which: str, token: str) -> dict:
+        # no argument: report what is connected and what is not
+        if not which:
+            rows = connectors.status()
+            live = [n for n, v in rows.items() if v["ready"]]
+            dead = [n for n, v in rows.items() if not v["ready"]]
+            bits = []
+            if live:
+                bits.append("Connected: " + ", ".join(sorted(live)) + ".")
+            if dead:
+                bits.append("Not connected: " + ", ".join(sorted(dead))
+                            + '. Say "connect <name>" and I\'ll walk you through it.')
+            return self._say(" ".join(bits) or "Nothing is connected yet.")
+        # no token: try the browser flow (MCP), which is the one-time approval
+        if not token:
+            from . import mcp as _mcp
+            if which in _mcp.servers():
+                self._say(f"Opening your browser to approve {which}…")
+                r = _mcp.authorize(which, _mcp.servers()[which]["url"])
+                if r.get("ok"):
+                    return self._say(f"{which} connected.")
+                return self._say(f"That didn't complete: {r.get('error')}")
+            c0 = connectors.get(which)
+            if c0:
+                return self._say(c0.setup_hint())
+            return self._say(f"I don't know a connector called {which}.")
         c = connectors.get(which)
         if not c:
             return self._say(f"I don't have a {which} connector.")

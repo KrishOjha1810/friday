@@ -347,14 +347,80 @@ class Jira:
                 for i in (d.get("issues") or [])]
 
 
+# ------------------------------------------------------------------- MCP ----
+class MCPConnector:
+    """Any MCP server, wrapped so it looks like every other connector.
+
+    This is the reason MCP is worth having: one implementation, and every
+    server anyone writes becomes usable without new code in Friday."""
+
+    def __init__(self, name: str):
+        self.name = name
+
+    def _c(self):
+        from . import mcp
+        return mcp.client(self.name)
+
+    def ready(self) -> bool:
+        """Connected means USABLE, not merely reachable.
+
+        Gmail's server happily completes a handshake and lists its tools with
+        no credentials, then returns 'unauthorized' the moment you call one.
+        Reporting that as connected would be a lie that only surfaces when you
+        actually need it, so a server that has no token counts as not
+        connected."""
+        from . import mcp
+        cfg = mcp.servers().get(self.name) or {}
+        if not cfg.get("token"):
+            return False
+        c = self._c()
+        return bool(c and not c.connect())
+
+    def setup_hint(self) -> str:
+        return f"connect it once with: friday connect {self.name}"
+
+    def tools(self) -> list:
+        c = self._c()
+        if not c or c.connect():
+            return []
+        return c.tools()
+
+    def call(self, tool: str, **args) -> dict:
+        c = self._c()
+        if not c:
+            return {"error": f"{self.name} is not configured"}
+        err = c.connect()
+        if err:
+            return {"error": "not connected"}
+        return c.call(tool, args)
+
+
+def mcp_servers() -> dict:
+    """Configured MCP servers as connector objects, by name."""
+    try:
+        from . import mcp
+        return {n: MCPConnector(n) for n in mcp.servers()}
+    except Exception:
+        return {}
+
+
 # -------------------------------------------------------------- registry ----
 REGISTRY = {c.name: c() for c in (GitHub, Slack, Gmail, Jira)}
+
+
+def all_connectors() -> dict:
+    """Built-in connectors plus every MCP server you have added. An MCP server
+    with the same name wins: if you connected Slack properly through MCP, that
+    is better than the token path."""
+    out = dict(REGISTRY)
+    out.update(mcp_servers())
+    return out
 
 
 def status() -> dict:
     """Which connections are live, and how to fix the ones that are not."""
     out = {}
-    for name, c in REGISTRY.items():
+    for name, c in all_connectors().items():
         try:
             ok = c.ready()
         except Exception:
@@ -364,7 +430,7 @@ def status() -> dict:
 
 
 def get(name: str):
-    return REGISTRY.get((name or "").lower())
+    return all_connectors().get((name or "").lower())
 
 
 def when(ts: float) -> str:
