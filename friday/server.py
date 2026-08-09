@@ -57,6 +57,48 @@ def _fleet_rows() -> list:
         return []
 
 
+def _transcribe(raw: bytes, ctype: str) -> str:
+    """Browser audio -> text, locally. Returns '' on any failure: a failed
+    transcription must look like 'I did not catch that', never like a crash."""
+    if not raw or not engine.AVAILABLE:
+        return ""
+    import subprocess
+    import tempfile
+    ext = ".webm"
+    if "mp4" in ctype or "aac" in ctype:
+        ext = ".mp4"          # iOS records mp4, not webm
+    src = wav = ""
+    try:
+        with tempfile.NamedTemporaryFile(suffix=ext, delete=False) as f:
+            f.write(raw)
+            src = f.name
+        wav = src + ".wav"
+        ff = "/opt/homebrew/bin/ffmpeg"
+        import os as _os
+        if not _os.path.exists(ff):
+            ff = "/usr/local/bin/ffmpeg"
+        r = subprocess.run([ff, "-y", "-i", src, "-ar", "16000", "-ac", "1", wav],
+                           capture_output=True, timeout=60)
+        if r.returncode != 0:
+            return ""
+        from vb import stt as _stt
+        return engine.core.cleanup_transcript(_stt.transcribe(wav)) or ""
+    except Exception as e:
+        try:
+            engine.core.log(f"friday stt: {e}")
+        except Exception:
+            pass
+        return ""
+    finally:
+        import os as _os
+        for pth in (src, wav):
+            try:
+                if pth:
+                    _os.remove(pth)
+            except OSError:
+                pass
+
+
 class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
 
@@ -100,12 +142,19 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         path = self.path.split("?")[0]
         n = int(self.headers.get("Content-Length", "0") or 0)
-        try:
-            body = json.loads(self.rfile.read(n) or b"{}")
-        except Exception:
-            body = {}
+        # Read the body ONCE, as bytes. Parsing it as JSON up front ate binary
+        # uploads (audio arrived, then /stt found an empty stream and the
+        # request hung), so the raw bytes are kept and JSON is parsed lazily by
+        # the handlers that actually want it.
+        raw = self.rfile.read(n) if n else b""
+
+        def as_json():
+            try:
+                return json.loads(raw or b"{}")
+            except Exception:
+                return {}
         if path == "/say":
-            text = (body.get("text") or "").strip()
+            text = (as_json().get("text") or "").strip()
             if not text:
                 self._json({"reply": "", "needs_confirm": False})
                 return
@@ -113,8 +162,26 @@ class Handler(BaseHTTPRequestHandler):
             broadcast("fleet", {"rows": _fleet_rows()})
             self._json(out)
             return
+        if path == "/stt":
+            # Voice in. The browser records, we transcribe LOCALLY with the
+            # same whisper voicebridge uses, so speaking and typing are the
+            # same conversation and nothing leaves the machine.
+            self._json({"text": _transcribe(raw, self.headers.get("Content-Type", ""))})
+            return
+
+        if path == "/speak":
+            # Voice out, on request. The UI decides when Friday should be heard
+            # rather than read; the thread is identical either way.
+            if engine.AVAILABLE:
+                txt = (as_json().get("text") or "").strip()
+                if txt:
+                    threading.Thread(target=lambda: engine.core.speak(txt),
+                                     daemon=True).start()
+            self._json({"ok": True})
+            return
+
         if path == "/quiet":
-            on = bool(body.get("on"))
+            on = bool(as_json().get("on"))
             if engine.AVAILABLE:
                 engine.attention.hush() if on else engine.attention.unhush()
             self._json({"quiet": on})

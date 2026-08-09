@@ -110,7 +110,8 @@
 
 <footer>
   <div class="row">
-    <button class="icon" id="mic" title="Talk instead of typing" aria-label="Talk">🎙</button>
+    <button class="icon" id="mic" title="Hold to talk" aria-label="Talk">🎙</button>
+    <button class="icon" id="ear" title="Read replies aloud" aria-label="Speak replies">🔈</button>
     <textarea id="input" rows="1" placeholder="Ask Friday, or just talk…"></textarea>
     <button class="icon" id="send" title="Send" aria-label="Send">↑</button>
   </div>
@@ -174,10 +175,66 @@ async function send(text){
       headers:{'Content-Type':'application/json'}, body: JSON.stringify({text})});
     const j = await r.json();
     thinking(false);
-    if(j.reply) bubble('friday', j.reply);
+    if(j.reply){ bubble('friday', j.reply); if(speakBack) speak(j.reply); }
     if(j.needs_confirm) askConfirm();
   }catch(e){ thinking(false); bubble('friday', "I couldn't reach my own server."); }
 }
+
+/* ---- voice: same thread, just spoken -------------------------------------
+   Recording goes to the local whisper the machine already runs, so speaking
+   and typing produce identical messages and nothing leaves the machine. */
+let speakBack = false, rec = null, chunks = [], recording = false;
+
+$('ear').onclick = () => {
+  speakBack = !speakBack;
+  $('ear').classList.toggle('on', speakBack);
+  $('ear').textContent = speakBack ? '🔊' : '🔈';
+};
+
+async function startRec(){
+  if(recording) return;
+  try{
+    const stream = await navigator.mediaDevices.getUserMedia({audio:{
+      echoCancellation:true, noiseSuppression:true}});
+    rec = new MediaRecorder(stream);
+    chunks = [];
+    rec.ondataavailable = e => chunks.push(e.data);
+    rec.onstop = async () => {
+      stream.getTracks().forEach(t => t.stop());
+      const blob = new Blob(chunks, {type: rec.mimeType || 'audio/webm'});
+      if(blob.size < 1200){ setHint('too short, hold it a moment longer'); return; }
+      setHint('listening to that…');
+      try{
+        const r = await fetch('/stt', {method:'POST',
+          headers:{'Content-Type': blob.type}, body: blob});
+        const j = await r.json();
+        resetHint();
+        if(j.text) send(j.text);
+        else setHint("I didn't catch that, try again");
+      }catch(e){ resetHint(); setHint("couldn't transcribe that"); }
+    };
+    rec.start();
+    recording = true;
+    $('mic').classList.add('on');
+    setHint('listening… release to send');
+  }catch(e){ setHint('no microphone access'); }
+}
+function stopRec(){
+  if(!recording) return;
+  recording = false;
+  $('mic').classList.remove('on');
+  try{ rec.stop(); }catch(e){}
+}
+const mic = $('mic');
+mic.addEventListener('mousedown', startRec);
+mic.addEventListener('mouseup', stopRec);
+mic.addEventListener('mouseleave', stopRec);
+mic.addEventListener('touchstart', e => { e.preventDefault(); startRec(); }, {passive:false});
+mic.addEventListener('touchend', e => { e.preventDefault(); stopRec(); }, {passive:false});
+
+const HINT = $('hint').textContent;
+function setHint(t){ $('hint').textContent = t; }
+function resetHint(){ $('hint').textContent = HINT; }
 
 $('send').onclick = () => send();
 input.addEventListener('input', () => {
@@ -222,9 +279,15 @@ function connect(){
     if(d.kind === 'fleet') renderFleet(d.rows);
     if(d.kind === 'message' && d.message){
       bubble('friday', d.message.text, d.message.kind);
+      if(speakBack) speak(d.message.text);
       if(document.hidden) notify(d.message.text);
     }
   };
+}
+
+function speak(text){
+  fetch('/speak', {method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({text})}).catch(() => {});
 }
 
 /* Notifications work in a plain localhost tab, no install and no signing. */
