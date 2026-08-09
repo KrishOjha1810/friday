@@ -117,7 +117,12 @@ _CONNECT_RE = re.compile(r"\bconnect\s+(?:to\s+)?(\w+)(?:\s+([\w.\-]{8,}))?", re
 # A pasted token is unmistakable, so accept it on its own and work out where it
 # belongs from its prefix. Asking someone to remember command syntax while
 # holding a secret in their clipboard is bad design.
-_TOKEN_RE = re.compile(r"\b(xoxp-[\w-]{10,}|xoxb-[\w-]{10,}|ya29\.[\w.\-]{20,})\b")
+# The xoxe. prefix MUST come first in the alternation, or the pattern matches
+# the xoxp- part in the middle of "xoxe.xoxp-…" and saves a truncated token
+# that can never work. Slack issues xoxe.xoxp- when token rotation is on.
+_TOKEN_RE = re.compile(
+    r"(xoxe\.xoxp-[\w.\-]{10,}|xoxe-[\w.\-]{10,}|xoxp-[\w-]{10,}"
+    r"|xoxb-[\w-]{10,}|ya29\.[\w.\-]{20,})")
 _CONNS_RE = re.compile(
     r"\b(?:what(?:'s| is)? connected|connections?|integrations?|"
     r"what (?:tools|apps) (?:do you have|are connected))\b", re.I)
@@ -166,7 +171,9 @@ def classify(text: str) -> tuple:
     m = _TOKEN_RE.search(t)
     if m:
         tok = m.group(1)
-        which = ("slack" if tok.startswith(("xoxp-", "xoxb-"))
+        # xoxe.xoxp- and xoxe- are Slack too (rotation-enabled tokens). Missing
+        # them here meant a pasted token silently became "what's connected?".
+        which = ("slack" if tok.startswith(("xoxp-", "xoxb-", "xoxe.", "xoxe-"))
                  else "gmail" if tok.startswith("ya29.") else "")
         return CONNECT, {"which": which, "token": tok}
     if _CONNS_RE.search(t):
@@ -479,9 +486,18 @@ class Friday:
         except Exception:
             ok = False
         if not ok:
+            # Say WHICH thing is wrong. "isn't answering" sent you round the
+            # same loop three times with no way to tell what to change.
+            why = ""
+            try:
+                if hasattr(c, "token_problem"):
+                    why = c.token_problem()
+            except Exception:
+                why = ""
+            if why:
+                return self._say(f"Saved it, but {why}.")
             return self._say(f"Saved it, but {which} isn't answering. The token "
-                             f"may be the wrong one (I need the User OAuth "
-                             f"Token, starting xoxp-) or missing a scope.")
+                             f"may be missing a scope.")
         who = ""
         try:
             who = c.whoami() if hasattr(c, "whoami") else ""
@@ -527,12 +543,21 @@ class Friday:
         sl = connectors.get("slack")
         if not sl.ready():
             return self._say("Slack isn't connected yet. " + sl.setup_hint())
+        err = (lambda: sl.last_error() if hasattr(sl, "last_error") else "")
         ch = sl.find_channel(name)
         if not ch:
+            # Distinguish "no such channel" from "Slack wouldn't give me the
+            # list", which look identical from here but need different fixes.
+            why = err()
+            if why:
+                return self._say("I couldn't look at your channels: " + why + ".")
             return self._say(f"I can't find a Slack channel called {name}.")
         rows = sl.read_channel(ch["id"], limit=15)
         if not rows:
-            return self._say(f"#{ch['name']} is empty, or I can't read it.")
+            why = err()
+            if why:
+                return self._say(f"I couldn't read #{ch['name']}: " + why + ".")
+            return self._say(f"#{ch['name']} is empty.")
         self._last_slack = rows
         convo = "\n".join(f"{r['who']}: {r['text']}" for r in rows[-12:])
         summary = self._summarise_thread(convo)
@@ -676,6 +701,12 @@ class Friday:
             return self._say("What should I look for in Slack?")
         rows = sl.search(query, limit=4)
         if not rows:
+            # An empty list can mean "no messages" or "Slack refused". Saying
+            # "nothing found" for a refusal is the bug that made this feel
+            # broken with no way to tell what to fix.
+            why = sl.last_error() if hasattr(sl, "last_error") else ""
+            if why:
+                return self._say("I couldn't search Slack: " + why + ".")
             return self._say(f"Nothing in Slack about {query}.")
         lines = [f"#{r['channel']} · {r['who']} · {connectors.when(r['when'])}: "
                  f"{r['text'][:120]}" for r in rows]

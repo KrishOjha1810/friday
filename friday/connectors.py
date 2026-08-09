@@ -210,6 +210,34 @@ class Slack:
     def token(self) -> str:
         return os.environ.get("SLACK_TOKEN") or _secret("slack_token")
 
+    def token_problem(self) -> str:
+        """Say precisely what is wrong with the token, if anything.
+
+        Slack has three token shapes that all look similar and behave very
+        differently, so 'it isn't answering' is a useless diagnosis. A refresh
+        token in particular cannot be used to call the API at all, and no amount
+        of retrying will change that."""
+        t = self.token()
+        if not t:
+            return "there's no token saved yet"
+        if t.startswith("xoxe.xoxp-") or t.startswith("xoxe-"):
+            # These DO authenticate, but they rotate, so the usual reason one
+            # stops working is age rather than shape. Say that, instead of
+            # sending you to change settings that were never the problem.
+            return ("that token has expired. It's a rotating one (Token "
+                    "Rotation is on for your app), so it needs refreshing: "
+                    "reinstall the app under OAuth & Permissions and paste me "
+                    "the new User OAuth Token")
+        if t.startswith("xoxb-"):
+            return ("that's a BOT token. I need the User OAuth Token (xoxp-) so "
+                    "I can see what you see, including your DMs")
+        if not t.startswith("xoxp-"):
+            return "that doesn't look like a Slack token"
+        # Probe fresh rather than reporting whatever failed last: a cached
+        # ready() makes no calls, so a stale reason would be misleading here.
+        self._call("users.conversations", limit=1)
+        return self.last_error()
+
     _checked = {}        # token -> (ok, when): ask Slack once, not per sentence
 
     def ready(self) -> bool:
@@ -226,6 +254,12 @@ class Slack:
         if hit and time.time() - hit[1] < 300:
             return hit[0]
         ok = bool(self._call("auth.test").get("ok"))
+        if ok:
+            # auth.test requires NO scopes, so passing it proves only that the
+            # token is real. A token with an identity and zero scopes reported
+            # "slack connected" and then failed every single question. Connected
+            # has to mean "can read something".
+            ok = bool(self._call("users.conversations", limit=1).get("ok"))
         self._checked[tok] = (ok, time.time())
         return ok
 
@@ -235,6 +269,15 @@ class Slack:
     MANIFEST_URL = 'https://api.slack.com/apps?new_app=1&manifest_json=%7B%22display_information%22%3A%20%7B%22name%22%3A%20%22Friday%22%2C%20%22description%22%3A%20%22Read-only%20assistant%20that%20reads%20your%20Slack%20for%20you%22%2C%20%22background_color%22%3A%20%22%230b0d12%22%7D%2C%20%22oauth_config%22%3A%20%7B%22scopes%22%3A%20%7B%22user%22%3A%20%5B%22search%3Aread%22%2C%20%22channels%3Ahistory%22%2C%20%22groups%3Ahistory%22%2C%20%22im%3Ahistory%22%2C%20%22mpim%3Ahistory%22%2C%20%22channels%3Aread%22%2C%20%22groups%3Aread%22%2C%20%22im%3Aread%22%2C%20%22mpim%3Aread%22%2C%20%22users%3Aread%22%5D%7D%7D%2C%20%22settings%22%3A%20%7B%22org_deploy_enabled%22%3A%20false%2C%20%22socket_mode_enabled%22%3A%20false%2C%20%22token_rotation_enabled%22%3A%20false%7D%7D'
 
     def setup_hint(self) -> str:
+        # When a token is already saved, the useful instruction is what to
+        # CHANGE from here, not how to start over. Handing someone with an
+        # installed app the "create an app" steps is how the same failure
+        # repeats three times with nothing to act on.
+        if self.token():
+            why = self.token_problem()
+            if why:
+                return ("Right now " + why + ".\n"
+                        "Your apps are at https://api.slack.com/apps")
         return ("Three steps:\n"
                 "1. Open this and press Create:\n" + self.MANIFEST_URL + "\n"
                 "2. Then OAuth & Permissions, Install to Workspace, and copy "
@@ -246,18 +289,55 @@ class Slack:
     def setup_link(self) -> str:
         return self.MANIFEST_URL
 
+    _err = ""        # why Slack last said no, so it can be repeated to you
+
     def _call(self, method: str, **params) -> dict:
         tok = self.token()
         if not tok:
+            self._err = "not_configured"
             return {"ok": False, "error": "not_configured"}
         try:
             url = self.BASE + method + "?" + urllib.parse.urlencode(params)
             req = urllib.request.Request(url, headers={
                 "Authorization": "Bearer " + tok})
             with urllib.request.urlopen(req, timeout=TIMEOUT) as r:
-                return json.loads(r.read())
+                d = json.loads(r.read())
         except Exception as e:
-            return {"ok": False, "error": str(e)[:120]}
+            self._err = str(e)[:120]
+            return {"ok": False, "error": self._err}
+        self._err = "" if d.get("ok") else str(d.get("error") or "unknown")
+        return d
+
+    # The scopes the manifest asks for, repeated here so the fix-it message can
+    # name them: an app created before these were added authenticates fine and
+    # can read nothing.
+    SCOPES = ("search:read, channels:history, groups:history, im:history, "
+              "mpim:history, channels:read, groups:read, im:read, mpim:read, "
+              "users:read")
+
+    def last_error(self) -> str:
+        """Slack's last refusal, in words, and what to do about it.
+
+        Without this, every failure looked identical to an empty result: asking
+        about a channel returned "nothing found" whether Slack had no messages
+        or had flatly refused to answer."""
+        e = self._err
+        if not e:
+            return ""
+        if e == "missing_scope":
+            return ("your Slack app has no read permission yet. Open the app, "
+                    "OAuth & Permissions, and under User Token Scopes add: "
+                    + self.SCOPES + ". Then Reinstall to Workspace and paste "
+                    "me the new token")
+        if e in ("not_in_channel", "channel_not_found"):
+            return "I can't see that channel with this token"
+        if e in ("invalid_auth", "token_expired", "token_revoked"):
+            return "the token is no longer valid, paste me a fresh one"
+        if e == "not_configured":
+            return "there's no token saved yet"
+        if e == "ratelimited":
+            return "Slack is rate-limiting me, try again in a minute"
+        return "Slack said: " + e
 
     def whoami(self) -> str:
         d = self._call("auth.test")
@@ -514,12 +594,26 @@ def mcp_servers() -> dict:
 REGISTRY = {c.name: c() for c in (GitHub, Slack, Gmail, Jira)}
 
 
+def _works(c) -> bool:
+    try:
+        return bool(c.ready())
+    except Exception:
+        return False
+
+
 def all_connectors() -> dict:
-    """Built-in connectors plus every MCP server you have added. An MCP server
-    with the same name wins: if you connected Slack properly through MCP, that
-    is better than the token path."""
+    """Built-in connectors plus every MCP server you have added.
+
+    On a name collision, the one that can actually ANSWER wins. Letting MCP win
+    unconditionally meant an added-but-never-authorized Slack MCP server
+    shadowed a working token: "connect slack" reported success (it verified the
+    token directly) while every question about Slack reported "not connected",
+    with no way to see why the two disagreed. An MCP server still wins when both
+    work, since it is the better path."""
     out = dict(REGISTRY)
-    out.update(mcp_servers())
+    for name, srv in mcp_servers().items():
+        if name not in out or _works(srv):
+            out[name] = srv
     return out
 
 
