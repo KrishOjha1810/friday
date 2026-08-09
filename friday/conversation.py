@@ -56,7 +56,29 @@ CONNECT = "connect"        # "connect slack <token>"
 OPEN_FOUND = "openfound"   # "open that one" after a search
 NEW_SESSION = "newsession" # "start a new session on this"
 ENGINE = "engine"          # "are you using claude for this?"
+ASK_ALL = "askall"         # "ask everyone what they're working on"
+WATCH = "watch"            # "tell me when voicebridge is done"
+STOP = "stop"              # "stop voicebridge"
 CHAT = "chat"              # anything else: a real conversation
+
+# Conducting more than one agent at a time. Asking each of five sessions the
+# same question by hand, then going to five windows for the answers, is the work
+# Friday is supposed to remove.
+_ASKALL_RE = re.compile(
+    r"\b(?:ask|tell)\s+(?:them\s+all|everyone|everybody|all(?:\s+the)?"
+    r"(?:\s+sessions?|\s+agents?)?|each\s+(?:session|agent|one))\b\s*"
+    r"(to|for|about|that)?\s*(.*)$", re.I)
+# "tell me when it's done" is a standing request, not a question about now.
+_WATCH_RE = re.compile(
+    r"\b(?:tell|let)\s+me\s+know\s+when\b|\bnotify\s+me\s+when\b|"
+    r"\bping\s+me\s+when\b|\bwhen\s+(?:it|that|he|she|they|\S+)\s+"
+    r"(?:is\s+|has\s+)?(?:done|finished|finishes|ready)\b", re.I)
+_STOP_RE = re.compile(
+    r"\b(?:stop|interrupt|halt|cancel|escape)\s+(?:the\s+)?"
+    r"([\w.\- ]{2,40}?)(?:\s+session)?\s*[.!?]?$", re.I)
+# "it", "him", "that one": whoever we were just talking to.
+_ITS_RE = re.compile(r"^(?:it|him|her|them|that\s+(?:one|session)|"
+                     r"the\s+same\s+one)$", re.I)
 
 _FLEET_RE = re.compile(
     r"\b(what('?s| is)? (running|going on|happening)|status|who needs me|"
@@ -70,6 +92,12 @@ _OPEN_RE = re.compile(
 # exactly ALPHA to the front": it matched a session labelled by its own first
 # prompt. A pronoun means ask, never guess.
 _PRONOUNS = {"it", "that", "this", "them", "one", "there", "here", "him", "her"}
+# A pronoun IS a valid target once you have been talking to a session: "ask it
+# to also run the tests" is how anybody would say it. What is never a target is
+# yourself, which is why "tell me the status" must not become an instruction to
+# a session called "me".
+_STANDS_FOR_SESSION = {"it", "that", "this", "them", "one", "him", "her"}
+_NEVER_A_SESSION = {"me", "us", "myself", "yourself", "everyone", "everybody"}
 # Words that are never a session name, so a greedy pattern cannot mistake an
 # article for the thing you meant.
 _FILLER = {"the", "a", "an", "my", "your", "of", "to", "and", "session"}
@@ -214,6 +242,38 @@ def _strip_verbs(s: str) -> str:
     return s
 
 
+def _joiner_before(said: str, msg: str) -> str:
+    """The word that linked the target to the message ('to', 'about', 'for').
+
+    It carries the intent: "ask X FOR a summary" and "ask X ABOUT the plans" are
+    requests, and sending the bare fragment ("a summary", "the plans") is not
+    what anyone would type into an agent."""
+    if not (said and msg):
+        return ""
+    low, m = said.lower(), msg.lower()
+    i = low.find(m)
+    if i <= 0:
+        return ""
+    before = low[:i].strip().split()
+    return before[-1] if before else ""
+
+
+def _phrase(msg: str, joiner: str, want: bool) -> tuple:
+    """The message as an agent should receive it, and whether to wait."""
+    # The joiner sometimes survives inside the message instead of in front of
+    # it, depending on which pattern matched. Same word, same meaning.
+    low = (msg or "").lower()
+    if low.startswith("for "):
+        msg, joiner = msg[4:], "for"
+    elif low.startswith("about "):
+        msg, joiner = msg[6:], "about"
+    if joiner == "for":
+        return "Give me " + msg, True
+    if joiner == "about" and want:
+        return "Tell me about " + msg, True
+    return msg, want
+
+
 def classify(text: str) -> tuple:
     """(intent, payload). Deterministic and ordered: the most specific command
     wins, and only what is left over counts as conversation."""
@@ -239,6 +299,15 @@ def classify(text: str) -> tuple:
         return CONNECT, {"which": m.group(1), "token": m.group(2) or ""}
     if _ENGINE_RE.search(t):
         return ENGINE, {}
+    m = _ASKALL_RE.search(t)
+    if m:
+        return ASK_ALL, {"joiner": (m.group(1) or "").lower(),
+                         "message": (m.group(2) or "").strip()}
+    if _WATCH_RE.search(t):
+        return WATCH, {"said": t}
+    m = _STOP_RE.search(t)
+    if m and len(t.split()) <= 6:
+        return STOP, {"name": m.group(1).strip(), "said": t}
     if _DIDWE_RE.search(t):
         return DID_WE, {}
     m = _READCHAN_RE.search(t)
@@ -287,13 +356,13 @@ def classify(text: str) -> tuple:
         name = m2.group(1) or m2.group(2) or ""
         msg = (m2.group(3) or "").strip()
         msg = re.sub(r"^(?:him|her|it|them)\s+(?:that\s+)?", "", msg, flags=re.I)
-        if name.lower() not in _PRONOUNS | _FILLER and msg:
+        low = name.lower()
+        if low not in _NEVER_A_SESSION and (
+                low not in _PRONOUNS | _FILLER
+                or low in _STANDS_FOR_SESSION) and msg:
             want = bool(_ASKED_RE.search(t[:m2.start(3)] if m2.group(3)
                                          else t))
-            # "ask X for a summary" leaves the message as "for a summary",
-            # which is not a sentence anyone would type into an agent.
-            if want and msg.lower().startswith("for "):
-                msg = "Give me " + msg[4:]
+            msg, want = _phrase(msg, _joiner_before(t, msg), want)
             return TELL, {"name": name, "message": msg, "await": want,
                           "said": t}
     m = _TELL_RE.search(t)
@@ -301,12 +370,11 @@ def classify(text: str) -> tuple:
         name, msg = m.group(1), m.group(2).strip()
         # "tell voicebridge him that X" / "tell it that X": drop the pronoun
         msg = re.sub(r"^(?:him|her|it|them)\s+(?:that\s+)?", "", msg, flags=re.I)
-        if name.lower() not in _PRONOUNS and msg:
+        low = name.lower()
+        if low not in _NEVER_A_SESSION and (
+                low not in _PRONOUNS or low in _STANDS_FOR_SESSION) and msg:
             want = bool(_ASKED_RE.search(t[:m.start(1)]))
-            # "ask X for a summary" leaves the message as "for a summary",
-            # which is not a sentence anyone would type into an agent.
-            if want and msg.lower().startswith("for "):
-                msg = "Give me " + msg[4:]
+            msg, want = _phrase(msg, _joiner_before(t, msg), want)
             return TELL, {"name": name, "message": msg, "await": want,
                           "said": t}
     m = _OPEN_RE.search(t)
@@ -350,6 +418,10 @@ class Friday:
         # the answer. One mechanism for every kind of name, so a session, a
         # channel and a connector all behave the same way when misheard.
         self._offered = None
+        # Who we are talking to. "ask it to also run the tests" and "tell me
+        # when it's done" are how people speak once a session is in play, and
+        # making you say the name every time is making you do the bookkeeping.
+        self.target = ""
         self.history = []          # [{role, text, ts, kind}]
         self.focus = (engine.routing.new_focus()
                       if engine.AVAILABLE else {"mentioned": [], "ts": 0})
@@ -387,7 +459,7 @@ class Friday:
                 return offer["again"](text)
             self._offered = offer          # not an answer; the offer stands
         elif self._offered:
-            self._offered = None           # you moved on; it is no longer live
+            self._offered = None
 
         # A pending offer takes precedence: "yes" means yes to THAT.
         if self.pending and intent in (CONFIRM, CANCEL):
@@ -444,6 +516,12 @@ class Friday:
             return self._slack(payload.get("query", ""))
         if intent == OPEN:
             return self._propose_open(payload["name"])
+        if intent == ASK_ALL:
+            return self._ask_all(payload["message"], payload.get("joiner", ""))
+        if intent == WATCH:
+            return self._watch(payload.get("said", ""))
+        if intent == STOP:
+            return self._stop(payload["name"], payload.get("said", ""))
         if intent == TELL:
             return self._propose_tell(payload["name"], payload["message"],
                                       payload.get("await", False),
@@ -507,6 +585,159 @@ class Friday:
         if idle:
             bits.append(f"{_join([r['label'] for r in idle])} {_is(len(idle))} done.")
         return " ".join(bits) or "Nothing is running."
+
+    # ---- conducting more than one agent ---------------------------------
+    # "you" from the agent's point of view: the question is being relayed, so
+    # "what are THEY working on" has to arrive as "what are YOU working on".
+    _RELAY = ((r"\bthey'?re\b", "you are"), (r"\bthey are\b", "you are"),
+              (r"\bthey\b", "you"), (r"\btheir\b", "your"),
+              (r"\bthem\b", "you"), (r"\beveryone\b", "you"))
+
+    def _as_question(self, tail: str, joiner: str) -> str:
+        q = (tail or "").strip().rstrip("?.")
+        for pat, sub in self._RELAY:
+            q = re.sub(pat, sub, q, flags=re.I)
+        if joiner == "for":
+            q = "Give me " + q
+        if not q:
+            q = "What are you working on right now?"
+        return ("Answer in one or two sentences, no tool calls if you can help "
+                "it: " + q + "?" if not q.endswith("?") else q)
+
+    def _ask_all(self, tail: str, joiner: str = "") -> dict:
+        """Put one question to every running session and collect the answers.
+
+        Doing this by hand means typing the same thing into five windows and
+        then going back to five windows to read the replies. This is the part
+        that is actually conducting rather than relaying."""
+        rows = []
+        try:
+            rows = [r for r in engine.fleet.snapshot().values()
+                    if r.get("sid")]
+        except Exception:
+            rows = []
+        if not rows:
+            return self._say("Nothing is running, so there is nobody to ask.")
+        question = self._as_question(tail, joiner)
+        asked, marks = [], {}
+        for r in rows:
+            path = r.get("path", "")
+            marks[r["sid"]] = replies.mark(path) if path else ""
+            if actions.send_to_session(r["sid"], question):
+                asked.append(r)
+        if not asked:
+            return self._say("I couldn't reach any of them.")
+        self._collect(asked, marks)
+        names = ", ".join(r.get("label", "?") for r in asked)
+        missed = [r.get("label", "?") for r in rows if r not in asked]
+        note = (" I couldn't reach " + ", ".join(missed) + ".") if missed else ""
+        return self._say(f"Asked {len(asked)}: {names}. I'll report back as "
+                         f"they answer.{note}")
+
+    def _collect(self, rows: list, marks: dict) -> None:
+        """Report each answer as it lands, rather than after the slowest one.
+
+        Waiting for all of them means one stuck agent hides four good answers,
+        and you cannot tell the difference between thinking and broken."""
+        import threading
+
+        def _one(r):
+            label = r.get("label", "?")
+            path = r.get("path", "")
+            if not path:
+                self.announce(f"{label}: I can't read its transcript, so I "
+                              f"can't tell you what it said.")
+                return
+            said = ""
+            try:
+                said = replies.wait_for_reply(path, marks.get(r["sid"], ""))
+            except Exception:
+                said = ""
+            self.announce(f"{label} says: " + said[:500] if said else
+                          f"{label} hasn't answered.")
+
+        for r in rows:
+            threading.Thread(target=_one, args=(r,), daemon=True).start()
+
+    def _watch(self, said: str) -> dict:
+        """"Tell me when it's done." A standing request, answered later.
+
+        Without this the only way to know an agent finished is to keep asking,
+        which is the polling Friday exists to replace."""
+        names = self._names_of_sessions()
+        target = nearest.best_window(said, names) if names else ""
+        if not target and self.target:
+            target = self.target          # "tell me when it's done"
+        if not target:
+            if not names:
+                return self._say("Nothing is running to wait for.")
+            return self._offer(
+                "Which one should I watch? " + ", ".join(names[:8]),
+                yes=lambda: self._watch(names[0]),
+                again=lambda t: self._watch(t))
+        row = next((r for r in engine.fleet.snapshot().values()
+                    if (r.get("label") or "") == target), None)
+        if not row:
+            return self._no_session(target, self._watch)
+        self.target = target
+        self._watch_until_idle(row["sid"], target)
+        return self._say(f"Watching {target}. I'll tell you when it stops.")
+
+    def _watch_until_idle(self, sid: str, label: str,
+                          timeout: float = 3600) -> None:
+        import threading
+
+        def _wait():
+            end = time.time() + timeout
+            was_working = True
+            while time.time() < end:
+                time.sleep(3)
+                try:
+                    row = engine.fleet.snapshot().get(sid)
+                except Exception:
+                    row = None
+                if row is None:
+                    self.announce(f"{label} has closed.")
+                    return
+                status = row.get("status", "")
+                if status == "working":
+                    was_working = True
+                    continue
+                if was_working:
+                    q = (row.get("question") or "").strip()
+                    self.announce(f"{label} is waiting on you: {q}" if q
+                                  else f"{label} has finished.")
+                    return
+            self.announce(f"{label} is still going after an hour, so I've "
+                          f"stopped watching it.")
+        threading.Thread(target=_wait, daemon=True).start()
+
+    def _stop(self, name: str, said: str = "") -> dict:
+        """Stop what an agent is doing. The same Escape you would press."""
+        names = self._names_of_sessions()
+        # Pronoun first. "stop it" must mean the session we were just talking
+        # to; matched by sound it means whichever name shares a letter with
+        # "it", which was api.
+        low = (name or "").strip().lower()
+        if low in _STANDS_FOR_SESSION or _ITS_RE.match(low):
+            if not self.target:
+                return self._say("Stop which one? " + (", ".join(names[:8])
+                                                       if names else
+                                                       "nothing is running."))
+            target = self.target
+        else:
+            target = (nearest.best_window(said, names) if said and names
+                      else "") or (nearest.pick(name, names) if names else "")
+        if not target:
+            return self._no_session(name, lambda n: self._stop(n, n))
+        row = next((r for r in engine.fleet.snapshot().values()
+                    if (r.get("label") or "") == target), None)
+        if not row:
+            return self._no_session(target, lambda n: self._stop(n, n))
+        ok = actions.interrupt_session(row["sid"])
+        self.target = target
+        return self._say(f"Stopped {target}." if ok else
+                         f"I couldn't reach {target} to stop it.")
 
     def _open_found(self) -> dict:
         """'open that one' after a search. If the session is running we raise
@@ -1045,6 +1276,7 @@ class Friday:
         hit, how = self._find_how(name)
         if not hit:
             return self._no_session(name, self._what_needs)
+        self.target = hit.get("label", name)
         if how == "maybe":
             # A weak match must be ASKED about, never answered as though it were
             # the thing you named: "what is fridey waiting on" reported on
@@ -1087,6 +1319,7 @@ class Friday:
                     {"kind": "open", "sid": h.get("sid", ""),
                      "label": h.get("label", name)}),
                 again=self._propose_open)
+        self.target = hit.get("label", name)
         return self._perform({"kind": "open", "sid": hit.get("sid", ""),
                               "label": hit.get("label", name)})
 
@@ -1132,28 +1365,42 @@ class Friday:
             return found, message, want, exact
         # "ask X FOR a summary" is a request for something, not an instruction:
         # sending the fragment "a summary of changes" is not what you would type.
-        if joiner == "for":
-            msg = "Give me " + msg
-            want = True
+        msg, want = _phrase(msg, joiner, want)
         return found, msg, want, exact
 
     def _propose_tell(self, name: str, message: str,
                       want_answer: bool = False, said: str = "") -> dict:
         name, message, want_answer, said_exactly = self._resplit(
             said, name, message, want_answer)
+        # "ask it to also run the tests": you already told me who, once.
+        if _ITS_RE.match((name or "").strip()) or (name or "").lower() in \
+                _STANDS_FOR_SESSION:
+            if not self.target:
+                names = self._names_of_sessions()
+                if not names:
+                    return self._say("Nothing is running for me to send that "
+                                     "to.")
+                return self._offer(
+                    "Which one? " + ", ".join(names[:8]),
+                    yes=lambda: self._propose_tell(names[0], message,
+                                                   want_answer),
+                    again=lambda t: self._propose_tell(t, message,
+                                                       want_answer))
+            name, said_exactly = self.target, True
         """TIER 0 when you named the session exactly (that was your
         confirmation), TIER 1 when Friday had to guess which one you meant."""
         hit, how = self._find_how(name)
         if not hit:
             return self._no_session(
                 name, lambda n: self._propose_tell(n, message, want_answer))
+        self.target = hit.get("label", name)
         act = {"kind": "tell", "sid": hit.get("sid", ""),
                "await": want_answer, "path": hit.get("path", ""),
                "label": hit.get("label", name), "message": message}
         if how == "exact" and (said_exactly or not said):
             return self._perform(act)
         self.pending = act
-        self._offered = None     # likewise: the newer question owns "yes"
+        self._offered = None
         return self._say(f'Did you mean {hit.get("label", name)}? '
                          f'I\'ll send "{message}".', needs_confirm=True)
 
@@ -1212,6 +1459,13 @@ class Friday:
         "send an instruction to a session (say: tell <name> to <something>)",
         "ask a session a question and bring its answer back here "
         "(say: ask <name> for a summary of changes)",
+        "put one question to every running session at once "
+        "(say: ask everyone what they are working on)",
+        "keep talking to the same session without naming it again "
+        "(say: ask it to also run the tests)",
+        "watch a session and tell you when it finishes "
+        "(say: tell me when it is done)",
+        "stop what a session is doing (say: stop <name>)",
         "take your answer to a session that asked you a question",
         "go quiet, or start speaking again",
     ]

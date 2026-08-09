@@ -7,6 +7,7 @@ confirmed first. A wrong guess here moves someone's work around.
 Run: python3 tests/test_conversation.py
 """
 import sys
+import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -400,3 +401,96 @@ if __name__ == "__main__":
         if name.startswith("test_") and callable(fn):
             fn()
     print("ok  friday conversation: exact commands, nothing done on a guess")
+
+
+# ---- conducting more than one agent -----------------------------------------
+
+def _fleet(states):
+    """A fake fleet whose statuses can be changed mid-test."""
+    class F:
+        @staticmethod
+        def snapshot():
+            return dict(states)
+    C.engine.AVAILABLE = True
+    C.engine.fleet = F
+    return states
+
+
+def test_one_question_reaches_every_running_session():
+    """Asking five agents the same thing by hand means typing it five times and
+    then visiting five windows for the answers. That is the work Friday is for."""
+    states = _fleet({
+        "s1": {"sid": "s1", "label": "a", "status": "working", "path": "",
+               "question": "", "topic": ""},
+        "s2": {"sid": "s2", "label": "b", "status": "idle", "path": "",
+               "question": "", "topic": ""}})
+    sent = []
+    orig = C.actions.send_to_session
+    try:
+        C.actions.send_to_session = lambda sid, msg: sent.append((sid, msg)) or True
+        f = Friday()
+        f.announce = lambda text, items=None: None
+        r = f.handle("ask everyone what they are working on")
+        assert len(sent) == 2, sent
+        assert {s for s, _ in sent} == {"s1", "s2"}
+        # relayed, so it must arrive in the second person
+        assert "you are working on" in sent[0][1].lower(), sent[0][1]
+        assert "a" in r["reply"] and "b" in r["reply"]
+    finally:
+        C.actions.send_to_session = orig
+        states.clear()
+
+
+def test_a_pronoun_means_whoever_we_were_just_talking_to():
+    """"ask it to also run the tests" is how anyone speaks once a session is in
+    play. Making you repeat the name is making you do the bookkeeping."""
+    _fleet({"s1": {"sid": "s1", "label": "voicebridge", "status": "idle",
+                   "path": "", "question": "", "topic": ""},
+            "s2": {"sid": "s2", "label": "api", "status": "idle", "path": "",
+                   "question": "", "topic": ""}})
+    sent = []
+    orig = C.actions.send_to_session
+    try:
+        C.actions.send_to_session = lambda sid, msg: sent.append((sid, msg)) or True
+        f = Friday()
+        f.announce = lambda text, items=None: None
+        f.handle("tell voicebridge to start the build")
+        f.handle("tell it to also run the tests")
+        assert [s for s, _ in sent] == ["s1", "s1"], sent
+    finally:
+        C.actions.send_to_session = orig
+
+
+def test_a_pronoun_is_never_matched_by_sound():
+    """'stop it' matched 'api', because "it" and "api" share letters. A pronoun
+    points at context; resolving it by similarity stops the wrong agent."""
+    _fleet({"s3": {"sid": "s3", "label": "api", "status": "working", "path": "",
+                   "question": "", "topic": ""}})
+    stopped = []
+    orig = C.actions.interrupt_session
+    try:
+        C.actions.interrupt_session = lambda sid: stopped.append(sid) or True
+        f = Friday()
+        r = f.handle("stop it")           # nothing in play yet
+        assert not stopped, "stopped a session that was never named"
+        assert "which" in r["reply"].lower(), r["reply"]
+    finally:
+        C.actions.interrupt_session = orig
+
+
+def test_finishing_is_reported_without_being_asked_again():
+    """"Tell me when it's done" is a standing request. Without it the only way
+    to know is to keep asking, which is the polling Friday replaces."""
+    states = _fleet({"s1": {"sid": "s1", "label": "api", "status": "working",
+                            "path": "", "question": "", "topic": ""}})
+    f = Friday()
+    heard = []
+    f.announce = lambda text, items=None: heard.append(text)
+    r = f.handle("tell me when api is done")
+    assert "watching api" in r["reply"].lower(), r["reply"]
+    states["s1"]["status"] = "idle"
+    for _ in range(40):
+        if heard:
+            break
+        time.sleep(0.2)
+    assert heard and "finished" in heard[0].lower(), heard
