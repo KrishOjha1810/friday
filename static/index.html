@@ -129,6 +129,10 @@
 </footer>
 
 <script>
+/* When Friday is reachable from the phone every request needs the key, and the
+   key only ever lives in the URL you opened. */
+const KEY = new URLSearchParams(location.search).get('k') || '';
+const U = p => p + (KEY ? (p.includes('?') ? '&' : '?') + 'k=' + encodeURIComponent(KEY) : '');
 const $ = id => document.getElementById(id);
 const thread = $('thread'), input = $('input'), sub = $('sub');
 let pendingConfirm = false;
@@ -198,7 +202,7 @@ async function send(text){
   bubble('user', text);
   thinking(true);
   try{
-    const r = await fetch('/say', {method:'POST',
+    const r = await fetch(U('/say'), {method:'POST',
       headers:{'Content-Type':'application/json'}, body: JSON.stringify({text})});
     const j = await r.json();
     thinking(false);
@@ -232,7 +236,7 @@ async function startRec(){
       if(blob.size < 1200){ setHint('too short, hold it a moment longer'); return; }
       setHint('listening to that…');
       try{
-        const r = await fetch('/stt', {method:'POST',
+        const r = await fetch(U('/stt'), {method:'POST',
           headers:{'Content-Type': blob.type}, body: blob});
         const j = await r.json();
         resetHint();
@@ -310,7 +314,7 @@ function renderFleet(rows){
 
 /* ---- live ------------------------------------------------------------- */
 function connect(){
-  const es = new EventSource('/events');
+  const es = new EventSource(U('/events'));
   es.onopen = () => { sub.textContent = 'listening'; };
   es.onerror = () => { sub.textContent = 'reconnecting…'; };
   es.onmessage = e => {
@@ -325,7 +329,7 @@ function connect(){
 }
 
 function speak(text){
-  fetch('/speak', {method:'POST', headers:{'Content-Type':'application/json'},
+  fetch(U('/speak'), {method:'POST', headers:{'Content-Type':'application/json'},
     body: JSON.stringify({text})}).catch(() => {});
 }
 
@@ -343,7 +347,7 @@ document.addEventListener('click', function once(){
 /* ---- boot ------------------------------------------------------------- */
 (async function boot(){
   try{
-    const s = await (await fetch('/state')).json();
+    const s = await (await fetch(U('/state'))).json();
     renderFleet(s.fleet);
     (s.history || []).forEach(m => bubble(m.role, m.text, m.kind));
     if(!s.engine.voicebridge) bubble('friday', 'I cannot see voicebridge, so I am half blind: ' + s.engine.reason);

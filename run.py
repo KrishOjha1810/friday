@@ -1,7 +1,15 @@
 #!/usr/bin/env python3
-"""Start Friday.  python3 run.py  then open http://127.0.0.1:8765"""
+"""Start Friday.
+
+    python3 run.py              on this machine only, no key needed
+    python3 run.py --phone      also reachable from your phone (prints a keyed URL)
+"""
 import sys
+
 from friday.server import run
+
 if __name__ == "__main__":
-    port = int(sys.argv[1]) if len(sys.argv) > 1 else 8765
-    run(port)
+    args = sys.argv[1:]
+    expose = "--phone" in args
+    ports = [a for a in args if a.isdigit()]
+    run(int(ports[0]) if ports else 8765, expose=expose)

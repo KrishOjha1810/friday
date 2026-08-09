@@ -25,6 +25,32 @@ from .conversation import Friday
 HOST, PORT = "127.0.0.1", 8765
 STATIC = Path(__file__).resolve().parent.parent / "static"
 
+# Friday can drive the machine: open windows, type into running agents. The
+# moment it is reachable from anything but this computer, that has to be behind
+# a secret. Generated once, stored with owner-only permissions, and required on
+# every request when the server is not bound to localhost.
+SECRET_FILE = Path.home() / ".friday" / "secret"
+
+
+def secret() -> str:
+    try:
+        return SECRET_FILE.read_text().strip()
+    except Exception:
+        pass
+    import secrets as _s
+    tok = "fr-" + _s.token_hex(16)
+    try:
+        SECRET_FILE.parent.mkdir(parents=True, exist_ok=True)
+        SECRET_FILE.write_text(tok)
+        SECRET_FILE.chmod(0o600)
+    except Exception:
+        pass
+    return tok
+
+
+SECRET = secret()
+LOCAL_ONLY = True        # flipped by run(expose=True)
+
 _friday = Friday()
 _subs = set()
 _subs_lock = threading.Lock()
@@ -102,6 +128,17 @@ def _transcribe(raw: bytes, ctype: str) -> str:
 class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
 
+    def _authed(self) -> bool:
+        """Local-only needs no key (nothing else can reach it). Exposed to the
+        network, every request must carry the secret."""
+        if LOCAL_ONLY:
+            return True
+        from urllib.parse import parse_qs, urlparse
+        q = parse_qs(urlparse(self.path).query)
+        if (q.get("k") or [""])[0] == SECRET:
+            return True
+        return self.headers.get("X-Friday-Key", "") == SECRET
+
     def log_message(self, *a):
         pass                      # the terminal is for Friday, not for logs
 
@@ -120,6 +157,9 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         path = self.path.split("?")[0]
+        if not self._authed():
+            self._send(401, b"unauthorized", "text/plain")
+            return
         if path == "/":
             try:
                 html = (STATIC / "index.html").read_bytes()
@@ -141,6 +181,9 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         path = self.path.split("?")[0]
+        if not self._authed():
+            self._send(401, b"unauthorized", "text/plain")
+            return
         n = int(self.headers.get("Content-Length", "0") or 0)
         # Read the body ONCE, as bytes. Parsing it as JSON up front ate binary
         # uploads (audio arrived, then /stt found an empty stream and the
@@ -258,10 +301,17 @@ def supervisor_loop():
         time.sleep(3)
 
 
-def run(port: int = PORT):
+def run(port: int = PORT, expose: bool = False):
+    global LOCAL_ONLY
+    LOCAL_ONLY = not expose
+    host = "0.0.0.0" if expose else HOST
     threading.Thread(target=supervisor_loop, daemon=True).start()
-    srv = ThreadingHTTPServer((HOST, port), Handler)
-    print(f"Friday is listening on http://{HOST}:{port}")
+    srv = ThreadingHTTPServer((host, port), Handler)
+    if expose:
+        print(f"Friday is listening on http://{host}:{port}?k={SECRET}")
+        print("  reachable from your phone. The key is required; keep the URL private.")
+    else:
+        print(f"Friday is listening on http://{HOST}:{port}")
     st = engine.status()
     if not st["voicebridge"]:
         print(f"  note: {st['reason']}")

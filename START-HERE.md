@@ -5,6 +5,15 @@
 
 Then open **http://127.0.0.1:8765** in your browser.
 
+### From your phone
+
+    python3 run.py --phone
+
+It prints a URL with a key in it. Open that on your phone (same wifi, or over
+your Tailscale network). The key is required, so keep the URL private: Friday
+can open windows and type into your running agents, so anyone with that link
+can drive your machine.
+
 ## What to try
 
 Type or hold the mic:
@@ -40,5 +49,5 @@ hour.
 - No target chip in the composer, so routing is inferred rather than visible.
 - No presence gating yet: it does not know whether you are at the page, at the
   machine, or away, so notifications are not routed differently.
-- Phone works (same URL over the voicebridge tunnel) but has no phone-specific
-  layout.
+- The phone uses the same page with no phone-specific layout yet (the design
+  calls for a collapsed fleet chip and one visible ask at a time).
