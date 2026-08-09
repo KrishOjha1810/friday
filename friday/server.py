@@ -242,6 +242,11 @@ def supervisor_loop():
     state = sup.new_state()
     while True:
         try:
+            # Claim alert delivery each tick, so voicebridge's own daemon stays
+            # quiet while Friday is up (otherwise every event is announced
+            # twice). The claim expires on its own, so if Friday dies the
+            # daemon takes over again rather than everything going silent.
+            engine.attention.claim_supervisor("friday")
             said = sup.tick(state)
             for text in said:
                 msg = _friday.announce(text)

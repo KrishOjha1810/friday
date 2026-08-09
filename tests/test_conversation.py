@@ -63,39 +63,71 @@ def test_anything_unrecognised_is_conversation_not_an_error():
     assert classify("")[0] == C.CHAT
 
 
-# ---- never act on a guess -------------------------------------------------
-def test_opening_a_session_is_proposed_not_done():
-    _fake_engine()
-    f = Friday()
-    r = f.handle("open jobhunt")
-    assert r["needs_confirm"] is True
-    assert f.pending and f.pending["kind"] == "open"
-    assert not r["action"]              # nothing happened yet
-
-
-def test_no_cancels_the_pending_action():
-    _fake_engine()
-    f = Friday()
-    f.handle("open jobhunt")
-    r = f.handle("no")
-    assert f.pending is None
-    assert "left it alone" in r["reply"].lower()
-
-
-def test_yes_performs_only_what_was_offered():
+# ---- tiered: act when certain, ask when guessing --------------------------
+def test_a_reversible_action_just_happens():
+    """TIER 0. Opening a window is instantly reversible, so asking permission
+    every time is friction you would hit fifty times a day, and a confirmation
+    you always say yes to has stopped being a safety mechanism."""
     _fake_engine()
     done = {}
     orig = C.actions.focus_session
     try:
         C.actions.focus_session = lambda sid: done.setdefault("sid", sid) or True
         f = Friday()
-        f.handle("open jobhunt")
-        r = f.handle("yes")
-        assert done["sid"] == "s1"
+        r = f.handle("open jobhunt")
+        assert r["needs_confirm"] is False      # no permission theatre
+        assert done["sid"] == "s1"              # it actually happened
         assert "opened" in r["reply"].lower()
-        assert f.pending is None       # consumed, cannot be replayed
     finally:
         C.actions.focus_session = orig
+
+
+def test_naming_a_session_exactly_is_your_confirmation():
+    """TIER 0. You said which session; asking 'did you mean it?' adds nothing."""
+    _fake_engine()
+    sent = {}
+    orig = C.actions.send_to_session
+    try:
+        C.actions.send_to_session = lambda sid, msg: sent.update(sid=sid, msg=msg) or True
+        f = Friday()
+        r = f.handle("tell api to use redis")
+        assert r["needs_confirm"] is False
+        assert sent["sid"] == "s2" and "redis" in sent["msg"]
+    finally:
+        C.actions.send_to_session = orig
+
+
+def test_a_guessed_target_is_confirmed_first():
+    """TIER 1. Friday inferred which session you meant, so it checks. Writing
+    the wrong instruction into a running agent is not undoable."""
+    _fake_engine()
+    sent = {}
+    orig = C.actions.send_to_session
+    try:
+        C.actions.send_to_session = lambda sid, msg: sent.update(sid=sid) or True
+        f = Friday()
+        r = f.handle("tell ap to use redis")     # 'ap' is a guess at 'api'
+        assert r["needs_confirm"] is True
+        assert not sent                          # nothing sent yet
+        f.handle("yes")
+        assert sent["sid"] == "s2"
+    finally:
+        C.actions.send_to_session = orig
+
+
+def test_no_cancels_a_guessed_action():
+    _fake_engine()
+    sent = {}
+    orig = C.actions.send_to_session
+    try:
+        C.actions.send_to_session = lambda sid, msg: sent.update(sid=sid) or True
+        f = Friday()
+        f.handle("tell ap to use redis")
+        r = f.handle("no")
+        assert f.pending is None and not sent
+        assert "left it alone" in r["reply"].lower()
+    finally:
+        C.actions.send_to_session = orig
 
 
 def test_a_bare_yes_with_nothing_pending_does_nothing():
@@ -112,8 +144,7 @@ def test_a_failed_action_is_reported_not_swallowed():
     try:
         C.actions.focus_session = lambda sid: False
         f = Friday()
-        f.handle("open jobhunt")
-        r = f.handle("yes")
+        r = f.handle("open jobhunt")
         assert "couldn't" in r["reply"].lower()
     finally:
         C.actions.focus_session = orig

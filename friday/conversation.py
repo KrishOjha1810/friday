@@ -10,9 +10,19 @@ That is not a performance trick, it is a correctness one. "Open jobhunt" must do
 the same thing every single time; a model that is right 95% of the time is the
 wrong tool for a command that moves your work around.
 
-Anything that changes the world (opening a session, sending text to an agent)
-is proposed and confirmed, never done on a guess. Friday holds the pending
-action and waits for a yes.
+Actions are TIERED by how reversible they are and by how sure Friday is, not
+confirmed uniformly. Asking "Open jobhunt?" every single time is friction you
+hit fifty times a day, and a confirmation you always say yes to stops being a
+safety mechanism: you learn to tap through it. So:
+
+  tier 0  do it, say so, offer undo      reversible and unambiguous
+  tier 1  ask first, inline              Friday had to guess, or it writes
+                                         into another agent's session
+  tier 2  read it back, explicit yes     irreversible: push, merge, delete
+
+The deciding question for tier 0 vs 1 is not WHICH action it is, it is whether
+Friday had to guess. If you named a session and exactly one matches, that was
+your confirmation.
 """
 
 import re
@@ -146,21 +156,27 @@ class Friday:
 
     # ---- actions, always proposed first -----------------------------------
     def _propose_open(self, name: str) -> dict:
-        hit = self._find(name)
+        """TIER 0. Bringing a window to the front is instantly reversible (you
+        just look away), so asking permission is pure friction."""
+        hit, _how = self._find_how(name)
         if not hit:
             return self._say(f"I can't find a session called {name}.")
-        self.pending = {"kind": "open", "sid": hit.get("sid", ""),
-                        "label": hit.get("label", name)}
-        return self._say(f"Open {hit.get('label', name)}?", needs_confirm=True)
+        return self._perform({"kind": "open", "sid": hit.get("sid", ""),
+                              "label": hit.get("label", name)})
 
     def _propose_tell(self, name: str, message: str) -> dict:
-        hit = self._find(name)
+        """TIER 0 when you named the session exactly (that was your
+        confirmation), TIER 1 when Friday had to guess which one you meant."""
+        hit, how = self._find_how(name)
         if not hit:
             return self._say(f"I can't find a session called {name}.")
-        self.pending = {"kind": "tell", "sid": hit.get("sid", ""),
-                        "label": hit.get("label", name), "message": message}
-        return self._say(f'Send "{message}" to {hit.get("label", name)}?',
-                         needs_confirm=True)
+        act = {"kind": "tell", "sid": hit.get("sid", ""),
+               "label": hit.get("label", name), "message": message}
+        if how == "exact":
+            return self._perform(act)
+        self.pending = act
+        return self._say(f'Did you mean {hit.get("label", name)}? '
+                         f'I\'ll send "{message}".', needs_confirm=True)
 
     def _perform(self, act: dict) -> dict:
         """Do the thing that was just confirmed. Failures are reported plainly,
@@ -179,7 +195,8 @@ class Friday:
                 ok = actions.send_to_session(act["sid"], act["message"])
                 return self._say(f"Sent it to {label}." if ok else
                                  f"I couldn't reach {label}.",
-                                 action={"kind": "tell", "sid": act["sid"]})
+                                 action={"kind": "tell", "sid": act["sid"],
+                                         "undo": bool(ok)})
         except Exception as e:
             return self._say(f"That failed: {e}")
         return self._say("I'm not sure what to do with that.")
@@ -219,6 +236,15 @@ class Friday:
         cannot see."""
         if not (name and engine.AVAILABLE):
             return None
+        hit, _ = self._find_how(name)
+        return hit
+
+    def _find_how(self, name: str):
+        """(session, how) where how is 'exact' | 'fuzzy' | ''. The caller uses
+        `how` to decide whether it may act without asking: an exact name is the
+        user's own confirmation, a fuzzy one is Friday guessing."""
+        if not (name and engine.AVAILABLE):
+            return None, ""
         q = name.strip().lower()
         try:
             rows = list(engine.fleet.snapshot().values())
@@ -226,17 +252,18 @@ class Friday:
             rows = []
         for r in rows:                                  # exact name
             if (r.get("label") or "").lower() == q:
-                return r
+                return r, "exact"
         starts = [r for r in rows if (r.get("label") or "").lower().startswith(q)]
         if len(starts) == 1:                            # unambiguous prefix
-            return starts[0]
+            return starts[0], "fuzzy"
         contains = [r for r in rows if q in (r.get("label") or "").lower()]
         if len(contains) == 1:                          # unambiguous substring
-            return contains[0]
+            return contains[0], "fuzzy"
         try:
-            return engine.sessions.find(name)
+            hit = engine.sessions.find(name)
+            return (hit, "fuzzy") if hit else (None, "")
         except Exception:
-            return None
+            return None, ""
 
     def _say(self, text: str, needs_confirm: bool = False,
              action: dict = None) -> dict:
