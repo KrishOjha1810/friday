@@ -10,6 +10,12 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from sandbox import use_temp_config  # noqa: E402
+
+use_temp_config()   # never touch the real ~/.friday: a test once
+                    # deleted a live Slack token this way
 from friday import connectors, memory  # noqa: E402
 from friday import conversation as C  # noqa: E402
 from friday.conversation import Friday, classify  # noqa: E402
@@ -112,6 +118,17 @@ def test_a_token_that_does_not_work_is_not_a_connection():
         assert connectors.REGISTRY["slack"].ready() is False
     finally:
         (connectors.CONF_DIR / "slack_token").unlink(missing_ok=True)
+
+
+def test_asking_what_is_thinking_is_not_left_to_the_model():
+    """'Are you using Claude for this?' has a real answer, and a model asked to
+    improvise one will answer in whichever direction sounds reassuring. It
+    decides whether reading your Slack means sending it to someone's server, so
+    it is routed to a fact, not to a guess."""
+    for t in ("are you using claude for this?", "what model are you using",
+              "is this claude", "where does my data go"):
+        i, _ = classify(t)
+        assert i == C.ENGINE, f"{t} -> {i}"
 
 
 def test_spoken_phrasing_reaches_the_connect_command():

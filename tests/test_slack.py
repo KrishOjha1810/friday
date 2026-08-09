@@ -11,6 +11,12 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from sandbox import use_temp_config  # noqa: E402
+
+use_temp_config()   # never touch the real ~/.friday: a test once
+                    # deleted a live Slack token this way
+
 from friday import connectors
 from friday import conversation as C
 from friday.conversation import classify
@@ -125,6 +131,40 @@ def test_the_instructions_describe_the_short_path():
     hint = connectors.Slack().setup_hint()
     assert "Generate Token" in hint, hint
     assert "scopes" not in hint.lower(), "still telling you to add scopes"
+
+
+def test_a_misheard_channel_name_still_finds_the_channel():
+    """Speech recognition mangles proper nouns, and every channel name is one.
+    'moonshot' came back as 'moon shot', 'moon shot' and 'neither of
+    mine' on consecutive tries, and substring matching rescued none of them, so
+    Friday failed three times on a channel sitting in a list it already had."""
+    rows = [{"id": "C1", "name": "moonshot"}, {"id": "C2", "name": "general"},
+            {"id": "C3", "name": "random"}]
+    sl = connectors.Slack()
+    for heard in ("moon shot", "moon shot", "moon of shot", "Moonshot"):
+        got = sl.closest_channel(heard, rows)
+        assert got.get("name") == "moonshot", f"{heard} -> {got}"
+
+
+def test_a_name_that_matches_nothing_is_not_forced_onto_a_channel():
+    """Reading the wrong channel is worse than asking which one. A weak or
+    ambiguous match must return nothing so the caller can offer a choice."""
+    rows = [{"id": "C1", "name": "alpha"}, {"id": "C2", "name": "alphb"}]
+    sl = connectors.Slack()
+    assert sl.closest_channel("zzzzzz", rows) == {}, "matched unrelated words"
+    # equally close to both: reading one of them would be a coin toss
+    assert sl.closest_channel("alphc", rows) == {}, "acted on a near-tie"
+
+
+def test_the_suite_cannot_touch_your_real_credentials():
+    """A test wrote a fake token over ~/.friday/slack_token and deleted it in
+    cleanup, so every run of the suite destroyed a live Slack credential that
+    took two rounds of setup to get. It read as a mysterious disappearance for
+    hours. No test may write anywhere a person would miss."""
+    real = Path.home() / ".friday"
+    assert connectors.CONF_DIR != real, "tests are pointed at the real config dir"
+    from friday import mcp
+    assert mcp.SERVERS_FILE.parent != real, "mcp config is pointed at the real dir"
 
 
 class _Fake:

@@ -132,7 +132,12 @@ def search(query: str, limit: int = 5) -> list:
                 mtime = 0
             hits.append({"sid": path.stem, "path": str(path), "score": score,
                          "when": mtime, "about": first_user,
-                         "snippet": best_line})
+                         "snippet": best_line,
+                         # Carry the EVIDENCE, not just a number. A caller that
+                         # only sees a score cannot tell a real match from three
+                         # coincidental common words, so it says "yes" to both.
+                         "matched": sorted(seen_any), "phrase": phrase,
+                         "terms": len(words)})
     hits.sort(key=lambda h: (-h["score"], -h["when"]))
     return hits[:limit]
 

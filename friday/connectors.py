@@ -348,8 +348,14 @@ class Slack:
         return "Slack said: " + e
 
     def whoami(self) -> str:
+        """You, and which workspace. Naming the workspace matters as soon as you
+        have more than one Slack: Friday's app is installed in exactly one, and
+        a channel missing from it is confusing until you know that."""
         d = self._call("auth.test")
-        return d.get("user", "") if d.get("ok") else ""
+        if not d.get("ok"):
+            return ""
+        who, team = d.get("user", ""), d.get("team", "")
+        return f"{who} in {team}" if who and team else who
 
     def search(self, query: str, limit: int = 5) -> list:
         """Messages matching a query, newest first, as plain rows."""
@@ -377,7 +383,18 @@ class Slack:
                 for c in (d.get("channels") or []) if c.get("name")]
 
     def find_channel(self, name: str) -> dict:
-        """Match a spoken channel name ('the neither group') to a real one."""
+        """Match a spoken channel name to a real one, allowing for mishearing.
+
+        Speech recognition mangles proper nouns badly, and channel names are all
+        proper nouns: 'moonshot' came back as 'Munsheer', 'moon shot' and
+        'moon of shot' on three consecutive tries. Substring matching cannot
+        rescue any of those, so it failed three times in a row on a channel that
+        was right there in the list.
+
+        The list is the advantage here. Rather than parse what was said, compare
+        it against the handful of names that actually exist, with the spaces
+        removed, because a heard name is split into words at the wrong places
+        ('moon shot' against 'moonshot')."""
         q = (name or "").lower().strip().lstrip("#")
         if not q:
             return {}
@@ -390,7 +407,36 @@ class Slack:
             return starts[0]
         near = [c for c in rows if q in c["name"].lower()
                 or c["name"].lower() in q]
-        return near[0] if len(near) == 1 else {}
+        if len(near) == 1:
+            return near[0]
+        return self.closest_channel(q, rows)
+
+    # A heard name only has to be close, but it does have to WIN. Acting on a
+    # 0.62-vs-0.61 tie would be guessing, and guessing which channel to read is
+    # worse than asking.
+    SOUNDS_LIKE = 0.62
+    MUST_BEAT_RUNNER_UP_BY = 0.08
+
+    def closest_channel(self, heard: str, rows: list = None) -> dict:
+        """The one channel that clearly sounds like what was said, or nothing."""
+        import difflib
+        rows = self.channels() if rows is None else rows
+        flat = _despace(heard)
+        if not flat:
+            return {}
+        scored = sorted(
+            ((difflib.SequenceMatcher(None, flat, _despace(c["name"])).ratio(), c)
+             for c in rows), key=lambda t: -t[0])
+        if not scored or scored[0][0] < self.SOUNDS_LIKE:
+            return {}
+        if len(scored) > 1 and scored[0][0] - scored[1][0] < self.MUST_BEAT_RUNNER_UP_BY:
+            return {}
+        return scored[0][1]
+
+    def channel_names(self, limit: int = 8) -> list:
+        """What is actually there, for when nothing matched. Naming the real
+        options beats asking someone to rephrase a name they said correctly."""
+        return [c["name"] for c in self.channels()[:limit]]
 
     def read_channel(self, channel_id: str, limit: int = 15) -> list:
         """The recent conversation in a channel, oldest-first so it reads like
@@ -428,6 +474,11 @@ class Slack:
                  "when": float(m.get("ts") or 0)}
                 for m in (d.get("messages") or [])]
 
+
+def _despace(s: str) -> str:
+    """Letters and digits only. Speech splits a compound name at the wrong
+    place, so comparing word-by-word is comparing the wrong things."""
+    return "".join(ch for ch in (s or "").lower() if ch.isalnum())
 
 # ------------------------------------------------------- Slack self-setup ----
 # Connecting Slack by hand takes six screens: create an app, find User Token

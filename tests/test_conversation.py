@@ -10,6 +10,12 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from sandbox import use_temp_config  # noqa: E402
+
+use_temp_config()   # never touch the real ~/.friday: a test once
+                    # deleted a live Slack token this way
 from friday import conversation as C  # noqa: E402
 from friday.conversation import Friday, classify  # noqa: E402
 

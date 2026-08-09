@@ -27,6 +27,7 @@ your confirmation.
 
 import re
 import time
+from pathlib import Path
 
 from . import actions, connectors, engine, memory
 
@@ -54,6 +55,7 @@ SLACK = "slack"            # "search slack for X"
 CONNECT = "connect"        # "connect slack <token>"
 OPEN_FOUND = "openfound"   # "open that one" after a search
 NEW_SESSION = "newsession" # "start a new session on this"
+ENGINE = "engine"          # "are you using claude for this?"
 CHAT = "chat"              # anything else: a real conversation
 
 _FLEET_RE = re.compile(
@@ -93,10 +95,34 @@ _GITHUB_RE = re.compile(
     r"\b(?:github|gh|pull requests?|prs?\b|my notifications?)\b\s*(.*)$", re.I)
 _SLACK_RE = re.compile(r"\bslack\b\s*(.*)$", re.I)
 # "go to my neither group in slack and read the chat"
+# Channel names arrive as several words, because speech splits a compound name
+# at the wrong place ('moonshot' becomes 'moon shot'), and the read verb can
+# come before the name as easily as after it. Requiring a single token followed
+# by 'slack' or 'chat' meant "read the moon shot channel" was not recognised
+# as a Slack request at all, and fell through to the model, which invented a
+# refusal about not having access.
 _READCHAN_RE = re.compile(
-    r"\b(?:go to|open|check|read)\b[^.]*?\b(?:my\s+)?#?([\w.\-]+)\s*"
-    r"(?:group|channel)\b[^.]*?\b(?:slack|read|chat|messages?)\b|"
-    r"\bslack\b[^.]*?\b#?([\w.\-]+)\s*(?:group|channel)\b", re.I)
+    r"\b(?:go to|open|check|read|look at|catch me up on|"
+    r"what(?:'?s| is) (?:in|happening in|going on in))\b"
+    r"[^.]*?#?([\w.\-]+(?:\s+[\w.\-]+){0,3}?)\s+(?:group|channel)\b"
+    r"|\b(?:group|channel)\s+(?:called\s+|named\s+)?#?([\w.\-]+)\b"
+    r"|\bslack\b[^.]*?#?([\w.\-]+(?:\s+[\w.\-]+){0,3}?)\s+(?:group|channel)\b",
+    re.I)
+# Words that ride along with a spoken channel name but are never part of it.
+# "read the chat in slack moonshot group" otherwise yields the channel name
+# "chat in slack moonshot".
+_NOT_NAME = {"to", "in", "at", "on", "my", "the", "our", "a", "that", "this",
+             "chat", "slack", "message", "messages", "conversation", "read",
+             "last", "few", "recent", "from"}
+
+
+def _clean_channel(name: str) -> str:
+    words = [w for w in (name or "").split()]
+    while words and words[0].lower().strip(".,") in _NOT_NAME:
+        words.pop(0)
+    while words and words[-1].lower().strip(".,") in _NOT_NAME:
+        words.pop()
+    return " ".join(words).strip()
 _ISSUES_RE = re.compile(r"\b(?:open\s+)?issues?\b", re.I)
 _BROKEN_RE = re.compile(
     r"\b(?:what(?:'s| is)? (?:broken|failing|red)|anything (?:broken|failing)|"
@@ -106,6 +132,13 @@ _ACTIVITY_RE = re.compile(
     r"what did i (?:do|push|ship))\b", re.I)
 _MAIL_RE = re.compile(r"\b(?:e-?mail|gmail|inbox|mails?)\b\s*(.*)$", re.I)
 _JIRA_RE = re.compile(r"\bjira\b|\btickets?\b", re.I)
+# "are you using Claude for this?" A fair question with a real answer, and one
+# a language model asked to improvise will get wrong in the flattering direction.
+_ENGINE_RE = re.compile(
+    r"\b(?:are|do)\s+you\s+(?:using|use)\s+(?:claude|chatgpt|gpt|openai|an?\s+api)"
+    r"|\b(?:what|which)\s+(?:model|brain|llm|engine)\b"
+    r"|\bis\s+(?:this|that)\s+claude\b"
+    r"|\bwhere\s+(?:do|does)\s+(?:my|the)\s+(?:data|messages?|audio)\s+go\b", re.I)
 # "did we ever talk about this?" right after reading something
 _DIDWE_RE = re.compile(
     r"\b(?:did (?:we|i) (?:ever )?(?:talk|discuss|work)|have (?:we|i) "
@@ -124,7 +157,7 @@ _TOKEN_RE = re.compile(
     r"(xoxe\.xoxp-[\w.\-]{10,}|xoxe-[\w.\-]{10,}|xoxp-[\w-]{10,}"
     r"|xoxb-[\w-]{10,}|ya29\.[\w.\-]{20,})")
 _CONNS_RE = re.compile(
-    r"\b(?:what(?:'s| is)? connected|connections?|integrations?|"
+    r"\b(?:what(?:'?s| is)? connected|connections?|integrations?|"
     r"what (?:tools|apps) (?:do you have|are connected))\b", re.I)
 # Anchored to the END on purpose: "open that one" is this intent, but "go to
 # the session of voicebridge and tell him…" is an instruction to that session,
@@ -181,11 +214,15 @@ def classify(text: str) -> tuple:
     m = _CONNECT_RE.search(t)
     if m:
         return CONNECT, {"which": m.group(1), "token": m.group(2) or ""}
+    if _ENGINE_RE.search(t):
+        return ENGINE, {}
     if _DIDWE_RE.search(t):
         return DID_WE, {}
     m = _READCHAN_RE.search(t)
     if m:
-        return READ_CHANNEL, {"channel": (m.group(1) or m.group(2) or "").strip()}
+        name = _clean_channel(next((g for g in m.groups() if g), ""))
+        if name:
+            return READ_CHANNEL, {"channel": name}
     if _JIRA_RE.search(t):
         return JIRA, {}
     m = _MAIL_RE.search(t)
@@ -261,6 +298,8 @@ class Friday:
         self.pending = None        # an action awaiting your yes
         self._last_found = []      # sessions a search turned up
         self._last_slack = []      # slack messages just read out
+        self._channel_guess = ""   # a channel name that was misheard, awaiting
+                                   # a yes or a second try
         self.history = []          # [{role, text, ts, kind}]
         self.focus = (engine.routing.new_focus()
                       if engine.AVAILABLE else {"mentioned": [], "ts": 0})
@@ -282,6 +321,18 @@ class Friday:
             return {"reply": "", "needs_confirm": False, "action": {}}
         self.add("user", text)
         intent, payload = classify(text)
+
+        # A channel Friday offered a moment ago: "yes" means read that one, and
+        # a short reply is another go at the name. Falling through to the model
+        # instead produced the same invented refusal three times ("I can't
+        # access channels I don't have access to"), while the channel was
+        # sitting in a list Friday had already fetched.
+        if self._channel_guess and intent not in (READ_CHANNEL, CONNECT):
+            guess, self._channel_guess = self._channel_guess, ""
+            if intent == CONFIRM:
+                return self._read_channel(guess)
+            if intent == CHAT and len(text.split()) <= 4:
+                return self._read_channel(text)
 
         # A pending offer takes precedence: "yes" means yes to THAT.
         if self.pending and intent in (CONFIRM, CANCEL):
@@ -317,6 +368,8 @@ class Friday:
             return self._connect(payload["which"], payload["token"])
         if intent == READ_CHANNEL:
             return self._read_channel(payload["channel"])
+        if intent == ENGINE:
+            return self._engine()
         if intent == DID_WE:
             return self._did_we_discuss()
         if intent == ISSUES:
@@ -593,6 +646,24 @@ class Friday:
             why = err()
             if why:
                 return self._say("I couldn't look at your channels: " + why + ".")
+            # Friday HAS the list, so "I can't find it" on its own is withholding
+            # the answer. Saying the real names turns a dead end into a choice,
+            # which is what three rounds of 'Munsheer' actually needed.
+            names = sl.channel_names() if hasattr(sl, "channel_names") else []
+            best = (sl.closest_channel(name) if hasattr(sl, "closest_channel")
+                    else {})
+            if not best and names:
+                import difflib
+                near = difflib.get_close_matches(name.lower(), names, 1, 0.4)
+                best = {"name": near[0]} if near else {}
+            if best:
+                self._channel_guess = best["name"]
+                return self._say(f"I don't have a channel called {name}. Did "
+                                 f"you mean #{best['name']}? Say yes and I'll "
+                                 f"read it.")
+            if names:
+                return self._say(f"I don't have a channel called {name}. What I "
+                                 f"can see: " + ", ".join("#" + n for n in names))
             return self._say(f"I can't find a Slack channel called {name}.")
         rows = sl.read_channel(ch["id"], limit=15)
         if not rows:
@@ -617,6 +688,32 @@ class Friday:
              {"role": "user", "content": convo[:4000]}],
             timeout=engine.brain.TIMEOUT_SLOW, max_tokens=180)
         return engine.brain._clean(out) if out else convo[:600]
+
+    def _engine(self) -> dict:
+        """What is actually doing the work, stated plainly.
+
+        Asked this, a model with no facts will say whatever sounds reassuring.
+        The real answer matters: it decides whether reading your Slack means
+        sending it to somebody else's server."""
+        bits = []
+        if engine.AVAILABLE:
+            name = (Path(getattr(engine.brain, "MODEL_PATH", "")).stem
+                    or "a local model")
+            up = False
+            try:
+                up = engine.brain.up()
+            except Exception:
+                pass
+            bits.append(f"No, not Claude. I think with {name}, which runs on "
+                        f"this Mac" + ("" if up else " (not loaded yet)"))
+            bits.append("speech in and out is local too, whisper and Kokoro")
+        else:
+            bits.append("No, not Claude. My local brain isn't available right "
+                         "now, so I'm only doing the parts that need no model")
+        bits.append("what I read from Slack or GitHub stays here; nothing is "
+                    "sent to Anthropic or anyone else")
+        return self._say(". ".join(b[0].upper() + b[1:] if b else b
+                                   for b in bits) + ".")
 
     def _did_we_discuss(self) -> dict:
         """Search your past sessions using whatever we were just talking about,
@@ -645,8 +742,23 @@ class Friday:
             pass
         h = hits[0]
         where = " (running now)" if h["sid"] in live else ""
+        hit_on = ", ".join(h.get("matched") or [])
+        # A match on two common words out of five is a coincidence, not a
+        # memory. Saying a flat "Yes" to it is the bluffing failure: the answer
+        # sounds certain and the session it names has nothing to do with the
+        # subject. Claim it only when most of the distinctive terms are there.
+        need = max(2, (h.get("terms") or 1) // 2 + 1)
+        strong = bool(h.get("phrase")) or len(h.get("matched") or []) >= need
+        if not strong:
+            self._last_found = hits
+            return self._say(
+                f"Probably not. I searched for {terms}, and the closest is "
+                f"{memory.ago(h['when'])}{where}, but it only matches on "
+                f"{hit_on}: {(h.get('about') or '')[:90]}\n\nSay \"open that "
+                f"one\" if it is the one, or I can start a new session on it.")
         return self._say(
-            f"Yes. {memory.ago(h['when'])}{where}: {(h.get('about') or '')[:110]}"
+            f"Yes. {memory.ago(h['when'])}{where}, matching {hit_on}: "
+            f"{(h.get('about') or '')[:110]}"
             "\n\nSay \"open that one\" and I'll bring it up.")
 
     def _key_terms(self, text: str) -> str:
@@ -904,6 +1016,33 @@ class Friday:
         "see INSIDE another person's sessions on this Mac",
     ]
 
+    def _abilities(self) -> tuple:
+        """What Friday can do RIGHT NOW, given what is actually connected.
+
+        A fixed list goes stale the moment you connect something: with Slack
+        live, the model was still told it could only "search your Slack once you
+        connect it", and duly told you it had no access to your channels while
+        Friday was reading them."""
+        can, cannot = list(self.CAN_DO), []
+        try:
+            live = {n: v["ready"] for n, v in connectors.status().items()}
+        except Exception:
+            live = {}
+        can += [a for a in self.CAN_DO_MORE if "slack" not in a.lower()]
+        if live.get("slack"):
+            can.append("read any channel in the Slack workspace you connected, "
+                       "and summarise what is being asked")
+            can.append("search your Slack messages")
+        else:
+            cannot.append("read Slack (not connected yet)")
+        for name, label in (("gmail", "read your email"),
+                            ("jira", "look at your Jira tickets")):
+            (can if live.get(name) else cannot).append(
+                label + ("" if live.get(name) else " (not connected yet)"))
+        cannot += [c for c in self.CANNOT_YET
+                   if "jira or email" not in c.lower()]
+        return can, cannot
+
     def _chat(self, text: str) -> dict:
         """Real conversation, bounded by what Friday can actually do.
 
@@ -913,6 +1052,7 @@ class Friday:
         if not engine.AVAILABLE or not engine.brain.model_ready():
             return self._say("I'm here, but my brain isn't loaded yet.")
         sessions = self._session_facts() or "none"
+        can, cannot = self._abilities()
         sys_prompt = (
             "You are Friday, a calm assistant that coordinates a developer's "
             "coding agents. You do not write code.\n\n"
@@ -921,8 +1061,8 @@ class Friday:
             "That list is the complete truth about what each session is and what "
             "it is about. Never invent a description for a session; if its "
             "subject is not listed, say you do not know what it is working on.\n\n"
-            "You CAN: " + "; ".join(self.CAN_DO + self.CAN_DO_MORE) + ".\n"
-            "You CANNOT yet: " + "; ".join(self.CANNOT_YET) + ".\n\n"
+            "You CAN: " + "; ".join(can) + ".\n"
+            "You CANNOT yet: " + "; ".join(cannot) + ".\n\n"
             "Rules: if asked for something in the CANNOT list, say plainly that "
             "you cannot do it yet, in one sentence, and do not speculate. If "
             "asked about something you have no fact for, say you do not know. "
