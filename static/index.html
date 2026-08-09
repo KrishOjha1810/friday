@@ -516,7 +516,9 @@ function renderFleet(rows){
                  : r.status === 'working' ? 'working' : 'idle');
     const d = document.createElement('span'); d.className = 'd';
     b.append(d, document.createTextNode(r.label || 'session'));
-    b.title = r.needs || r.status;
+    /* the generated name means nothing to a human ("krishojha-7f"), so the
+       real subject rides along as the tooltip */
+    b.title = r.needs || r.about || r.status;
     b.onclick = () => say(r.status === 'needs' ? ('what does ' + r.label + ' need?')
                                                : ('open ' + r.label));
     el.appendChild(b);

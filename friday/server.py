@@ -76,6 +76,7 @@ def _fleet_rows() -> list:
             need = r.get("question") or r.get("permission") or ""
             rows.append({"sid": r.get("sid", ""), "label": r.get("label", ""),
                          "status": ("needs" if need else r.get("status", "idle")),
+                         "about": (r.get("topic") or "")[:120],
                          "needs": need[:140]})
         rows.sort(key=lambda x: (x["status"] != "needs", x["label"]))
         return rows

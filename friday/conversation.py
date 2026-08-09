@@ -53,11 +53,27 @@ _OPEN_RE = re.compile(
 # exactly ALPHA to the front": it matched a session labelled by its own first
 # prompt. A pronoun means ask, never guess.
 _PRONOUNS = {"it", "that", "this", "them", "one", "there", "here", "him", "her"}
+# Words that are never a session name, so a greedy pattern cannot mistake an
+# article for the thing you meant.
+_FILLER = {"the", "a", "an", "my", "your", "of", "to", "and", "session"}
+# People do not phrase instructions as clean commands. "Can you go to the
+# voicebridge session and tell him that the design looks good" must work, not
+# fall through to chat and come back as a rephrasing of itself.
 _TELL_RE = re.compile(
-    r"^\s*(?:tell|reply to|answer)\s+([\w.\-]+)\s+(?:to\s+)?(.+)$", re.I)
+    r"(?:^|\b)(?:go to|open)?\s*(?:the\s+)?(?:session\s+(?:of|called)\s+)?"
+    r"(?:tell|ask|reply to|answer|send(?:\s+a\s+message)?\s+to|message)\s+"
+    r"(?:the\s+)?(?:session\s+)?([\w.\-]+)\s+"
+    r"(?:session\s+)?(?:that\s+|to\s+|about\s+)?(.+)$", re.I)
 _NEEDS_RE = re.compile(
     r"\b(?:what (?:does|is)|why (?:does|is))\s+([\w.\-]+)\s+"
     r"(?:need|want|waiting|asking|blocked|stuck)", re.I)
+_TELL_BACK_RE = re.compile(
+    # the (?!…) stops "the session of voicebridge" from capturing "the": that
+    # alternative sits earlier in the sentence and would otherwise win
+    r"\b(?:session\s+(?:of|called|named)\s+([\w.\-]+)"
+    r"|(?!the\b|a\b|an\b|my\b|your\b|this\b|that\b)([\w.\-]+)\s+session)\b"
+    r"[^.]*?\b(?:tell|ask|say to|message)\b\s*(.+)$", re.I)
+_NOISE_RE = re.compile(r"[\[\(][^\]\)]*[\]\)]|\W*", re.I)
 _YES_RE = re.compile(r"^\s*(yes|yeah|yep|sure|do it|go ahead|please|ok(ay)?)\b", re.I)
 _NO_RE = re.compile(r"^\s*(no|nope|cancel|stop|don'?t|never ?mind)\b", re.I)
 _QUIET_RE = re.compile(r"^\s*(quiet|shush|be quiet|stop talking|silence)\b", re.I)
@@ -74,9 +90,24 @@ def classify(text: str) -> tuple:
         return QUIET, {}
     if _RESUME_RE.match(t):
         return RESUME, {}
-    m = _TELL_RE.match(t)
+    # "go to the voicebridge session and tell him that X": the name lands
+    # BEFORE the verb, which is how people actually speak.
+    m2 = _TELL_BACK_RE.search(t)
+    if m2:
+        # the pattern has two shapes ("<name> session …" and "session of
+        # <name> …"), so take whichever pair matched
+        name = m2.group(1) or m2.group(2) or ""
+        msg = (m2.group(3) or "").strip()
+        msg = re.sub(r"^(?:him|her|it|them)\s+(?:that\s+)?", "", msg, flags=re.I)
+        if name.lower() not in _PRONOUNS | _FILLER and msg:
+            return TELL, {"name": name, "message": msg}
+    m = _TELL_RE.search(t)
     if m:
-        return TELL, {"name": m.group(1), "message": m.group(2).strip()}
+        name, msg = m.group(1), m.group(2).strip()
+        # "tell voicebridge him that X" / "tell it that X": drop the pronoun
+        msg = re.sub(r"^(?:him|her|it|them)\s+(?:that\s+)?", "", msg, flags=re.I)
+        if name.lower() not in _PRONOUNS and msg:
+            return TELL, {"name": name, "message": msg}
     m = _OPEN_RE.search(t)
     if m and len(t.split()) <= 6:      # a command, not a sentence about opening
         name = m.group(2)
@@ -114,6 +145,11 @@ class Friday:
     # ---- the main entry point --------------------------------------------
     def handle(self, text: str) -> dict:
         """Take what the user said, return {reply, action, needs_confirm}."""
+        # Whisper labels non-speech as [SOUND], [BLANK_AUDIO], (music) and so
+        # on. Treating a door closing as a question produced "I don't know what
+        # that sound is. Can you clarify?", which is a machine talking to noise.
+        if _NOISE_RE.fullmatch((text or "").strip()):
+            return {"reply": "", "needs_confirm": False, "action": {}}
         self.add("user", text)
         intent, payload = classify(text)
 
@@ -303,13 +339,15 @@ class Friday:
         honest 'I can't do that yet' rather than an invention."""
         if not engine.AVAILABLE or not engine.brain.model_ready():
             return self._say("I'm here, but my brain isn't loaded yet.")
-        sessions = ", ".join(self._session_names()) or "none"
+        sessions = self._session_facts() or "none"
         sys_prompt = (
             "You are Friday, a calm assistant that coordinates a developer's "
             "coding agents. You do not write code.\n\n"
             "ONLY these facts are true; never invent others.\n"
-            f"Sessions running right now: {sessions}.\n"
-            f"Their state: {self.fleet_summary()}\n\n"
+            f"Sessions running right now:\n{sessions}\n"
+            "That list is the complete truth about what each session is and what "
+            "it is about. Never invent a description for a session; if its "
+            "subject is not listed, say you do not know what it is working on.\n\n"
             "You CAN: " + "; ".join(self.CAN_DO) + ".\n"
             "You CANNOT yet: " + "; ".join(self.CANNOT_YET) + ".\n\n"
             "Rules: if asked for something in the CANNOT list, say plainly that "
@@ -337,6 +375,65 @@ class Friday:
         return self._say("That one took too long to think about. Ask me again?")
 
     # ---- helpers ----------------------------------------------------------
+    _TOPIC_CACHE = {}          # sid -> short subject, computed once per session
+
+    def _subject(self, sid: str, raw: str) -> str:
+        """A rambling first prompt turned into a few words a person would use.
+
+        "Hey. I need to learn about RWA tokenization and ERC 7943 and 3643
+        Because I would be doing…" becomes "learning RWA tokenisation". Quoting
+        the raw prompt is technically honest but reads like a log; this is what
+        you would actually call that session."""
+        raw = (raw or "").strip()
+        if not raw:
+            return ""
+        hit = self._TOPIC_CACHE.get(sid)
+        if hit and hit[0] == raw:
+            return hit[1]
+        short = ""
+        try:
+            if engine.AVAILABLE and engine.brain.up():
+                short = engine.brain._chat(
+                    [{"role": "system", "content":
+                      "Turn this first request into a 3-6 word description of "
+                      "what the session is about, as a person would say it "
+                      "(e.g. 'learning RWA tokenisation', 'building the voice "
+                      "app'). Lowercase, no quotes, no punctuation, no preamble."},
+                     {"role": "user", "content": raw[:400]}],
+                    timeout=6.0, max_tokens=20)
+                short = " ".join((short or "").split())[:60].strip(' ."\'')
+        except Exception:
+            short = ""
+        if not short:                       # fall back to a trimmed prompt
+            short = " ".join(raw.split()[:8])
+        self._TOPIC_CACHE[sid] = (raw, short)
+        return short
+
+    def _session_facts(self) -> str:
+        """Every session as a line of FACT: its name, its state, and what it is
+        actually about (taken from the first thing the human asked it). Without
+        this the model had only a generated id like 'krishojha-7f' to reason
+        with, and duly invented 'a backend data processing pipeline'."""
+        try:
+            rows = list(engine.fleet.snapshot().values())
+        except Exception:
+            return ""
+        out = []
+        for r in rows:
+            state = ("waiting on you" if (r.get("question") or r.get("permission"))
+                     else ("working" if r.get("status") == "working" else "idle"))
+            topic = self._subject(r.get("sid", ""), r.get("topic"))
+            line = f"- {r.get('label')}: {state}"
+            if topic:
+                line += f'; it is about: "{topic}"'
+            else:
+                line += "; subject unknown"
+            need = r.get("question") or r.get("permission")
+            if need:
+                line += f'; it is asking: "{need}"'
+            out.append(line)
+        return "\n".join(out)
+
     def _session_names(self) -> list:
         try:
             return [r.get("label", "") for r in engine.fleet.snapshot().values()

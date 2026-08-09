@@ -262,6 +262,30 @@ def test_an_agent_that_needs_nothing_says_so():
     assert "doesn't need anything" in r["reply"].lower()
 
 
+def test_natural_phrasing_is_understood_not_echoed():
+    """'Can you go to the session of voicebridge and tell him…' used to fall
+    through to chat, and the model replied by rephrasing the request back at
+    the user instead of doing it."""
+    for t in ["Can you go to the session of voicebridge and tell him that the design looks good",
+              "go to the voicebridge session and tell it we are done",
+              "ask api to run the tests",
+              "send a message to api that we shipped"]:
+        i, p = classify(t)
+        assert i == C.TELL, f"not understood: {t}"
+        assert p["name"] not in ("the", "a", "it"), f"grabbed filler: {p['name']}"
+
+
+def test_transcribed_noise_is_ignored_not_answered():
+    """Whisper labels a door closing as [SOUND]. Answering it produced
+    'I don't know what that sound is. Can you clarify?'"""
+    _fake_engine()
+    f = Friday()
+    for noise in ["[SOUND]", "[BLANK_AUDIO]", "(music)", "  ", "..."]:
+        r = f.handle(noise)
+        assert r["reply"] == "", f"answered noise: {noise}"
+    assert not f.history, "noise polluted the thread"
+
+
 # ---- what it knows --------------------------------------------------------
 def test_it_answers_what_is_going_on_in_plain_english():
     _fake_engine()
