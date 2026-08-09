@@ -238,6 +238,30 @@ def test_two_waiting_agents_are_never_guessed_between():
         C.actions.send_to_session = orig
 
 
+def test_asking_what_one_agent_needs_sets_up_the_answer():
+    """Tap a 'needs you' chip, hear the question, then just answer it. The
+    reply must route without you naming the session again."""
+    _fake_engine(); _with_routing()
+    sent = {}
+    orig = C.actions.send_to_session
+    try:
+        C.actions.send_to_session = lambda sid, msg: sent.update(sid=sid) or True
+        f = Friday()
+        r = f.handle("what does api need?")
+        assert "which store" in r["reply"].lower()      # it says the question
+        f.handle("use the redis one")                    # bare answer
+        assert sent.get("sid") == "s2"                   # reached api
+    finally:
+        C.actions.send_to_session = orig
+
+
+def test_an_agent_that_needs_nothing_says_so():
+    _fake_engine()
+    f = Friday()
+    r = f.handle("what does jobhunt need?")
+    assert "doesn't need anything" in r["reply"].lower()
+
+
 # ---- what it knows --------------------------------------------------------
 def test_it_answers_what_is_going_on_in_plain_english():
     _fake_engine()

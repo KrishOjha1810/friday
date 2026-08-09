@@ -38,6 +38,7 @@ CONFIRM = "confirm"        # "yes", "do it"
 CANCEL = "cancel"          # "no", "cancel"
 QUIET = "quiet"            # "quiet", "stop talking"
 RESUME = "resume"          # "resume", "you can talk again"
+NEEDS = "needs"            # "what does api need?"
 CHAT = "chat"              # anything else: a real conversation
 
 _FLEET_RE = re.compile(
@@ -49,6 +50,9 @@ _OPEN_RE = re.compile(
     r"(?:session\s+)?([\w.\-]+)", re.I)
 _TELL_RE = re.compile(
     r"^\s*(?:tell|reply to|answer)\s+([\w.\-]+)\s+(?:to\s+)?(.+)$", re.I)
+_NEEDS_RE = re.compile(
+    r"\b(?:what (?:does|is)|why (?:does|is))\s+([\w.\-]+)\s+"
+    r"(?:need|want|waiting|asking|blocked|stuck)", re.I)
 _YES_RE = re.compile(r"^\s*(yes|yeah|yep|sure|do it|go ahead|please|ok(ay)?)\b", re.I)
 _NO_RE = re.compile(r"^\s*(no|nope|cancel|stop|don'?t|never ?mind)\b", re.I)
 _QUIET_RE = re.compile(r"^\s*(quiet|shush|be quiet|stop talking|silence)\b", re.I)
@@ -71,6 +75,9 @@ def classify(text: str) -> tuple:
     m = _OPEN_RE.search(t)
     if m and len(t.split()) <= 6:      # a command, not a sentence about opening
         return OPEN, {"name": m.group(2)}
+    m = _NEEDS_RE.search(t)
+    if m:
+        return NEEDS, {"name": m.group(1)}
     if _FLEET_RE.search(t):
         return ASK_FLEET, {}
     if _YES_RE.match(t):
@@ -120,6 +127,8 @@ class Friday:
             return self._say("Listening again.")
         if intent == ASK_FLEET:
             return self._say(self.fleet_summary())
+        if intent == NEEDS:
+            return self._what_needs(payload["name"])
         if intent == OPEN:
             return self._propose_open(payload["name"])
         if intent == TELL:
@@ -183,6 +192,27 @@ class Friday:
         if idle:
             bits.append(f"{_join([r['label'] for r in idle])} {_is(len(idle))} done.")
         return " ".join(bits) or "Nothing is running."
+
+    def _what_needs(self, name: str) -> dict:
+        """Report exactly what one agent is waiting on, and remember that it is
+        waiting, so your very next message can just be the answer."""
+        hit, _ = self._find_how(name)
+        if not hit:
+            return self._say(f"I can't find a session called {name}.")
+        label = hit.get("label", name)
+        q = (hit.get("question") or hit.get("permission") or "").strip()
+        if not q:
+            state = "still working" if hit.get("status") == "working" else "done"
+            return self._say(f"{label} doesn't need anything, it's {state}.")
+        # Mark it as waiting so a bare reply routes straight there.
+        if engine.AVAILABLE:
+            try:
+                self.focus = engine.routing.note_spoken(
+                    self.focus, [{"sid": hit.get("sid", ""), "label": label,
+                                  "kind": "blocked"}])
+            except Exception:
+                pass
+        return self._say(f"{label} is asking: {q}")
 
     # ---- actions, always proposed first -----------------------------------
     def _propose_open(self, name: str) -> dict:
