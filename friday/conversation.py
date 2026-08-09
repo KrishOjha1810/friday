@@ -48,6 +48,11 @@ _FLEET_RE = re.compile(
 _OPEN_RE = re.compile(
     r"\b(open|switch to|go to|jump to|resume|show me)\s+(?:the\s+)?"
     r"(?:session\s+)?([\w.\-]+)", re.I)
+# "open it", "open that" name nothing. Treating a pronoun as a session name is
+# how "can you open it through Claude?" became "I couldn't bring Reply with
+# exactly ALPHA to the front": it matched a session labelled by its own first
+# prompt. A pronoun means ask, never guess.
+_PRONOUNS = {"it", "that", "this", "them", "one", "there", "here", "him", "her"}
 _TELL_RE = re.compile(
     r"^\s*(?:tell|reply to|answer)\s+([\w.\-]+)\s+(?:to\s+)?(.+)$", re.I)
 _NEEDS_RE = re.compile(
@@ -74,7 +79,10 @@ def classify(text: str) -> tuple:
         return TELL, {"name": m.group(1), "message": m.group(2).strip()}
     m = _OPEN_RE.search(t)
     if m and len(t.split()) <= 6:      # a command, not a sentence about opening
-        return OPEN, {"name": m.group(2)}
+        name = m.group(2)
+        if name.lower() in _PRONOUNS:
+            return OPEN, {"name": ""}   # "open it": we must ask which
+        return OPEN, {"name": name}
     m = _NEEDS_RE.search(t)
     if m:
         return NEEDS, {"name": m.group(1)}
@@ -218,6 +226,10 @@ class Friday:
     def _propose_open(self, name: str) -> dict:
         """TIER 0. Bringing a window to the front is instantly reversible (you
         just look away), so asking permission is pure friction."""
+        if not name:
+            names = self._session_names()
+            return self._say("Which one? " + (", ".join(names) if names
+                                              else "nothing is running."))
         hit, _how = self._find_how(name)
         if not hit:
             return self._say(f"I can't find a session called {name}.")
@@ -262,30 +274,76 @@ class Friday:
         return self._say("I'm not sure what to do with that.")
 
     # ---- open-ended conversation -----------------------------------------
+    # Exactly what Friday can do today. The model is told this verbatim, because
+    # the alternative is what actually happened in testing: asked to open a past
+    # session it replied "I don't have access to your past sessions", which is
+    # false, and asked about a session id it invented a confident paragraph.
+    # A small model with no tools will fill any gap with plausible nonsense, so
+    # the gap has to be closed explicitly.
+    CAN_DO = [
+        "tell you which coding sessions are running and what each is doing",
+        "tell you what a specific session is waiting on",
+        "bring a session's window to the front (say: open <name>)",
+        "send an instruction to a session (say: tell <name> to <something>)",
+        "take your answer to a session that asked you a question",
+        "go quiet, or start speaking again",
+    ]
+    CANNOT_YET = [
+        "search Slack, Jira, GitHub or email",
+        "read or search past/closed sessions (only currently running ones)",
+        "start a brand new session, or write code itself",
+        "remember anything from before this conversation",
+    ]
+
     def _chat(self, text: str) -> dict:
-        """Real conversation. The local model answers, with what is actually
-        happening on the machine as context, so 'how's it going' gets a real
-        answer rather than a chatbot one."""
+        """Real conversation, bounded by what Friday can actually do.
+
+        The model never answers about the machine from its own head: the live
+        facts are handed to it, and anything outside its abilities must be an
+        honest 'I can't do that yet' rather than an invention."""
         if not engine.AVAILABLE or not engine.brain.model_ready():
             return self._say("I'm here, but my brain isn't loaded yet.")
+        sessions = ", ".join(self._session_names()) or "none"
         sys_prompt = (
-            "You are Friday, a calm, competent assistant for a developer. You "
-            "coordinate their coding agents; you do not write code yourself. "
-            "Answer in one or two short sentences, plainly, no lists, no "
-            "markdown. If you do not know, say so.\n\n"
-            f"What is running right now: {self.fleet_summary()}")
+            "You are Friday, a calm assistant that coordinates a developer's "
+            "coding agents. You do not write code.\n\n"
+            "ONLY these facts are true; never invent others.\n"
+            f"Sessions running right now: {sessions}.\n"
+            f"Their state: {self.fleet_summary()}\n\n"
+            "You CAN: " + "; ".join(self.CAN_DO) + ".\n"
+            "You CANNOT yet: " + "; ".join(self.CANNOT_YET) + ".\n\n"
+            "Rules: if asked for something in the CANNOT list, say plainly that "
+            "you cannot do it yet, in one sentence, and do not speculate. If "
+            "asked about something you have no fact for, say you do not know. "
+            "Never guess what an unfamiliar name or id means. Answer in one or "
+            "two short sentences, no lists, no markdown.")
         recent = [{"role": "user" if m["role"] == "user" else "assistant",
                    "content": m["text"]} for m in self.history[-6:]]
+        # If the model is not actually up, say THAT. Answering "I didn't catch
+        # that" when the truth is "my brain is still loading" sends the user
+        # rephrasing a question that was fine, and it took 35 seconds to say it.
+        if not engine.brain.up():
+            engine.brain.start()
+            return self._say("My brain is still loading, give it a few seconds "
+                             "and ask again.")
         try:
             out = engine.brain._chat(
                 [{"role": "system", "content": sys_prompt}] + recent,
                 timeout=engine.brain.TIMEOUT_SLOW, max_tokens=120)
         except Exception:
             out = ""
-        return self._say(engine.brain._clean(out) if out
-                         else "I didn't catch that, say it another way?")
+        if out:
+            return self._say(engine.brain._clean(out))
+        return self._say("That one took too long to think about. Ask me again?")
 
     # ---- helpers ----------------------------------------------------------
+    def _session_names(self) -> list:
+        try:
+            return [r.get("label", "") for r in engine.fleet.snapshot().values()
+                    if r.get("label")]
+        except Exception:
+            return []
+
     def _find(self, name: str):
         """Match a spoken/typed name to a session.
 
@@ -319,11 +377,10 @@ class Friday:
         contains = [r for r in rows if q in (r.get("label") or "").lower()]
         if len(contains) == 1:                          # unambiguous substring
             return contains[0], "fuzzy"
-        try:
-            hit = engine.sessions.find(name)
-            return (hit, "fuzzy") if hit else (None, "")
-        except Exception:
-            return None, ""
+        # Deliberately NO fallback to the older roster lookup: it labels
+        # sessions by their first prompt, so it happily "finds" a session
+        # called "Reply with exactly ALPHA". A miss is better than nonsense.
+        return None, ""
 
     def _say(self, text: str, needs_confirm: bool = False,
              action: dict = None) -> dict:

@@ -8,352 +8,559 @@
 <meta name="apple-mobile-web-app-title" content="Friday">
 <title>Friday</title>
 <style>
-  /* One thread is the spine. A thin fleet strip sits above it so status is
-     glanceable without turning the conversation into a log. Everything is
-     sized for a phone first, because the phone is the harder case. */
+  /* ---------------------------------------------------------------------
+     Friday is a supervisor, not a chatbot. Two type roles carry that:
+     conversation is set in the system sans, while session names, states and
+     counts are MONO, because those are machine facts and should read as such.
+     One accent (teal) belongs to Friday's own voice and presence; amber means
+     an agent is working, red means a human is needed. Nothing else is coloured.
+     --------------------------------------------------------------------- */
   :root{
-    --bg:#0b0d12; --panel:#12151d; --line:#1e2330; --ink:#e7ebf3;
-    --dim:#8b94a7; --me:#1d4ed8; --accent:#5eead4; --warn:#fbbf24;
-    --alert:#f87171; --radius:14px;
+    --void:#0b0d12; --panel:#12151d; --raise:#171b26; --line:#1e2330;
+    --ink:#e7ebf3; --dim:#8b94a7; --faint:#5a6478;
+    --live:#5eead4;            /* Friday's presence */
+    --me:#2563eb;              /* you */
+    --wait:#fbbf24;            /* an agent is working */
+    --need:#f87171;            /* an agent needs a human */
+    --mono:ui-monospace,SFMono-Regular,"SF Mono",Menlo,monospace;
   }
   *{box-sizing:border-box}
   html,body{margin:0;height:100%}
   body{
-    background:var(--bg); color:var(--ink); display:flex; flex-direction:column;
-    font:15px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",system-ui,sans-serif;
-    -webkit-font-smoothing:antialiased;
+    background:var(--void); color:var(--ink); display:flex; flex-direction:column;
+    font:15px/1.55 -apple-system,BlinkMacSystemFont,"Segoe UI",system-ui,sans-serif;
+    -webkit-font-smoothing:antialiased; overflow:hidden;
   }
+  button{font:inherit; color:inherit; cursor:pointer}
+  :focus-visible{outline:2px solid var(--live); outline-offset:2px}
 
-  /* ---- fleet strip -------------------------------------------------- */
+  /* ---- header: identity, the call, and the fleet ---------------------- */
   header{
-    flex:none; border-bottom:1px solid var(--line); background:var(--panel);
-    padding:calc(env(safe-area-inset-top,0px) + 10px) 12px 10px;
+    flex:none; background:var(--panel); border-bottom:1px solid var(--line);
+    padding:calc(env(safe-area-inset-top,0px) + 11px) 14px 11px;
   }
-  .brand{display:flex; align-items:center; gap:9px; margin-bottom:9px}
-  .dot{width:8px;height:8px;border-radius:50%;background:var(--accent);
-       box-shadow:0 0 10px rgba(94,234,212,.6)}
-  .brand h1{font-size:15px;margin:0;font-weight:600;letter-spacing:.2px}
-  .brand .sub{color:var(--dim);font-size:12px;margin-left:auto}
-  .fleet{display:flex;gap:7px;overflow-x:auto;scrollbar-width:none;padding-bottom:2px}
-  .fleet::-webkit-scrollbar{display:none}
-  .chip{
-    flex:none; display:flex; align-items:center; gap:6px; cursor:pointer;
-    background:#171b26; border:1px solid var(--line); color:var(--ink);
-    border-radius:999px; padding:6px 11px; font-size:12.5px; white-space:nowrap;
+  .top{display:flex; align-items:center; gap:11px}
+  .name{font-size:15px; font-weight:600; letter-spacing:.2px; margin:0}
+  .state{
+    font:11.5px/1 var(--mono); color:var(--faint); letter-spacing:.4px;
+    text-transform:uppercase;
   }
-  .chip .sd{width:7px;height:7px;border-radius:50%;background:#4b5563}
-  .chip.working .sd{background:var(--warn);animation:pulse 1.6s infinite}
-  .chip.needs{border-color:#7f3a3a;background:#2a1518}
-  .chip.needs .sd{background:var(--alert)}
-  .chip.idle .sd{background:#3f9e7a}
-  @keyframes pulse{0%,100%{opacity:1}50%{opacity:.35}}
-  .empty-fleet{color:var(--dim);font-size:12.5px;padding:2px}
+  .grow{flex:1}
 
-  /* ---- the thread ----------------------------------------------------- */
-  main{flex:1; overflow-y:auto; padding:16px 12px 8px; -webkit-overflow-scrolling:touch}
-  .msg{max-width:min(680px,88%); margin:0 auto 12px; display:flex}
-  .msg .b{padding:10px 13px; border-radius:var(--radius); white-space:pre-wrap;
-          word-wrap:break-word}
-  .msg.user{justify-content:flex-end}
-  .msg.user .b{background:var(--me); color:#fff; border-bottom-right-radius:5px}
-  .msg.friday .b{background:var(--panel); border:1px solid var(--line);
-                 border-bottom-left-radius:5px}
-  /* Friday starting the conversation looks different from Friday answering:
-     you should always be able to tell who spoke first. */
-  .msg.proactive .b{border-left:3px solid var(--accent); background:#111a1c}
-  .msg.proactive .who{color:var(--accent)}
-  .who{font-size:11px; color:var(--dim); margin-bottom:3px; letter-spacing:.3px;
-       text-transform:uppercase}
-  .confirm{display:flex; gap:8px; margin:2px auto 14px; max-width:min(680px,88%)}
-  .confirm button{
-    border:1px solid var(--line); background:#171b26; color:var(--ink);
-    border-radius:10px; padding:8px 16px; font-size:14px; cursor:pointer;
+  /* THE SIGNATURE: one ring, in one place, carrying three states. During a
+     hands-free call it is the only thing you need to glance at. */
+  .ring{position:relative; width:26px; height:26px; flex:none;
+        display:grid; place-items:center}
+  .ring i{position:absolute; inset:0; border-radius:50%;
+          border:1.5px solid var(--line); transition:transform .1s}
+  .ring b{width:8px; height:8px; border-radius:50%; background:var(--faint);
+          transition:background .2s}
+  body[data-call="on"] .ring i{border-color:rgba(94,234,212,.35)}
+  body[data-call="on"] .ring b{background:var(--live)}
+  body[data-mode="hearing"] .ring i{
+    border-color:var(--live);
+    transform:scale(calc(1 + var(--lvl, 0) * .3));
+    box-shadow:0 0 0 calc(var(--lvl, 0) * 7px) rgba(94,234,212,.10);
   }
-  .confirm button.go{background:var(--accent); color:#04211c; border-color:transparent;
-                     font-weight:600}
-  .thinking{color:var(--dim); font-style:italic; max-width:min(680px,88%);
-            margin:0 auto 12px}
+  body[data-mode="thinking"] .ring i{
+    border-color:transparent; border-top-color:var(--live);
+    animation:spin 900ms linear infinite;
+  }
+  body[data-mode="speaking"] .ring i{
+    border-color:var(--live); animation:breathe 1.5s ease-in-out infinite;
+  }
+  @keyframes spin{to{transform:rotate(360deg)}}
+  @keyframes breathe{0%,100%{box-shadow:0 0 0 0 rgba(94,234,212,.28)}
+                     50%{box-shadow:0 0 0 7px rgba(94,234,212,0)}}
+
+  .btn{
+    display:inline-flex; align-items:center; gap:7px; background:var(--raise);
+    border:1px solid var(--line); border-radius:10px; padding:7px 12px;
+    font-size:13px; transition:background .15s, border-color .15s;
+  }
+  .btn:hover{background:#1c2130}
+  .btn svg{width:15px; height:15px; flex:none}
+  .btn.call{border-color:rgba(94,234,212,.3); color:var(--live)}
+  .btn.hang{background:#2a1518; border-color:#7f3a3a; color:#ffd9d9}
+
+  /* ---- fleet strip: state first, mono, real counts -------------------- */
+  .fleet{display:flex; gap:7px; margin-top:10px; overflow-x:auto;
+         scrollbar-width:none; align-items:center}
+  .fleet::-webkit-scrollbar{display:none}
+  .count{font:11.5px/1 var(--mono); color:var(--dim); letter-spacing:.3px;
+         white-space:nowrap; padding-right:3px}
+  .count.needs{color:var(--need)}
+  .sess{
+    flex:none; display:flex; align-items:center; gap:6px; background:var(--raise);
+    border:1px solid var(--line); border-radius:8px; padding:5px 10px;
+    font:12px/1 var(--mono); white-space:nowrap;
+  }
+  .sess .d{width:6px; height:6px; border-radius:50%; background:var(--faint)}
+  .sess.working .d{background:var(--wait); animation:blink 1.7s infinite}
+  .sess.needs{border-color:#7f3a3a; background:#241417; color:#ffd9d9}
+  .sess.needs .d{background:var(--need)}
+  .sess.idle .d{background:#3f9e7a}
+  @keyframes blink{0%,100%{opacity:1}50%{opacity:.3}}
+
+  /* ---- thread --------------------------------------------------------- */
+  main{flex:1; overflow-y:auto; overflow-anchor:auto; padding:18px 14px 10px;
+       -webkit-overflow-scrolling:touch}
+  .turn{max-width:min(700px,90%); margin:0 auto 13px}
+  .turn.you{display:flex; justify-content:flex-end}
+  .bub{padding:10px 13px; border-radius:13px; white-space:pre-wrap;
+       word-wrap:break-word; max-width:100%}
+  .turn.you .bub{background:var(--me); border-bottom-right-radius:4px}
+  .turn.fri .bub{background:var(--panel); border:1px solid var(--line);
+                 border-bottom-left-radius:4px}
+  /* Friday starting the conversation is a different act from Friday replying */
+  .turn.first .bub{background:#101a1c; border-color:rgba(94,234,212,.28);
+                   border-left:2px solid var(--live)}
+  .from{font:10.5px/1 var(--mono); color:var(--faint); letter-spacing:.5px;
+        text-transform:uppercase; margin-bottom:5px}
+  .turn.first .from{color:var(--live)}
+  .spoke{opacity:.78}                      /* was said out loud during a call */
+  .ask{display:flex; gap:8px; margin:0 auto 14px; max-width:min(700px,90%)}
+  .ask button{background:var(--raise); border:1px solid var(--line);
+              border-radius:9px; padding:8px 16px}
+  .ask button.yes{background:var(--live); color:#04211c; border-color:transparent;
+                  font-weight:600}
+  .work{font:12px/1 var(--mono); color:var(--faint); letter-spacing:.4px;
+        max-width:min(700px,90%); margin:0 auto 13px}
+
+  /* ---- call bar: docks ABOVE the composer; the thread stays visible --- */
+  .callbar{
+    flex:none; display:none; align-items:center; gap:12px; background:#0e1a1c;
+    border-top:1px solid rgba(94,234,212,.25); padding:11px 16px;
+  }
+  body[data-call="on"] .callbar{display:flex}
+  .callbar .what{font:12px/1 var(--mono); color:var(--live);
+                 letter-spacing:.5px; text-transform:uppercase}
+  .callbar .hint{font-size:12.5px; color:var(--dim)}
 
   /* ---- composer ------------------------------------------------------- */
   footer{
-    flex:none; border-top:1px solid var(--line); background:var(--panel);
-    padding:10px 12px calc(env(safe-area-inset-bottom,0px) + 10px);
+    flex:none; background:var(--panel); border-top:1px solid var(--line);
+    padding:11px 14px calc(env(safe-area-inset-bottom,0px) + 11px);
   }
-  .row{display:flex; gap:8px; align-items:flex-end; max-width:700px; margin:0 auto}
+  .row{display:flex; gap:8px; align-items:flex-end; max-width:720px; margin:0 auto}
+  .ico{
+    flex:none; width:40px; height:40px; border-radius:10px; display:grid;
+    place-items:center; background:var(--raise); border:1px solid var(--line);
+    transition:background .15s, border-color .15s, color .15s;
+  }
+  .ico svg{width:18px; height:18px}
+  .ico:hover{background:#1c2130}
+  /* ON is unmistakable: filled, tinted, and the glyph itself changes */
+  .ico[aria-pressed="true"]{background:var(--live); color:#04211c;
+                            border-color:transparent}
+  .ico.rec{background:var(--need); color:#2a0f0f; border-color:transparent}
   textarea{
-    flex:1; resize:none; background:#0e1118; color:var(--ink); font:inherit;
-    border:1px solid var(--line); border-radius:12px; padding:10px 12px;
-    max-height:120px; min-height:42px;
+    flex:1; resize:none; min-height:40px; max-height:130px; padding:9px 12px;
+    background:#0e1118; color:var(--ink); border:1px solid var(--line);
+    border-radius:11px; font:inherit;
   }
-  textarea:focus{outline:none; border-color:#2f3a52}
-  .icon{
-    flex:none; width:42px; height:42px; border-radius:12px; cursor:pointer;
-    border:1px solid var(--line); background:#171b26; color:var(--ink);
-    display:grid; place-items:center; font-size:17px;
+  textarea:focus{outline:none; border-color:#31405e}
+  .tip{margin-top:8px; text-align:center; font:11.5px/1.5 var(--mono);
+       color:var(--faint)}
+  .jump{
+    position:fixed; right:18px; bottom:104px; z-index:6; background:var(--panel);
+    border:1px solid var(--line); border-radius:999px; padding:8px 14px;
+    font:12px/1 var(--mono); box-shadow:0 8px 24px rgba(0,0,0,.5);
   }
-  .icon.on{background:var(--accent); color:#04211c; border-color:transparent}
-  .hint{color:var(--dim); font-size:11.5px; text-align:center; margin-top:7px}
-  /* Scrolled up reading something? New messages must not yank you away, but
-     you still need to know they arrived. */
-  #jump{
-    position:fixed; right:16px; bottom:96px; z-index:5; cursor:pointer;
-    background:var(--panel); color:var(--ink); border:1px solid var(--line);
-    border-radius:999px; padding:8px 14px; font:inherit; font-size:13px;
-    box-shadow:0 6px 20px rgba(0,0,0,.45);
+  .jump.needs{background:#2a1518; border-color:#7f3a3a; color:#ffd9d9}
+  @media (prefers-reduced-motion:reduce){
+    *{animation:none !important; transition:none !important}
   }
-  #jump.needs{background:#2a1518; border-color:#7f3a3a; color:#ffd9d9}
 </style>
 </head>
-<body>
+<body data-call="off" data-mode="idle">
 
 <header>
-  <div class="brand">
-    <span class="dot" id="live"></span>
-    <h1>Friday</h1>
-    <span class="sub" id="sub">connecting…</span>
+  <div class="top">
+    <span class="ring" aria-hidden="true"><i></i><b></b></span>
+    <h1 class="name">Friday</h1>
+    <span class="state" id="state">idle</span>
+    <span class="grow"></span>
+    <button class="btn call" id="callBtn">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"
+           stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <path d="M22 16.9v3a2 2 0 0 1-2.2 2 19.8 19.8 0 0 1-8.6-3.1 19.5 19.5 0 0 1-6-6A19.8 19.8 0 0 1 2.1 4.2 2 2 0 0 1 4.1 2h3a2 2 0 0 1 2 1.7c.1.9.4 1.8.7 2.6a2 2 0 0 1-.5 2.1L8.1 9.9a16 16 0 0 0 6 6l1.5-1.2a2 2 0 0 1 2.1-.5c.8.3 1.7.6 2.6.7a2 2 0 0 1 1.7 2z"/>
+      </svg>
+      <span id="callLbl">Call</span>
+    </button>
   </div>
-  <div class="fleet" id="fleet"><span class="empty-fleet">no sessions yet</span></div>
+  <div class="fleet" id="fleet"></div>
 </header>
 
 <main id="thread"></main>
-<button id="jump" hidden>0 new</button>
+<button class="jump" id="jump" hidden></button>
+
+<div class="callbar">
+  <span class="what" id="callWhat">listening</span>
+  <span class="hint" id="callHint">just talk, I'll answer out loud</span>
+  <span class="grow"></span>
+  <button class="btn hang" id="hangBtn">End call</button>
+</div>
 
 <footer>
   <div class="row">
-    <button class="icon" id="mic" title="Hold to talk" aria-label="Talk">🎙</button>
-    <button class="icon" id="ear" title="Read replies aloud" aria-label="Speak replies">🔈</button>
-    <textarea id="input" rows="1" placeholder="Ask Friday, or just talk…"></textarea>
-    <button class="icon" id="send" title="Send" aria-label="Send">↑</button>
+    <button class="ico" id="mic" aria-label="Hold to talk" title="Hold to talk">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"
+           stroke-linecap="round" aria-hidden="true">
+        <rect x="9" y="2.5" width="6" height="11" rx="3" fill="currentColor" stroke="none"/>
+        <path d="M5.5 11.5a6.5 6.5 0 0 0 13 0"/><path d="M12 18v3.5"/>
+      </svg>
+    </button>
+    <button class="ico" id="ear" aria-pressed="false" aria-label="Read replies aloud"
+            title="Read replies aloud">
+      <svg id="earIcon" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+           stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"
+           aria-hidden="true"></svg>
+    </button>
+    <textarea id="input" rows="1" placeholder="Ask Friday, or hold the mic"></textarea>
+    <button class="ico" id="send" aria-label="Send" title="Send">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9"
+           stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <path d="M12 19V5"/><path d="M5.5 11.5 12 5l6.5 6.5"/>
+      </svg>
+    </button>
   </div>
-  <div class="hint" id="hint">try: what's running? · open jobhunt · tell api to use redis · quiet</div>
+  <div class="tip" id="tip">what's running · what does &lt;name&gt; need · open &lt;name&gt; · tell &lt;name&gt; to …</div>
 </footer>
 
 <script>
-/* When Friday is reachable from the phone every request needs the key, and the
-   key only ever lives in the URL you opened. */
 const KEY = new URLSearchParams(location.search).get('k') || '';
 const U = p => p + (KEY ? (p.includes('?') ? '&' : '?') + 'k=' + encodeURIComponent(KEY) : '');
 const $ = id => document.getElementById(id);
-const thread = $('thread'), input = $('input'), sub = $('sub');
-let pendingConfirm = false;
+const thread = $('thread'), input = $('input');
+const TIP = $('tip').textContent;
 
-function atBottom(){ return thread.scrollHeight - thread.scrollTop - thread.clientHeight < 80; }
-function scroll(force){ if(force || atBottom()) thread.scrollTop = thread.scrollHeight; }
+let speakBack = false;      // read replies aloud (outside a call)
+let inCall = false;         // continuous hands-free conversation
+let callMode = 'idle';      // idle | hearing | thinking | speaking
 
-let unread = 0, unreadNeedsYou = false;
-function noteUnread(isAsk){
+function setMode(m){
+  callMode = m;
+  document.body.dataset.mode = m;
+  $('state').textContent = inCall ? m : (speakBack ? 'reads aloud' : 'idle');
+  $('callWhat').textContent = {hearing:'listening', thinking:'thinking',
+                               speaking:'speaking'}[m] || 'on a call';
+  $('callHint').textContent = m === 'hearing' ? "just talk, I'll answer out loud"
+    : m === 'thinking' ? 'working that out…'
+    : m === 'speaking' ? 'talking — say anything to cut in' : '';
+}
+function level(v){ document.documentElement.style.setProperty('--lvl', v.toFixed(3)); }
+
+/* ---- thread ------------------------------------------------------------ */
+function atBottom(){ return thread.scrollHeight - thread.scrollTop - thread.clientHeight < 90; }
+let unread = 0, unreadAsk = false;
+function bumpUnread(isAsk){
   if(atBottom()) return;
-  unread++; unreadNeedsYou = unreadNeedsYou || !!isAsk;
-  const j = $('jump');
-  j.hidden = false;
-  j.classList.toggle('needs', unreadNeedsYou);
-  j.textContent = unread + ' new' + (unreadNeedsYou ? ' · needs you' : '');
+  unread++; unreadAsk = unreadAsk || !!isAsk;
+  const j = $('jump'); j.hidden = false;
+  j.classList.toggle('needs', unreadAsk);
+  j.textContent = unread + ' new' + (unreadAsk ? ' · needs you' : '');
 }
-function clearUnread(){
-  unread = 0; unreadNeedsYou = false;
-  const j = $('jump'); j.hidden = true; j.classList.remove('needs');
-}
+function clearUnread(){ unread = 0; unreadAsk = false; $('jump').hidden = true; }
 $('jump').onclick = () => { thread.scrollTop = thread.scrollHeight; clearUnread(); };
 thread.addEventListener('scroll', () => { if(atBottom()) clearUnread(); });
 
-function bubble(role, text, kind){
-  const wrap = document.createElement('div');
-  wrap.className = 'msg ' + (role === 'user' ? 'user' : 'friday')
-                 + (kind === 'proactive' ? ' proactive' : '');
-  const b = document.createElement('div'); b.className = 'b';
-  if(role !== 'user'){
-    const who = document.createElement('div'); who.className = 'who';
-    who.textContent = kind === 'proactive' ? 'Friday · heads up' : 'Friday';
-    b.appendChild(who);
+/* Everything lands here, typed or spoken, so a call leaves a readable
+   transcript in the same thread instead of vanishing into the air. */
+function turn(who, text, opts){
+  opts = opts || {};
+  const t = document.createElement('div');
+  t.className = 'turn ' + (who === 'you' ? 'you' : 'fri') + (opts.first ? ' first' : '');
+  const b = document.createElement('div');
+  b.className = 'bub' + (opts.spoken ? ' spoke' : '');
+  if(who !== 'you'){
+    const f = document.createElement('div'); f.className = 'from';
+    f.textContent = opts.first ? 'friday · unprompted' : 'friday';
+    b.appendChild(f);
   }
   b.appendChild(document.createTextNode(text));
-  wrap.appendChild(b);
-  thread.appendChild(wrap);
-  if(!atBottom() && role !== 'user') noteUnread(kind === 'proactive');
-  scroll();
-  return wrap;
+  t.appendChild(b); thread.appendChild(t);
+  if(!atBottom() && who !== 'you') bumpUnread(opts.first);
+  if(atBottom()) thread.scrollTop = thread.scrollHeight;
+  return t;
 }
 
-function askConfirm(){
-  pendingConfirm = true;
-  const row = document.createElement('div'); row.className = 'confirm';
-  const yes = document.createElement('button'); yes.className = 'go'; yes.textContent = 'Yes';
-  const no  = document.createElement('button'); no.textContent = 'No';
-  const done = ans => { row.remove(); pendingConfirm = false; send(ans); };
-  yes.onclick = () => done('yes');
-  no.onclick  = () => done('no');
-  row.append(yes, no);
-  thread.appendChild(row); scroll(true);
+let workEl = null;
+function working(on, label){
+  if(on && !workEl){
+    workEl = document.createElement('div');
+    workEl.className = 'work'; workEl.textContent = label || 'thinking…';
+    thread.appendChild(workEl);
+    if(atBottom()) thread.scrollTop = thread.scrollHeight;
+  }else if(!on && workEl){ workEl.remove(); workEl = null; }
 }
 
-let thinkingEl = null;
-function thinking(on){
-  if(on && !thinkingEl){
-    thinkingEl = document.createElement('div');
-    thinkingEl.className = 'thinking'; thinkingEl.textContent = 'Friday is thinking…';
-    thread.appendChild(thinkingEl); scroll();
-  } else if(!on && thinkingEl){ thinkingEl.remove(); thinkingEl = null; }
+function askYesNo(){
+  const row = document.createElement('div'); row.className = 'ask';
+  const y = document.createElement('button'); y.className = 'yes'; y.textContent = 'Yes';
+  const n = document.createElement('button'); n.textContent = 'No';
+  const pick = a => { row.remove(); say(a); };
+  y.onclick = () => pick('yes'); n.onclick = () => pick('no');
+  row.append(y, n); thread.appendChild(row);
+  thread.scrollTop = thread.scrollHeight;
 }
 
-async function send(text){
-  text = (text !== undefined ? text : input.value).trim();
-  if(!text) return;
-  input.value = ''; input.style.height = 'auto';
-  bubble('user', text);
-  thinking(true);
+/* ---- server ------------------------------------------------------------ */
+async function say(text, opts){
+  opts = opts || {};
+  text = (text !== undefined && text !== null ? text : input.value).trim();
+  if(!text) return null;
+  if(!opts.fromVoice){ input.value = ''; input.style.height = 'auto'; }
+  turn('you', text, {spoken: !!opts.spoken});
+  working(true);
+  if(inCall) setMode('thinking');
   try{
     const r = await fetch(U('/say'), {method:'POST',
-      headers:{'Content-Type':'application/json'}, body: JSON.stringify({text})});
+      headers:{'Content-Type':'application/json'}, body:JSON.stringify({text})});
     const j = await r.json();
-    thinking(false);
-    if(j.reply){ bubble('friday', j.reply); if(speakBack) speak(j.reply); }
-    if(j.needs_confirm) askConfirm();
-  }catch(e){ thinking(false); bubble('friday', "I couldn't reach my own server."); }
+    working(false);
+    if(j.reply) turn('friday', j.reply, {spoken: inCall});
+    if(j.needs_confirm) askYesNo();
+    if(!inCall && speakBack && j.reply) speak(j.reply, false);
+    return j;
+  }catch(e){
+    working(false);
+    turn('friday', "I couldn't reach my own server.");
+    return null;
+  }
+}
+function speak(text, wait){
+  return fetch(U('/speak'), {method:'POST',
+    headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({text, wait: !!wait})}).catch(() => {});
 }
 
-/* ---- voice: same thread, just spoken -------------------------------------
-   Recording goes to the local whisper the machine already runs, so speaking
-   and typing produce identical messages and nothing leaves the machine. */
-let speakBack = false, rec = null, chunks = [], recording = false;
+/* ---- microphone -------------------------------------------------------- */
+let stream = null, actx = null, analyser = null, buf = null;
+async function mic(){
+  if(stream) return stream;
+  stream = await navigator.mediaDevices.getUserMedia({audio:{
+    echoCancellation:true, noiseSuppression:true, autoGainControl:true}});
+  actx = actx || new (window.AudioContext || window.webkitAudioContext)();
+  if(actx.state === 'suspended') await actx.resume();
+  const src = actx.createMediaStreamSource(stream);
+  analyser = actx.createAnalyser(); analyser.fftSize = 1024;
+  src.connect(analyser);
+  buf = new Float32Array(analyser.fftSize);
+  return stream;
+}
+function rms(){
+  if(!analyser) return 0;
+  analyser.getFloatTimeDomainData(buf);
+  let s = 0; for(const v of buf) s += v * v;
+  return Math.sqrt(s / buf.length);
+}
+function releaseMic(){
+  if(stream){ stream.getTracks().forEach(t => t.stop()); stream = null; }
+  analyser = null; level(0);
+}
 
-$('ear').onclick = () => {
-  speakBack = !speakBack;
-  $('ear').classList.toggle('on', speakBack);
-  $('ear').textContent = speakBack ? '🔊' : '🔈';
-};
-
-async function startRec(){
-  if(recording) return;
-  try{
-    const stream = await navigator.mediaDevices.getUserMedia({audio:{
-      echoCancellation:true, noiseSuppression:true}});
-    rec = new MediaRecorder(stream);
-    chunks = [];
-    rec.ondataavailable = e => chunks.push(e.data);
-    rec.onstop = async () => {
-      stream.getTracks().forEach(t => t.stop());
-      const blob = new Blob(chunks, {type: rec.mimeType || 'audio/webm'});
-      if(blob.size < 1200){ setHint('too short, hold it a moment longer'); return; }
-      setHint('listening to that…');
-      try{
-        const r = await fetch(U('/stt'), {method:'POST',
-          headers:{'Content-Type': blob.type}, body: blob});
-        const j = await r.json();
-        resetHint();
-        if(j.text) send(j.text);
-        else setHint("I didn't catch that, try again");
-      }catch(e){ resetHint(); setHint("couldn't transcribe that"); }
+/* Record until you stop talking. Shared by push-to-talk and the call loop. */
+function recordUtterance(o){
+  o = o || {};
+  const maxSilence = o.silence || 1300, maxLen = o.max || 25000;
+  return new Promise(async resolve => {
+    try{ await mic(); }catch(e){ resolve(null); return; }
+    const rec = new MediaRecorder(stream); const parts = [];
+    rec.ondataavailable = e => parts.push(e.data);
+    let spoke = false, quietAt = 0, stopped = false;
+    const t0 = Date.now();
+    const tick = setInterval(() => {
+      const v = rms(); level(Math.min(1, v * 12));
+      if(v > 0.022){ spoke = true; quietAt = 0; }
+      else if(spoke && !quietAt) quietAt = Date.now();
+      const done = (spoke && quietAt && Date.now() - quietAt > maxSilence)
+                 || Date.now() - t0 > maxLen
+                 || (!spoke && Date.now() - t0 > 9000);
+      if(done && !stopped){ stopped = true; clearInterval(tick); try{ rec.stop(); }catch(e){} }
+    }, 60);
+    rec.onstop = () => {
+      clearInterval(tick); level(0);
+      resolve(spoke ? new Blob(parts, {type: rec.mimeType || 'audio/webm'}) : null);
     };
     rec.start();
-    recording = true;
-    $('mic').classList.add('on');
-    setHint('listening… release to send');
-  }catch(e){ setHint('no microphone access'); }
+    o.onRec && o.onRec(() => {
+      if(!stopped){ stopped = true; clearInterval(tick); try{ rec.stop(); }catch(e){} }
+    });
+  });
 }
-function stopRec(){
-  if(!recording) return;
-  recording = false;
-  $('mic').classList.remove('on');
-  try{ rec.stop(); }catch(e){}
+async function transcribe(blob){
+  if(!blob || blob.size < 1200) return '';
+  const r = await fetch(U('/stt'), {method:'POST',
+    headers:{'Content-Type': blob.type}, body: blob});
+  return ((await r.json()).text || '').trim();
 }
-const mic = $('mic');
-mic.addEventListener('mousedown', startRec);
-mic.addEventListener('mouseup', stopRec);
-mic.addEventListener('mouseleave', stopRec);
-mic.addEventListener('touchstart', e => { e.preventDefault(); startRec(); }, {passive:false});
-mic.addEventListener('touchend', e => { e.preventDefault(); stopRec(); }, {passive:false});
 
-const HINT = $('hint').textContent;
-function setHint(t){ $('hint').textContent = t; }
-function resetHint(){ $('hint').textContent = HINT; }
+/* ---- push to talk ------------------------------------------------------ */
+let stopHold = null;
+const micBtn = $('mic');
+async function holdStart(e){
+  if(inCall) return;
+  if(e) e.preventDefault();
+  micBtn.classList.add('rec');
+  $('tip').textContent = 'listening… release to send';
+  const blob = await recordUtterance({onRec: s => { stopHold = s; }});
+  micBtn.classList.remove('rec');
+  $('tip').textContent = 'transcribing…';
+  const text = await transcribe(blob);
+  $('tip').textContent = TIP;
+  if(text) say(text, {spoken:true, fromVoice:true});
+  else $('tip').textContent = "didn't catch that — hold it a moment longer";
+}
+function holdEnd(){ if(stopHold){ stopHold(); stopHold = null; } }
+micBtn.addEventListener('mousedown', holdStart);
+micBtn.addEventListener('mouseup', holdEnd);
+micBtn.addEventListener('mouseleave', holdEnd);
+micBtn.addEventListener('touchstart', holdStart, {passive:false});
+micBtn.addEventListener('touchend', e => { e.preventDefault(); holdEnd(); }, {passive:false});
 
-$('send').onclick = () => send();
+/* ---- speaker toggle: unmistakably on or off --------------------------- */
+const EAR_ON = '<path d="M11 5 6.5 9H3v6h3.5L11 19z" fill="currentColor" stroke="none"/>'
+  + '<path d="M15.5 8.5a5 5 0 0 1 0 7"/><path d="M18.5 6a9 9 0 0 1 0 12"/>';
+const EAR_OFF = '<path d="M11 5 6.5 9H3v6h3.5L11 19z" fill="currentColor" stroke="none"/>'
+  + '<path d="M16 9.5l5 5"/><path d="M21 9.5l-5 5"/>';
+function paintEar(){
+  $('ear').setAttribute('aria-pressed', String(speakBack));
+  $('ear').setAttribute('aria-label', speakBack ? 'Stop reading replies aloud'
+                                                : 'Read replies aloud');
+  $('ear').title = speakBack ? 'Reading replies aloud' : 'Read replies aloud';
+  $('earIcon').innerHTML = speakBack ? EAR_ON : EAR_OFF;
+  setMode(callMode);
+}
+$('ear').onclick = () => { speakBack = !speakBack; paintEar(); };
+paintEar();
+
+/* ---- call mode: a conversation, not a screen -------------------------- */
+const END_RE = /^\s*(end call|hang up|goodbye|bye|that'?s all|stop the call)\b/i;
+async function startCall(){
+  if(inCall) return;
+  try{ await mic(); }
+  catch(e){ turn('friday', 'I need microphone access to take a call.'); return; }
+  inCall = true;
+  document.body.dataset.call = 'on';
+  $('callLbl').textContent = 'On a call';
+  $('callBtn').classList.add('hang');
+  turn('friday', "I'm listening. Talk whenever you like, and say “end call” when you're done.",
+       {first:true});
+  loop();
+}
+function endCall(reason){
+  if(!inCall) return;
+  inCall = false;
+  document.body.dataset.call = 'off';
+  $('callLbl').textContent = 'Call';
+  $('callBtn').classList.remove('hang');
+  setMode('idle');
+  releaseMic();
+  turn('friday', reason || 'Call ended.');
+}
+async function loop(){
+  while(inCall){
+    setMode('hearing');
+    const blob = await recordUtterance({silence:1300});
+    if(!inCall) break;
+    if(!blob) continue;                        // nothing said: keep listening
+    setMode('thinking');
+    let text = '';
+    try{ text = await transcribe(blob); }catch(e){ text = ''; }
+    if(!inCall) break;
+    if(!text) continue;
+    if(END_RE.test(text)){ turn('you', text, {spoken:true}); endCall(); return; }
+    const j = await say(text, {spoken:true, fromVoice:true});
+    if(!inCall) break;
+    if(j && j.reply){
+      setMode('speaking');
+      await speak(j.reply, true);               // wait, or we transcribe ourselves
+    }
+  }
+}
+$('callBtn').onclick = () => inCall ? endCall() : startCall();
+$('hangBtn').onclick = () => endCall();
+
+/* ---- composer ---------------------------------------------------------- */
+$('send').onclick = () => say();
 input.addEventListener('input', () => {
   input.style.height = 'auto';
-  input.style.height = Math.min(120, input.scrollHeight) + 'px';
+  input.style.height = Math.min(130, input.scrollHeight) + 'px';
 });
 input.addEventListener('keydown', e => {
-  if(e.key === 'Enter' && !e.shiftKey){ e.preventDefault(); send(); }
+  if(e.key === 'Enter' && !e.shiftKey){ e.preventDefault(); say(); }
 });
 
-/* ---- fleet strip ------------------------------------------------------ */
+/* ---- fleet ------------------------------------------------------------- */
 function renderFleet(rows){
-  const el = $('fleet');
-  el.textContent = '';
+  const el = $('fleet'); el.textContent = '';
   if(!rows || !rows.length){
-    const s = document.createElement('span');
-    s.className = 'empty-fleet'; s.textContent = 'no sessions yet';
-    el.appendChild(s);
-    document.title = 'Friday';
-    return;
+    const c = document.createElement('span');
+    c.className = 'count'; c.textContent = 'no sessions';
+    el.appendChild(c); document.title = 'Friday'; return;
   }
-  /* The count of things waiting on you goes in the TAB TITLE, so it is
-     answerable without switching to this window at all. */
   const needs = rows.filter(r => r.status === 'needs').length;
-  document.title = needs ? ('(' + needs + ') Friday') : 'Friday';
-  const label = document.createElement('span');
-  label.className = 'empty-fleet';
-  label.style.cssText = 'margin-right:2px;align-self:center';
-  label.textContent = needs ? (needs + ' need' + (needs > 1 ? '' : 's') + ' you')
-                            : (rows.length + ' running');
-  el.appendChild(label);
+  const busy = rows.filter(r => r.status === 'working').length;
+  document.title = needs ? '(' + needs + ') Friday' : 'Friday';
+  const c = document.createElement('span');
+  c.className = 'count' + (needs ? ' needs' : '');
+  /* Count what is TRUE. Saying "2 running" while both had finished was the
+     strip contradicting the conversation. */
+  c.textContent = needs ? (needs + ' need' + (needs > 1 ? '' : 's') + ' you')
+                        : (busy ? busy + ' working' : rows.length + ' idle');
+  el.appendChild(c);
   rows.forEach(r => {
-    const c = document.createElement('button');
-    c.className = 'chip ' + (r.status === 'needs' ? 'needs'
-                  : (r.status === 'working' ? 'working' : 'idle'));
-    const d = document.createElement('span'); d.className = 'sd';
-    c.append(d, document.createTextNode(r.label || 'session'));
-    c.title = r.needs || r.status;
-    /* tapping a chip asks about it in the thread: the strip is a shortcut
-       into the conversation, never a second place to work */
-    c.onclick = () => send(r.status === 'needs'
-      ? ('what does ' + r.label + ' need?') : ('open ' + r.label));
-    el.appendChild(c);
+    const b = document.createElement('button');
+    b.className = 'sess ' + (r.status === 'needs' ? 'needs'
+                 : r.status === 'working' ? 'working' : 'idle');
+    const d = document.createElement('span'); d.className = 'd';
+    b.append(d, document.createTextNode(r.label || 'session'));
+    b.title = r.needs || r.status;
+    b.onclick = () => say(r.status === 'needs' ? ('what does ' + r.label + ' need?')
+                                               : ('open ' + r.label));
+    el.appendChild(b);
   });
 }
 
-/* ---- live ------------------------------------------------------------- */
+/* ---- live -------------------------------------------------------------- */
 function connect(){
   const es = new EventSource(U('/events'));
-  es.onopen = () => { sub.textContent = 'listening'; };
-  es.onerror = () => { sub.textContent = 'reconnecting…'; };
+  es.onopen = () => { if(!inCall) $('state').textContent = 'watching'; };
+  es.onerror = () => { $('state').textContent = 'reconnecting'; };
   es.onmessage = e => {
     let d; try{ d = JSON.parse(e.data); }catch(x){ return; }
     if(d.kind === 'fleet') renderFleet(d.rows);
     if(d.kind === 'message' && d.message){
-      bubble('friday', d.message.text, d.message.kind);
-      if(speakBack) speak(d.message.text);
+      turn('friday', d.message.text, {first: d.message.kind === 'proactive'});
+      if(inCall || speakBack) speak(d.message.text, false);
       if(document.hidden) notify(d.message.text);
     }
   };
 }
-
-function speak(text){
-  fetch(U('/speak'), {method:'POST', headers:{'Content-Type':'application/json'},
-    body: JSON.stringify({text})}).catch(() => {});
-}
-
-/* Notifications work in a plain localhost tab, no install and no signing. */
 function notify(text){
-  try{
-    if(Notification.permission === 'granted') new Notification('Friday', {body:text});
-  }catch(e){}
+  try{ if(Notification.permission === 'granted') new Notification('Friday', {body:text}); }
+  catch(e){}
 }
 document.addEventListener('click', function once(){
   try{ if(Notification.permission === 'default') Notification.requestPermission(); }catch(e){}
   document.removeEventListener('click', once);
 });
 
-/* ---- boot ------------------------------------------------------------- */
 (async function boot(){
   try{
     const s = await (await fetch(U('/state'))).json();
     renderFleet(s.fleet);
-    (s.history || []).forEach(m => bubble(m.role, m.text, m.kind));
-    if(!s.engine.voicebridge) bubble('friday', 'I cannot see voicebridge, so I am half blind: ' + s.engine.reason);
-    else if(!s.engine.brain) bubble('friday', 'My brain is not loaded yet, so I will keep answers short.');
-    else if(!(s.history || []).length) bubble('friday', "I'm watching your sessions. Ask me what's running.");
-    scroll(true);
+    (s.history || []).forEach(m => turn(m.role === 'user' ? 'you' : 'friday',
+                                        m.text, {first: m.kind === 'proactive'}));
+    if(!s.engine.voicebridge)
+      turn('friday', "I can't see voicebridge, so I'm half blind: " + s.engine.reason);
+    else if(!s.engine.brain)
+      turn('friday', 'My brain is still loading. Commands work now; conversation will be thin until it finishes.');
+    else if(!(s.history || []).length)
+      turn('friday', "I'm watching your sessions. Ask what's running, or press Call and just talk.",
+           {first:true});
+    thread.scrollTop = thread.scrollHeight;
   }catch(e){}
   connect();
 })();

@@ -216,8 +216,14 @@ class Handler(BaseHTTPRequestHandler):
             # Voice out, on request. The UI decides when Friday should be heard
             # rather than read; the thread is identical either way.
             if engine.AVAILABLE:
-                txt = (as_json().get("text") or "").strip()
-                if txt:
+                j = as_json()
+                txt = (j.get("text") or "").strip()
+                if txt and j.get("wait"):
+                    # A hands-free call has to know when Friday stopped talking,
+                    # otherwise it starts listening to its own voice. Blocking
+                    # here is the simplest honest signal.
+                    engine.core.speak(txt, blocking=True)
+                elif txt:
                     threading.Thread(target=lambda: engine.core.speak(txt),
                                      daemon=True).start()
             self._json({"ok": True})
