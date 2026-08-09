@@ -27,6 +27,27 @@ Type or hold the mic:
 - `quiet` / `resume`
 - anything else is just conversation
 
+**Your past work** (not just what is running)
+- `find the session where I was learning tokenization`
+- `what was I working on recently?`
+
+**Other people on this Mac**
+- `are there other users running sessions?` — it can see that they exist, and
+  deliberately cannot see inside them
+
+**GitHub** (already connected, it uses your `gh` login)
+- `anything on github?` — notifications and your open pull requests
+- `search github for <thing>`
+
+**Slack** (needs one setup step)
+- `search slack for <thing>`
+- To connect: make an app at api.slack.com/apps with the user scopes
+  `search:read`, `channels:history`, `users:read`, install it to your
+  workspace, then tell Friday: `connect slack xoxp-your-token`
+- The token is saved owner-only in `~/.friday/`, and Friday refuses to use it
+  if the file is readable by anyone else. Everything is read-only: Friday never
+  posts, comments or merges.
+
 Tap the speaker icon to have Friday read replies aloud. Hold the mic to talk;
 transcription is the local whisper, nothing leaves the machine.
 

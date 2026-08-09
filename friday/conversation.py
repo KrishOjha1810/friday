@@ -28,7 +28,7 @@ your confirmation.
 import re
 import time
 
-from . import actions, engine
+from . import actions, connectors, engine, memory
 
 # What kind of thing the user just said.
 ASK_FLEET = "fleet"        # "what's running", "who needs me"
@@ -39,6 +39,12 @@ CANCEL = "cancel"          # "no", "cancel"
 QUIET = "quiet"            # "quiet", "stop talking"
 RESUME = "resume"          # "resume", "you can talk again"
 NEEDS = "needs"            # "what does api need?"
+FIND = "find"              # "find the session where I set up redis"
+RECENT = "recent"          # "what was I working on yesterday"
+OTHERS = "others"          # "are there other users' sessions?"
+GITHUB = "github"          # "anything on github", "search github for X"
+SLACK = "slack"            # "search slack for X"
+CONNECT = "connect"        # "connect slack <token>"
 CHAT = "chat"              # anything else: a real conversation
 
 _FLEET_RE = re.compile(
@@ -64,6 +70,20 @@ _TELL_RE = re.compile(
     r"(?:tell|ask|reply to|answer|send(?:\s+a\s+message)?\s+to|message)\s+"
     r"(?:the\s+)?(?:session\s+)?([\w.\-]+)\s+"
     r"(?:session\s+)?(?:that\s+|to\s+|about\s+)?(.+)$", re.I)
+_FIND_RE = re.compile(
+    r"\b(?:find|search(?:\s+for)?|look for|which session|what session|"
+    r"where did i|where was i|the (?:session|chat|conversation) (?:where|about|"
+    r"in which))\b\s*(.*)$", re.I)
+_RECENT_RE = re.compile(
+    r"\b(?:what (?:was|were) i (?:working on|doing)|recent sessions?|"
+    r"my recent work|what have i been (?:working on|doing))\b", re.I)
+_OTHERS_RE = re.compile(
+    r"\b(?:other users?|another user|someone else|other accounts?|"
+    r"anyone else|nikhil|other people)\b", re.I)
+_GITHUB_RE = re.compile(
+    r"\b(?:github|gh|pull requests?|prs?\b|my notifications?)\b\s*(.*)$", re.I)
+_SLACK_RE = re.compile(r"\bslack\b\s*(.*)$", re.I)
+_CONNECT_RE = re.compile(r"^\s*connect\s+(\w+)\s+(\S+)", re.I)
 _NEEDS_RE = re.compile(
     r"\b(?:what (?:does|is)|why (?:does|is))\s+([\w.\-]+)\s+"
     r"(?:need|want|waiting|asking|blocked|stuck)", re.I)
@@ -78,6 +98,13 @@ _YES_RE = re.compile(r"^\s*(yes|yeah|yep|sure|do it|go ahead|please|ok(ay)?)\b",
 _NO_RE = re.compile(r"^\s*(no|nope|cancel|stop|don'?t|never ?mind)\b", re.I)
 _QUIET_RE = re.compile(r"^\s*(quiet|shush|be quiet|stop talking|silence)\b", re.I)
 _RESUME_RE = re.compile(r"^\s*(resume|unmute|you can talk|start talking)\b", re.I)
+
+
+def _strip_verbs(s: str) -> str:
+    """'for the deploy thread' -> 'deploy thread'. What is left is the search."""
+    s = re.sub(r"^\s*(?:for|about|on|in|any|anything|my|the)\b\s*", "", (s or ""),
+               flags=re.I).strip(" ?.")
+    return s
 
 
 def classify(text: str) -> tuple:
@@ -114,6 +141,21 @@ def classify(text: str) -> tuple:
         if name.lower() in _PRONOUNS:
             return OPEN, {"name": ""}   # "open it": we must ask which
         return OPEN, {"name": name}
+    m = _CONNECT_RE.match(t)
+    if m:
+        return CONNECT, {"which": m.group(1), "token": m.group(2)}
+    if _SLACK_RE.search(t):
+        return SLACK, {"query": _strip_verbs(_SLACK_RE.search(t).group(1) or t)}
+    m = _GITHUB_RE.search(t)
+    if m:
+        return GITHUB, {"query": _strip_verbs(m.group(1))}
+    if _OTHERS_RE.search(t):
+        return OTHERS, {}
+    if _RECENT_RE.search(t):
+        return RECENT, {}
+    m = _FIND_RE.search(t)
+    if m and len(m.group(1).strip()) >= 3:
+        return FIND, {"query": m.group(1).strip()}
     m = _NEEDS_RE.search(t)
     if m:
         return NEEDS, {"name": m.group(1)}
@@ -173,6 +215,18 @@ class Friday:
             return self._say(self.fleet_summary())
         if intent == NEEDS:
             return self._what_needs(payload["name"])
+        if intent == FIND:
+            return self._find_past(payload["query"])
+        if intent == RECENT:
+            return self._recent_work()
+        if intent == OTHERS:
+            return self._other_users()
+        if intent == CONNECT:
+            return self._connect(payload["which"], payload["token"])
+        if intent == GITHUB:
+            return self._github(payload.get("query", ""))
+        if intent == SLACK:
+            return self._slack(payload.get("query", ""))
         if intent == OPEN:
             return self._propose_open(payload["name"])
         if intent == TELL:
@@ -236,6 +290,108 @@ class Friday:
         if idle:
             bits.append(f"{_join([r['label'] for r in idle])} {_is(len(idle))} done.")
         return " ".join(bits) or "Nothing is running."
+
+    # ---- connectors: Friday's own eyes on your tools ---------------------
+    def _connect(self, which: str, token: str) -> dict:
+        c = connectors.get(which)
+        if not c:
+            return self._say(f"I don't have a {which} connector.")
+        if not connectors.save_secret(f"{which}_token", token):
+            return self._say(f"I couldn't save the {which} token.")
+        ok = False
+        try:
+            ok = c.ready()
+        except Exception:
+            ok = False
+        return self._say(f"{which} connected." if ok else
+                         f"Saved it, but {which} still isn't answering. "
+                         f"Check the token's scopes.")
+
+    def _github(self, query: str) -> dict:
+        gh = connectors.get("github")
+        if not gh.ready():
+            return self._say("GitHub isn't connected: " + gh.setup_hint())
+        if query:
+            rows = gh.search(query, limit=4)
+            if not rows:
+                return self._say(f"Nothing on GitHub for {query}.")
+            lines = [f"{r.get('repository', {}).get('nameWithOwner', '')}: "
+                     f"{r.get('title', '')[:80]} ({r.get('state', '')})"
+                     for r in rows]
+            return self._say("On GitHub:\n- " + "\n- ".join(lines))
+        # no query: what actually wants your attention
+        notes, prs = gh.notifications(6), gh.my_prs(4)
+        if not notes and not prs:
+            return self._say("Nothing waiting on you on GitHub.")
+        bits = []
+        if prs:
+            bits.append("Open pull requests:\n- " + "\n- ".join(
+                f"{p.get('repository', {}).get('nameWithOwner', '')}: {p.get('title', '')[:70]}"
+                for p in prs))
+        if notes:
+            bits.append("Notifications:\n- " + "\n- ".join(
+                f"{n.get('repo', '')}: {(n.get('title') or '')[:70]} [{n.get('reason', '')}]"
+                for n in notes))
+        return self._say("\n\n".join(bits))
+
+    def _slack(self, query: str) -> dict:
+        sl = connectors.get("slack")
+        if not sl.ready():
+            return self._say("Slack isn't connected yet. To fix that: "
+                             + sl.setup_hint())
+        if not query:
+            return self._say("What should I look for in Slack?")
+        rows = sl.search(query, limit=4)
+        if not rows:
+            return self._say(f"Nothing in Slack about {query}.")
+        lines = [f"#{r['channel']} · {r['who']} · {connectors.when(r['when'])}: "
+                 f"{r['text'][:120]}" for r in rows]
+        self._last_slack = rows
+        return self._say("In Slack:\n- " + "\n- ".join(lines))
+
+    def _find_past(self, query: str) -> dict:
+        """Search everything you have ever done, not just what is running."""
+        hits = memory.search(query, limit=4)
+        if not hits:
+            return self._say(f"I couldn't find anything about {query}.")
+        live = {}
+        try:
+            live = {r["sid"]: r for r in engine.fleet.snapshot().values()}
+        except Exception:
+            pass
+        lines = []
+        for h in hits:
+            mark = " (running now)" if h["sid"] in live else ""
+            about = (h.get("about") or h.get("snippet") or "").strip()
+            lines.append(f"{memory.ago(h['when'])}{mark}: {about[:100]}")
+        self._last_found = hits
+        head = ("Found one:" if len(lines) == 1 else f"Found {len(lines)}:")
+        tail = ("\n\nSay \"open that one\" to bring it up."
+                if hits[0]["sid"] in live else
+                "\n\nThe top one isn't running, so I can't open it, only tell you about it.")
+        return self._say(head + "\n- " + "\n- ".join(lines) + tail)
+
+    def _recent_work(self) -> dict:
+        rows = memory.recent(limit=5)
+        if not rows:
+            return self._say("I can't see any recent sessions.")
+        lines = [f"{memory.ago(r['when'])}: {(r['about'] or 'no description')[:90]}"
+                 for r in rows]
+        return self._say("Recently:\n- " + "\n- ".join(lines))
+
+    def _other_users(self) -> dict:
+        """Honest about what is on the machine, and about the wall."""
+        try:
+            others = engine.fleet.other_users()
+        except Exception:
+            others = {}
+        if not others:
+            return self._say("No one else has Claude running on this Mac.")
+        bits = [f"{n} session{'s' if n != 1 else ''} under {u}"
+                for u, n in others.items()]
+        return self._say(_join(bits) + ". I can see they're running, but not "
+                         "what they're doing: another account's work isn't "
+                         "readable from here, and shouldn't be.")
 
     def _what_needs(self, name: str) -> dict:
         """Report exactly what one agent is waiting on, and remember that it is
@@ -324,11 +480,18 @@ class Friday:
         "take your answer to a session that asked you a question",
         "go quiet, or start speaking again",
     ]
+    CAN_DO_MORE = [
+        "search everything you have worked on before, not just what is running",
+        "tell you what you were working on recently",
+        "say whether other people on this Mac have sessions running",
+        "read your GitHub: notifications, open pull requests, search issues",
+        "search your Slack, once you connect it",
+    ]
     CANNOT_YET = [
-        "search Slack, Jira, GitHub or email",
-        "read or search past/closed sessions (only currently running ones)",
+        "search Jira or email",
+        "post, comment, merge or change anything (everything is read-only)",
         "start a brand new session, or write code itself",
-        "remember anything from before this conversation",
+        "see INSIDE another person's sessions on this Mac",
     ]
 
     def _chat(self, text: str) -> dict:
@@ -348,7 +511,7 @@ class Friday:
             "That list is the complete truth about what each session is and what "
             "it is about. Never invent a description for a session; if its "
             "subject is not listed, say you do not know what it is working on.\n\n"
-            "You CAN: " + "; ".join(self.CAN_DO) + ".\n"
+            "You CAN: " + "; ".join(self.CAN_DO + self.CAN_DO_MORE) + ".\n"
             "You CANNOT yet: " + "; ".join(self.CANNOT_YET) + ".\n\n"
             "Rules: if asked for something in the CANNOT list, say plainly that "
             "you cannot do it yet, in one sentence, and do not speculate. If "
