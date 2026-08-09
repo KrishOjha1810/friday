@@ -19,7 +19,7 @@ import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-from . import engine
+from . import engine, fleetcache
 from .conversation import Friday
 
 HOST, PORT = "127.0.0.1", 8765
@@ -72,7 +72,7 @@ def _fleet_rows() -> list:
         return []
     try:
         rows = []
-        for r in engine.fleet.snapshot().values():
+        for r in fleetcache.snapshot().values():
             need = r.get("question") or r.get("permission") or ""
             rows.append({"sid": r.get("sid", ""), "label": r.get("label", ""),
                          "status": ("needs" if need else r.get("status", "idle")),
@@ -312,6 +312,8 @@ def run(port: int = PORT, expose: bool = False):
     global LOCAL_ONLY
     LOCAL_ONLY = not expose
     host = "0.0.0.0" if expose else HOST
+    # Keep the fleet reading warm so no request ever waits on the CLI.
+    fleetcache.refresh_forever()
     threading.Thread(target=supervisor_loop, daemon=True).start()
     # Watch what every session SAYS, not just when one needs you. Without this,
     # an agent finishes something and you only find out by opening its window.

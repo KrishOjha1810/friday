@@ -11,13 +11,48 @@ controlling an agent (send it a prompt). If a second target ever needs them,
 they should move into the adapter seam.
 """
 
+import os
 import subprocess
 from pathlib import Path
 
 from . import engine
 
+# Everything in this file reaches OUT of the process: it types into terminals,
+# opens windows, interrupts running agents. A session id that matches nothing
+# does not fail safe, it falls through to the default adapter and types into
+# whatever terminal is in front of you. So a test with a made-up id can put
+# words into a real window, and did: a run of mine delivered "use redis" and
+# "also run the tests" into a session someone was working in.
+#
+# Being careful is not a mechanism. This is: unless something explicitly arms
+# it, nothing here does anything, and every attempt is recorded so a test can
+# assert on what WOULD have happened.
+ARMED = os.environ.get("FRIDAY_SAFE", "") != "1"
+attempted = []          # [(action, args)] while disarmed
+
+
+def disarm() -> None:
+    """No action in this module will touch the machine. For tests and audits."""
+    global ARMED
+    ARMED = False
+    attempted.clear()
+
+
+def arm() -> None:
+    global ARMED
+    ARMED = True
+
+
+def _blocked(what: str, *args) -> bool:
+    if ARMED:
+        return False
+    attempted.append((what, args))
+    return True
+
 
 def _osa(script: str, timeout: float = 6.0) -> str:
+    if _blocked("osascript", script[:80]):
+        return ""
     try:
         r = subprocess.run(["osascript", "-e", script],
                            capture_output=True, text=True, timeout=timeout)
@@ -130,6 +165,8 @@ def _open_terminal(command: str) -> bool:
 def send_to_session(sid: str, text: str) -> bool:
     """Deliver a prompt to a specific session, using voicebridge's adapter so
     it lands in THAT session's tab rather than whatever is focused."""
+    if _blocked("send", sid, text):
+        return True          # tests see success without anything being typed
     if not (sid and text and engine.AVAILABLE):
         return False
     try:
@@ -140,6 +177,8 @@ def send_to_session(sid: str, text: str) -> bool:
 
 def interrupt_session(sid: str) -> bool:
     """Stop what an agent is doing (the same Escape you would press)."""
+    if _blocked("interrupt", sid):
+        return True
     if not (sid and engine.AVAILABLE):
         return False
     try:

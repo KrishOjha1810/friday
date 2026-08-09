@@ -28,7 +28,7 @@ import re
 import threading
 import time
 
-from . import engine, replies
+from . import engine, fleetcache, replies
 
 POLL = 3.0            # seconds between looks at the fleet
 SETTLE = 4.0          # an agent must be quiet this long before it is reported
@@ -36,13 +36,17 @@ MAX_REPORT = 600      # characters of raw reply kept for "say more"
 
 
 class Watchtower:
-    def __init__(self, announce, log=None):
+    def __init__(self, announce, log=None, hushed=None):
         self.announce = announce
+        # Asked separately from voicebridge's attention engine, so "quiet" works
+        # even when that engine is unreachable.
+        self._own_hush = hushed or (lambda: False)
         self._log = log or (lambda *_: None)
         self.seen = {}            # sid -> last reported text
         self.pending = {}         # sid -> (text, first_seen_at)
         self.expecting = set()    # sids Friday asked something, so it can say so
         self.last = {}            # sid -> full text, for "say more"
+        self.muted = set()        # sids you have asked not to hear about
         self._stop = threading.Event()
         self._started = False
 
@@ -59,6 +63,16 @@ class Watchtower:
 
     def stop(self) -> None:
         self._stop.set()
+
+    def mute(self, sid: str, on: bool = True) -> None:
+        """Stop (or resume) reporting one session.
+
+        A muted session is still WATCHED, so its replies are marked as seen
+        rather than piling up to be recited the moment you unmute."""
+        if on:
+            self.muted.add(sid)
+        else:
+            self.muted.discard(sid)
 
     def expect(self, sid: str) -> None:
         """Friday asked this session something, so its next reply is an answer
@@ -83,7 +97,7 @@ class Watchtower:
     # ---- the loop --------------------------------------------------------
     def _fleet(self) -> list:
         try:
-            return [r for r in engine.fleet.snapshot().values() if r.get("sid")]
+            return [r for r in fleetcache.snapshot().values() if r.get("sid")]
         except Exception:
             return []
 
@@ -125,9 +139,16 @@ class Watchtower:
         for sid, text in ready:
             self.pending.pop(sid, None)
             self.seen[sid] = text
+            if sid in self.muted:
+                continue          # watched, marked seen, not mentioned
             self._report(rows[sid], text)
 
     def _hushed(self) -> bool:
+        try:
+            if self._own_hush():
+                return True
+        except Exception:
+            pass
         try:
             return bool(engine.attention.is_quiet())
         except Exception:

@@ -20,7 +20,9 @@ from sandbox import use_temp_config  # noqa: E402
 
 use_temp_config()
 
-from friday import watchtower  # noqa: E402
+from friday import fleetcache, watchtower  # noqa: E402
+
+fleetcache.TTL = 0            # tests change the fleet between ticks
 
 watchtower.SETTLE = 0.4
 
@@ -53,6 +55,7 @@ class _Engine:
 
 
 watchtower.engine = None      # replaced below; never the real one in tests
+fleetcache.engine = None
 
 
 def _session(d, sid, label, text, question=""):
@@ -67,6 +70,7 @@ def _session(d, sid, label, text, question=""):
 
 def _tower():
     watchtower.engine = _Engine
+    fleetcache.engine = _Engine
     said = []
     w = watchtower.Watchtower(lambda text, items=None: said.append((text, items)))
     return w, said

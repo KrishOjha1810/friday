@@ -30,4 +30,7 @@ def use_temp_config() -> Path:
     mcp.CONF = tmp
     mcp.SERVERS_FILE = tmp / "mcp_servers.json"
 
+    from friday import actions
+    actions.disarm()
+
     return tmp

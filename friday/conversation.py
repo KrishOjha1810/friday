@@ -29,8 +29,8 @@ import re
 import time
 from pathlib import Path
 
-from . import (actions, connectors, engine, memory, nearest, replies,
-               watchtower)
+from . import (actions, connectors, engine, fleetcache, memory,
+               nearest, replies, watchtower)
 
 # What kind of thing the user just said.
 ASK_FLEET = "fleet"        # "what's running", "who needs me"
@@ -59,6 +59,9 @@ NEW_SESSION = "newsession" # "start a new session on this"
 ENGINE = "engine"          # "are you using claude for this?"
 ASK_ALL = "askall"         # "ask everyone what they're working on"
 MORE = "more"              # "say more", "what exactly did it say"
+MISSED = "missed"          # "what did I miss?"
+MUTE = "mute"              # "ignore jobhunt for now"
+STUCK = "stuck"            # "is anyone stuck?"
 WHO = "who"                # "who am I talking to?"
 WATCH = "watch"            # "tell me when voicebridge is done"
 STOP = "stop"              # "stop voicebridge"
@@ -69,6 +72,23 @@ CHAT = "chat"              # anything else: a real conversation
 # Friday is supposed to remove.
 # A summary you cannot check is a summary you have to trust. These give you the
 # agent's own words, and tell you who a bare reply would reach.
+# Coming back to the desk. Scrolling to work out what happened while you were
+# away is the same manual sweep as walking the windows.
+_MISSED_RE = re.compile(
+    r"\bwhat\s+(?:did\s+i|have\s+i)\s+miss(?:ed)?\b|\bcatch\s+me\s+up\b"
+    r"(?!\s+on\b)|\bwhat\s+happened\s+while\s+i\s+was\s+(?:away|out|gone)\b|"
+    r"\banything\s+(?:new|since)\b", re.I)
+# One noisy agent should not cost you the whole feature.
+_MUTE_RE = re.compile(
+    r"\b(?:ignore|mute|silence|stop\s+telling\s+me\s+about)\s+"
+    r"(?:the\s+)?([\w.\- ]{2,40}?)(?:\s+session)?(?:\s+for\s+now)?\s*[.!?]?$"
+    r"|\b(?:unmute|listen\s+to|un-?ignore)\s+(?:the\s+)?([\w.\- ]{2,40}?)"
+    r"(?:\s+session)?\s*[.!?]?$", re.I)
+_STUCK_RE = re.compile(
+    r"\b(?:is\s+)?any(?:one|thing|body)\s+(?:stuck|blocked|waiting)\b|"
+    r"\bwho(?:'?s|\s+is)?\s+(?:stuck|blocked|waiting)\b|"
+    r"\bwhat(?:'?s|\s+is)?\s+blocked\b", re.I)
+
 _MORE_RE = re.compile(
     r"\b(?:say|tell me)\s+more\b|\bthe\s+(?:full|whole|exact)\s+"
     r"(?:thing|version|message|reply)\b|\bwhat\s+exactly\s+did\s+"
@@ -313,6 +333,14 @@ def classify(text: str) -> tuple:
         return CONNECT, {"which": m.group(1), "token": m.group(2) or ""}
     if _ENGINE_RE.search(t):
         return ENGINE, {}
+    if _MISSED_RE.search(t):
+        return MISSED, {}
+    if _STUCK_RE.search(t):
+        return STUCK, {}
+    m = _MUTE_RE.search(t)
+    if m and len(t.split()) <= 7:
+        return MUTE, {"name": (m.group(1) or m.group(2) or "").strip(),
+                      "on": bool(m.group(1))}
     if _WHO_RE.search(t):
         return WHO, {}
     if _MORE_RE.search(t):
@@ -440,11 +468,13 @@ class Friday:
         # when it's done" are how people speak once a session is in play, and
         # making you say the name every time is making you do the bookkeeping.
         self.target = ""
+        self.quiet = False         # Friday's own switch, independent of vb's
         # One place watches every session and reports what it said, so nothing
         # is announced twice and nothing is missed.
         self.watch = watchtower.Watchtower(
             self.announce,
-            log=(engine.core.log if engine.AVAILABLE else None))
+            log=(engine.core.log if engine.AVAILABLE else None),
+            hushed=lambda: self.quiet)
         self.history = []          # [{role, text, ts, kind}]
         self.focus = (engine.routing.new_focus()
                       if engine.AVAILABLE else {"mentioned": [], "ts": 0})
@@ -493,12 +523,16 @@ class Friday:
             return self._perform(act)
 
         if intent == QUIET:
-            if engine.AVAILABLE:
-                engine.attention.hush()
+            # "Quiet" is the command you reach for when Friday is being
+            # annoying, so it is the last one that may fail loudly.
+            if not self._hush(True):
+                return self._say("I couldn't reach the attention engine, but "
+                                 "I'll stay quiet myself.")
             return self._say("Quiet. I won't interrupt you.")
         if intent == RESUME:
-            if engine.AVAILABLE:
-                engine.attention.unhush()
+            if not self._hush(False):
+                return self._say("I couldn't reach the attention engine, but "
+                                 "I'm listening.")
             return self._say("Listening again.")
         if intent == ASK_FLEET:
             return self._say(self.fleet_summary())
@@ -539,6 +573,12 @@ class Friday:
             return self._slack(payload.get("query", ""))
         if intent == OPEN:
             return self._propose_open(payload["name"])
+        if intent == MISSED:
+            return self._missed()
+        if intent == STUCK:
+            return self._stuck()
+        if intent == MUTE:
+            return self._mute(payload["name"], payload["on"])
         if intent == WHO:
             return self._who()
         if intent == MORE:
@@ -594,7 +634,18 @@ class Friday:
         product exists to answer."""
         if not engine.AVAILABLE:
             return "I can't see your sessions right now."
-        snap = engine.fleet.snapshot()
+        # The sensor shells out and parses JSON, so it can fail. Letting that
+        # reach the request handler turns "what's running" into a 500 and you
+        # are told nothing at all, which is the worst of the possible answers.
+        try:
+            snap = fleetcache.snapshot()
+        except Exception as e:
+            try:
+                engine.core.log(f"friday fleet: {e}")
+            except Exception:
+                pass
+            return ("I can't read your sessions at the moment, so I don't know "
+                    "what's running.")
         if not snap:
             return "Nothing is running."
         waiting = [r for r in snap.values() if r.get("question") or r.get("permission")]
@@ -631,6 +682,103 @@ class Friday:
         return ("Answer in one or two sentences, no tool calls if you can help "
                 "it: " + q + "?" if not q.endswith("?") else q)
 
+    def _hush(self, on: bool) -> bool:
+        """Go quiet, or stop being quiet. Reports whether it took effect.
+
+        Friday keeps its own flag as well as asking voicebridge, so quiet still
+        means quiet when the attention engine is unreachable."""
+        self.quiet = on
+        if not engine.AVAILABLE:
+            return True
+        try:
+            engine.attention.hush() if on else engine.attention.unhush()
+            return True
+        except Exception:
+            return False
+
+    def _missed(self) -> dict:
+        """Everything Friday brought up since you last said something.
+
+        Coming back to the desk and scrolling to work out what happened is the
+        same manual sweep as walking the windows, which is the job."""
+        # Skip the question itself: handle() records it before dispatching, so
+        # measuring from "the last thing you said" measures from now, and the
+        # answer is always "nothing".
+        since = 0
+        for h in reversed(self.history[:-1]):
+            if h.get("role") == "user":
+                since = h.get("ts", 0)
+                break
+        news = [h for h in self.history
+                if h.get("kind") == "proactive" and h.get("ts", 0) > since]
+        if not news:
+            waiting = self._waiting()
+            if waiting:
+                return self._say("Nothing new was said, but "
+                                 + _join([r["label"] for r in waiting])
+                                 + f" {_is(len(waiting))} waiting on you.")
+            return self._say("Nothing since you last spoke.")
+        # Newest last, so it reads in the order it happened.
+        lines = [h["text"] for h in news][-8:]
+        head = (f"{len(news)} things happened:" if len(news) > 1
+                else "One thing happened:")
+        extra = ""
+        if len(news) > 8:
+            extra = f" ({len(news) - 8} older ones before these)"
+        return self._say(head + extra + "\n- " + "\n- ".join(lines))
+
+    def _waiting(self) -> list:
+        try:
+            return [r for r in fleetcache.snapshot().values()
+                    if (r.get("question") or r.get("permission"))]
+        except Exception:
+            return []
+
+    def _stuck(self) -> dict:
+        """Who cannot continue without you, and for how long.
+
+        "Working" and "stuck" look identical from outside a terminal, and the
+        difference is whether your day is blocking somebody."""
+        rows = self._waiting()
+        if not rows:
+            try:
+                n = len(fleetcache.snapshot())
+            except Exception:
+                n = 0
+            return self._say("Nobody is waiting on you."
+                             + (f" All {n} are working." if n else ""))
+        bits = []
+        for r in rows:
+            q = (r.get("question") or r.get("permission") or "").strip()
+            waited = ""
+            since = r.get("mtime") or 0
+            if since:
+                mins = int(max(0, time.time() - since) // 60)
+                if mins >= 1:
+                    waited = f" (for {mins} minute{'s' if mins != 1 else ''})"
+            bits.append(f"{r.get('label', '?')}{waited}: {q[:120]}")
+        self.target = rows[0].get("label", "") or self.target
+        return self._say("Waiting on you:\n- " + "\n- ".join(bits))
+
+    def _mute(self, name: str, on: bool) -> dict:
+        """Stop reporting one session without going quiet altogether.
+
+        One agent in a loop should not cost you the whole feature: the choice
+        between hearing everything and hearing nothing is how you end up
+        hearing nothing."""
+        names = self._names_of_sessions()
+        target = nearest.pick(name, names) if names else ""
+        if not target:
+            return self._no_session(name, lambda n: self._mute(n, on))
+        sid = next((r["sid"] for r in fleetcache.snapshot().values()
+                    if (r.get("label") or "") == target), "")
+        if not sid:
+            return self._no_session(name, lambda n: self._mute(n, on))
+        self.watch.mute(sid, on)
+        return self._say(f"I won't mention {target} again until you say "
+                         f"\"unmute {target}\"." if on else
+                         f"Telling you about {target} again.")
+
     def _who(self) -> dict:
         """Who a bare reply would reach. Guessing wrong sends your words to the
         wrong agent, so this has to be askable."""
@@ -652,7 +800,7 @@ class Friday:
             return self._say("More about what? Nobody has said anything yet.")
         sid = ""
         try:
-            sid = next((r["sid"] for r in engine.fleet.snapshot().values()
+            sid = next((r["sid"] for r in fleetcache.snapshot().values()
                         if (r.get("label") or "") == self.target), "")
         except Exception:
             sid = ""
@@ -671,7 +819,7 @@ class Friday:
         that is actually conducting rather than relaying."""
         rows = []
         try:
-            rows = [r for r in engine.fleet.snapshot().values()
+            rows = [r for r in fleetcache.snapshot().values()
                     if r.get("sid")]
         except Exception:
             rows = []
@@ -738,7 +886,7 @@ class Friday:
                 "Which one should I watch? " + ", ".join(names[:8]),
                 yes=lambda: self._watch(names[0]),
                 again=lambda t: self._watch(t))
-        row = next((r for r in engine.fleet.snapshot().values()
+        row = next((r for r in fleetcache.snapshot().values()
                     if (r.get("label") or "") == target), None)
         if not row:
             return self._no_session(target, self._watch)
@@ -756,7 +904,7 @@ class Friday:
             while time.time() < end:
                 time.sleep(3)
                 try:
-                    row = engine.fleet.snapshot().get(sid)
+                    row = fleetcache.snapshot().get(sid)
                 except Exception:
                     row = None
                 if row is None:
@@ -793,7 +941,7 @@ class Friday:
                       else "") or (nearest.pick(name, names) if names else "")
         if not target:
             return self._no_session(name, lambda n: self._stop(n, n))
-        row = next((r for r in engine.fleet.snapshot().values()
+        row = next((r for r in fleetcache.snapshot().values()
                     if (r.get("label") or "") == target), None)
         if not row:
             return self._no_session(target, lambda n: self._stop(n, n))
@@ -812,7 +960,7 @@ class Friday:
         sid = hit["sid"]
         live = {}
         try:
-            live = {r["sid"]: r for r in engine.fleet.snapshot().values()}
+            live = {r["sid"]: r for r in fleetcache.snapshot().values()}
         except Exception:
             pass
         if sid in live:
@@ -1144,7 +1292,7 @@ class Friday:
         self._last_found = hits
         live = set()
         try:
-            live = set(engine.fleet.snapshot())
+            live = set(fleetcache.snapshot())
         except Exception:
             pass
         h = hits[0]
@@ -1281,7 +1429,7 @@ class Friday:
             return self._say(f"I couldn't find anything about {query}.")
         live = {}
         try:
-            live = {r["sid"]: r for r in engine.fleet.snapshot().values()}
+            live = {r["sid"]: r for r in fleetcache.snapshot().values()}
         except Exception:
             pass
         lines = []
@@ -1683,7 +1831,7 @@ class Friday:
         this the model had only a generated id like 'krishojha-7f' to reason
         with, and duly invented 'a backend data processing pipeline'."""
         try:
-            rows = list(engine.fleet.snapshot().values())
+            rows = list(fleetcache.snapshot().values())
         except Exception:
             return ""
         out = []
@@ -1704,7 +1852,7 @@ class Friday:
 
     def _session_names(self) -> list:
         try:
-            return [r.get("label", "") for r in engine.fleet.snapshot().values()
+            return [r.get("label", "") for r in fleetcache.snapshot().values()
                     if r.get("label")]
         except Exception:
             return []
@@ -1734,7 +1882,7 @@ class Friday:
             return None, ""
         q = name.strip().lower()
         try:
-            rows = list(engine.fleet.snapshot().values())
+            rows = list(fleetcache.snapshot().values())
         except Exception:
             rows = []
         for r in rows:                                  # exact name
@@ -1794,7 +1942,7 @@ class Friday:
     def _names_of_sessions(self) -> list:
         try:
             return [r.get("label") or "" for r in
-                    engine.fleet.snapshot().values() if r.get("label")]
+                    fleetcache.snapshot().values() if r.get("label")]
         except Exception:
             return []
 

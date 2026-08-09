@@ -64,7 +64,10 @@ def status() -> dict:
     except Exception:
         pass
     try:
-        out["agents"] = len(fleet.snapshot())
+        # Through the cache: this is called alongside the fleet strip on every
+        # poll, and reading the fleet twice per refresh cost seven seconds.
+        from . import fleetcache
+        out["agents"] = len(fleetcache.snapshot())
     except Exception:
         pass
     return out
