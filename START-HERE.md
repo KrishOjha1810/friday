@@ -37,9 +37,34 @@ Type or hold the mic:
 
 **GitHub** (already connected, it uses your `gh` login)
 - `anything on github?` — notifications and your open pull requests
+- `what are my open issues?`
 - `search github for <thing>`
 
+**Email and Jira** (each needs a token; ask and Friday tells you how)
+- `any new email?`
+- `my jira tickets`
+
+**The chain this is really for**
+
+    you: go to my eng group in slack and read the chat
+    friday: [reads it] Rahul is asking whether the webhook retries are
+            idempotent, and wants a decision before Friday's deploy.
+    you: did we ever talk about this?
+    friday: Yes. 9 days ago: "the webhook retry thing"…  say "open that one"
+    you: open that one
+    friday: [resumes that session in a new window]
+
+If there is no past session, say `start a new session on this` and Friday opens
+one already carrying the Slack context, so you never retype it.
+
+**Sessions, past and present**
+- `open <name>` — raise a running session's window
+- `open that one` — after a search: raises it if running, RESUMES it if closed
+- `start a new session on <thing>` — opens a new window already briefed
+
 **Slack** (needs one setup step)
+- `go to my <name> group in slack and read the chat` — reads it and tells you
+  what is actually being asked
 - `search slack for <thing>`
 - To connect: make an app at api.slack.com/apps with the user scopes
   `search:read`, `channels:history`, `users:read`, install it to your

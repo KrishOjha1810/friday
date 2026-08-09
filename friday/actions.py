@@ -12,6 +12,7 @@ they should move into the adapter seam.
 """
 
 import subprocess
+from pathlib import Path
 
 from . import engine
 
@@ -78,6 +79,52 @@ tell application "iTerm2"
 end tell
 return "no"''')
     return iterm == "ok"
+
+
+def resume_session(sid: str, cwd: str = "") -> bool:
+    """Reopen a CLOSED session in a new terminal window, where you left it.
+
+    focus_session only raises a window that already exists. This is the other
+    half: 'open that session' about something you finished last Tuesday has to
+    actually bring the conversation back, which is `claude --resume <id>` in a
+    fresh window."""
+    if not sid:
+        return False
+    where = cwd or str(Path.home())
+    cmd = f"cd {_q(where)} && claude --resume {_q(sid)}"
+    return _open_terminal(cmd)
+
+
+def new_session(prompt: str = "", cwd: str = "") -> bool:
+    """Start a fresh session, optionally handing it an opening instruction.
+
+    This is how a Slack thread becomes work: Friday read the thread, you said
+    'start something on this', and the new session opens already knowing what
+    it is for instead of you retyping it."""
+    where = cwd or str(Path.home())
+    cmd = f"cd {_q(where)} && claude"
+    if prompt:
+        # Pass it as the opening prompt rather than typing into the TUI, which
+        # is racy: the process is not ready the instant the window appears.
+        cmd += " " + _q(prompt)
+    return _open_terminal(cmd)
+
+
+def _q(s: str) -> str:
+    """Single-quote for the shell. Everything here can contain a person's
+    words, so nothing is ever interpolated raw."""
+    return "'" + str(s).replace("'", "'\\''") + "'"
+
+
+def _open_terminal(command: str) -> bool:
+    """A new Terminal window running `command`. Returns whether it opened."""
+    esc = command.replace("\\", "\\\\").replace('"', '\\"')
+    out = _osa(f'tell application "Terminal"\n'
+               f'  do script "{esc}"\n'
+               f'  activate\n'
+               f'  return "ok"\n'
+               f'end tell', timeout=10)
+    return out == "ok"
 
 
 def send_to_session(sid: str, text: str) -> bool:

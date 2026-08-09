@@ -42,9 +42,16 @@ NEEDS = "needs"            # "what does api need?"
 FIND = "find"              # "find the session where I set up redis"
 RECENT = "recent"          # "what was I working on yesterday"
 OTHERS = "others"          # "are there other users' sessions?"
+READ_CHANNEL = "readchan"  # "go to my #eng slack and read the chat"
 GITHUB = "github"          # "anything on github", "search github for X"
+ISSUES = "issues"          # "what are my open issues"
+MAIL = "mail"              # "any new email"
+JIRA = "jira"              # "my jira tickets"
+DID_WE = "didwe"           # "did we ever talk about this?"
 SLACK = "slack"            # "search slack for X"
 CONNECT = "connect"        # "connect slack <token>"
+OPEN_FOUND = "openfound"   # "open that one" after a search
+NEW_SESSION = "newsession" # "start a new session on this"
 CHAT = "chat"              # anything else: a real conversation
 
 _FLEET_RE = re.compile(
@@ -83,7 +90,29 @@ _OTHERS_RE = re.compile(
 _GITHUB_RE = re.compile(
     r"\b(?:github|gh|pull requests?|prs?\b|my notifications?)\b\s*(.*)$", re.I)
 _SLACK_RE = re.compile(r"\bslack\b\s*(.*)$", re.I)
+# "go to my neither group in slack and read the chat"
+_READCHAN_RE = re.compile(
+    r"\b(?:go to|open|check|read)\b[^.]*?\b(?:my\s+)?#?([\w.\-]+)\s*"
+    r"(?:group|channel)\b[^.]*?\b(?:slack|read|chat|messages?)\b|"
+    r"\bslack\b[^.]*?\b#?([\w.\-]+)\s*(?:group|channel)\b", re.I)
+_ISSUES_RE = re.compile(r"\b(?:open\s+)?issues?\b", re.I)
+_MAIL_RE = re.compile(r"\b(?:e-?mail|gmail|inbox|mails?)\b\s*(.*)$", re.I)
+_JIRA_RE = re.compile(r"\bjira\b|\btickets?\b", re.I)
+# "did we ever talk about this?" right after reading something
+_DIDWE_RE = re.compile(
+    r"\b(?:did (?:we|i) (?:ever )?(?:talk|discuss|work)|have (?:we|i) "
+    r"(?:ever )?(?:talked|discussed|worked)|look into claude|check claude|"
+    r"any (?:past )?session about)\b", re.I)
 _CONNECT_RE = re.compile(r"^\s*connect\s+(\w+)\s+(\S+)", re.I)
+# Anchored to the END on purpose: "open that one" is this intent, but "go to
+# the session of voicebridge and tell him…" is an instruction to that session,
+# and an unanchored pattern swallowed it.
+_OPENFOUND_RE = re.compile(
+    r"\b(?:open|resume|bring up|go to)\s+(?:that|it|the)"
+    r"(?:\s+(?:one|session|chat|conversation))?\s*[.!?]?$", re.I)
+_NEWSESSION_RE = re.compile(
+    r"\b(?:start|open|create|spin up|make)\s+(?:a\s+)?new\s+"
+    r"(?:claude\s+)?(?:session|chat)\b\s*(?:on|about|for|to)?\s*(.*)$", re.I)
 _NEEDS_RE = re.compile(
     r"\b(?:what (?:does|is)|why (?:does|is))\s+([\w.\-]+)\s+"
     r"(?:need|want|waiting|asking|blocked|stuck)", re.I)
@@ -113,6 +142,26 @@ def classify(text: str) -> tuple:
     t = (text or "").strip()
     if not t:
         return CHAT, {}
+    # Specific multi-word intents go FIRST. "resume that session" is not the
+    # voice command "resume", and "open a new session" is not "open <name>":
+    # the generic patterns would otherwise swallow both.
+    if _DIDWE_RE.search(t):
+        return DID_WE, {}
+    m = _READCHAN_RE.search(t)
+    if m:
+        return READ_CHANNEL, {"channel": (m.group(1) or m.group(2) or "").strip()}
+    if _JIRA_RE.search(t):
+        return JIRA, {}
+    m = _MAIL_RE.search(t)
+    if m:
+        return MAIL, {"query": _strip_verbs(m.group(1))}
+    if _ISSUES_RE.search(t) and "github" not in t.lower():
+        return ISSUES, {}
+    m = _NEWSESSION_RE.search(t)
+    if m:
+        return NEW_SESSION, {"about": m.group(1).strip()}
+    if _OPENFOUND_RE.search(t):
+        return OPEN_FOUND, {}
     if _QUIET_RE.match(t):
         return QUIET, {}
     if _RESUME_RE.match(t):
@@ -173,6 +222,8 @@ class Friday:
 
     def __init__(self):
         self.pending = None        # an action awaiting your yes
+        self._last_found = []      # sessions a search turned up
+        self._last_slack = []      # slack messages just read out
         self.history = []          # [{role, text, ts, kind}]
         self.focus = (engine.routing.new_focus()
                       if engine.AVAILABLE else {"mentioned": [], "ts": 0})
@@ -221,8 +272,22 @@ class Friday:
             return self._recent_work()
         if intent == OTHERS:
             return self._other_users()
+        if intent == OPEN_FOUND:
+            return self._open_found()
+        if intent == NEW_SESSION:
+            return self._new_session(payload.get("about", ""))
         if intent == CONNECT:
             return self._connect(payload["which"], payload["token"])
+        if intent == READ_CHANNEL:
+            return self._read_channel(payload["channel"])
+        if intent == DID_WE:
+            return self._did_we_discuss()
+        if intent == ISSUES:
+            return self._issues()
+        if intent == MAIL:
+            return self._mail(payload.get("query", ""))
+        if intent == JIRA:
+            return self._jira()
         if intent == GITHUB:
             return self._github(payload.get("query", ""))
         if intent == SLACK:
@@ -291,6 +356,42 @@ class Friday:
             bits.append(f"{_join([r['label'] for r in idle])} {_is(len(idle))} done.")
         return " ".join(bits) or "Nothing is running."
 
+    def _open_found(self) -> dict:
+        """'open that one' after a search. If the session is running we raise
+        its window; if it is closed we RESUME it, which is the whole point of
+        remembering it in the first place."""
+        if not self._last_found:
+            return self._say("I haven't found a session for you to open yet.")
+        hit = self._last_found[0]
+        sid = hit["sid"]
+        live = {}
+        try:
+            live = {r["sid"]: r for r in engine.fleet.snapshot().values()}
+        except Exception:
+            pass
+        if sid in live:
+            ok = actions.focus_session(sid)
+            return self._say("Opened it." if ok else
+                             "I couldn't bring that window to the front.")
+        ok = actions.resume_session(sid, cwd=_cwd_for(hit.get("path", "")))
+        return self._say("Resumed it in a new window." if ok else
+                         "I couldn't resume that session.")
+
+    def _new_session(self, about: str) -> dict:
+        """Start fresh work, handing the new session its purpose so you do not
+        have to retype what you just told me."""
+        opening = about.strip()
+        if not opening and self._last_slack:
+            # straight from what was just read out of Slack
+            opening = ("Context from a Slack thread:\n"
+                       + "\n".join(f"- {m['who']}: {m['text']}"
+                                    for m in self._last_slack[:6]))
+        self.pending = {"kind": "new", "about": opening}
+        preview = (opening[:90] + "…") if len(opening) > 90 else opening
+        return self._say(
+            (f'Start a new session on "{preview}"?' if preview
+             else "Start a new empty session?"), needs_confirm=True)
+
     # ---- connectors: Friday's own eyes on your tools ---------------------
     def _connect(self, which: str, token: str) -> dict:
         c = connectors.get(which)
@@ -333,6 +434,121 @@ class Friday:
                 f"{n.get('repo', '')}: {(n.get('title') or '')[:70]} [{n.get('reason', '')}]"
                 for n in notes))
         return self._say("\n\n".join(bits))
+
+    def _read_channel(self, name: str) -> dict:
+        """Read an actual channel and tell you what is being asked.
+
+        This is the front of the chain: read the thread, then 'did we ever talk
+        about this?' searches your sessions using what was just read, so you
+        never have to retype the subject."""
+        sl = connectors.get("slack")
+        if not sl.ready():
+            return self._say("Slack isn't connected yet. " + sl.setup_hint())
+        ch = sl.find_channel(name)
+        if not ch:
+            return self._say(f"I can't find a Slack channel called {name}.")
+        rows = sl.read_channel(ch["id"], limit=15)
+        if not rows:
+            return self._say(f"#{ch['name']} is empty, or I can't read it.")
+        self._last_slack = rows
+        convo = "\n".join(f"{r['who']}: {r['text']}" for r in rows[-12:])
+        summary = self._summarise_thread(convo)
+        return self._say(f"In #{ch['name']}:\n{summary}")
+
+    def _summarise_thread(self, convo: str) -> str:
+        """What is actually being ASKED, in a sentence or two."""
+        if not (engine.AVAILABLE and engine.brain.up()):
+            return convo[:600]
+        out = engine.brain._chat(
+            [{"role": "system", "content":
+              "Summarise this chat for someone who has not read it. Say who is "
+              "asking what, and what they need. Two or three short sentences. "
+              "Only use what is in the messages."},
+             {"role": "user", "content": convo[:4000]}],
+            timeout=engine.brain.TIMEOUT_SLOW, max_tokens=180)
+        return engine.brain._clean(out) if out else convo[:600]
+
+    def _did_we_discuss(self) -> dict:
+        """Search your past sessions using whatever we were just talking about,
+        so the chain flows without you restating the subject."""
+        seed = ""
+        if self._last_slack:
+            seed = " ".join(r["text"] for r in self._last_slack[-6:])
+        if not seed:
+            for m in reversed(self.history[:-1]):
+                if m["role"] == "friday" and len(m["text"]) > 40:
+                    seed = m["text"]
+                    break
+        if not seed:
+            return self._say("About what? Point me at something first.")
+        terms = self._key_terms(seed)
+        hits = memory.search(terms, limit=3)
+        if not hits:
+            self._last_found = []
+            return self._say(f"I searched your sessions for {terms} and found "
+                             "nothing. Want me to start a new one on it?")
+        self._last_found = hits
+        live = set()
+        try:
+            live = set(engine.fleet.snapshot())
+        except Exception:
+            pass
+        h = hits[0]
+        where = " (running now)" if h["sid"] in live else ""
+        return self._say(
+            f"Yes. {memory.ago(h['when'])}{where}: {(h.get('about') or '')[:110]}"
+            "\n\nSay \"open that one\" and I'll bring it up.")
+
+    def _key_terms(self, text: str) -> str:
+        """The few words worth searching for, so a whole thread does not become
+        a query full of 'the' and 'please'."""
+        if engine.AVAILABLE and engine.brain.up():
+            out = engine.brain._chat(
+                [{"role": "system", "content":
+                  "Pick the 2-5 most distinctive search keywords from this "
+                  "text: proper nouns, technical terms, product names. "
+                  "Lowercase, space separated, nothing else."},
+                 {"role": "user", "content": text[:1500]}],
+                timeout=6.0, max_tokens=24)
+            out = " ".join((out or "").split())[:80]
+            if out:
+                return out
+        return " ".join(text.split()[:8])
+
+    def _issues(self) -> dict:
+        gh = connectors.get("github")
+        if not gh.ready():
+            return self._say("GitHub isn't connected: " + gh.setup_hint())
+        rows = gh.my_issues(8)
+        if not rows:
+            return self._say("No open issues involving you.")
+        lines = [f"{r.get('repository', {}).get('nameWithOwner', '')}: "
+                 f"{r.get('title', '')[:80]}" for r in rows]
+        return self._say(f"{len(rows)} open issue"
+                         f"{'s' if len(rows) != 1 else ''}:\n- "
+                         + "\n- ".join(lines))
+
+    def _mail(self, query: str) -> dict:
+        gm = connectors.get("gmail")
+        if not gm.ready():
+            return self._say("Gmail isn't connected yet. " + gm.setup_hint())
+        rows = gm.search(query, limit=5)
+        if not rows:
+            return self._say("Nothing matching in your mail.")
+        lines = [f"{r['from'][:40]}: {r['subject'][:90]}" for r in rows]
+        return self._say("Mail:\n- " + "\n- ".join(lines))
+
+    def _jira(self) -> dict:
+        ji = connectors.get("jira")
+        if not ji.ready():
+            return self._say("Jira isn't connected yet. " + ji.setup_hint())
+        rows = ji.my_issues(8)
+        if rows and rows[0].get("error"):
+            return self._say("Jira answered with an error: " + rows[0]["error"])
+        if not rows:
+            return self._say("No open Jira tickets assigned to you.")
+        lines = [f"{r['key']} [{r['status']}]: {r['summary'][:80]}" for r in rows]
+        return self._say("Jira:\n- " + "\n- ".join(lines))
 
     def _slack(self, query: str) -> dict:
         sl = connectors.get("slack")
@@ -455,6 +671,10 @@ class Friday:
                                  f"I couldn't bring {label} to the front. It may "
                                  f"not be running in a terminal I can reach.",
                                  action={"kind": "open", "sid": act["sid"]})
+            if act["kind"] == "new":
+                ok = actions.new_session(act.get("about", ""))
+                return self._say("Started it in a new window." if ok else
+                                 "I couldn't open a new window.")
             if act["kind"] == "tell":
                 ok = actions.send_to_session(act["sid"], act["message"])
                 return self._say(f"Sent it to {label}." if ok else
@@ -662,6 +882,28 @@ class Friday:
             except Exception:
                 pass
         return self.add("friday", text, kind="proactive")
+
+
+def _cwd_for(transcript_path: str) -> str:
+    """Best guess at where a session was working, so a resume lands in the
+    right project rather than the home directory."""
+    try:
+        import json as _j
+        with open(transcript_path, "r", errors="ignore") as f:
+            for _ in range(30):
+                line = f.readline()
+                if not line:
+                    break
+                try:
+                    rec = _j.loads(line)
+                except Exception:
+                    continue
+                cwd = rec.get("cwd")
+                if cwd:
+                    return cwd
+    except Exception:
+        pass
+    return ""
 
 
 def _join(names: list) -> str:
