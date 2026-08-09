@@ -103,6 +103,35 @@ def test_other_users_are_counted_but_never_read():
         assert "/" not in user
 
 
+def test_a_token_that_does_not_work_is_not_a_connection():
+    """A made-up token was accepted as 'connected', which looks fine right up
+    to the moment you rely on it."""
+    import os
+    connectors.save_secret("slack_token", "xoxp-0000000000-definitely-not-real")
+    try:
+        assert connectors.REGISTRY["slack"].ready() is False
+    finally:
+        (connectors.CONF_DIR / "slack_token").unlink(missing_ok=True)
+
+
+def test_spoken_phrasing_reaches_the_connect_command():
+    """'Friday Connect Slack.' must work: requiring 'connect' at the very start
+    of the sentence meant spoken input never matched."""
+    for t in ("Friday Connect Slack.", "connect slack",
+              "can you connect slack", "Friday, connect to gmail"):
+        i, p = classify(t)
+        assert i == C.CONNECT, t
+        assert p["which"].lower() in ("slack", "gmail"), t
+
+
+def test_a_pasted_token_needs_no_command_at_all():
+    """Remembering syntax while holding a secret in your clipboard is bad
+    design, so a bare token is understood on its own."""
+    i, p = classify("xoxp-1234567890-abcdefghijklmno")
+    assert i == C.CONNECT and p["which"] == "slack"
+    assert p["token"].startswith("xoxp-")
+
+
 if __name__ == "__main__":
     for name, fn in sorted(globals().items()):
         if name.startswith("test_") and callable(fn):

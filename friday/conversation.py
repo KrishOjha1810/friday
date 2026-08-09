@@ -111,7 +111,13 @@ _DIDWE_RE = re.compile(
     r"\b(?:did (?:we|i) (?:ever )?(?:talk|discuss|work)|have (?:we|i) "
     r"(?:ever )?(?:talked|discussed|worked)|look into claude|check claude|"
     r"any (?:past )?session about)\b", re.I)
-_CONNECT_RE = re.compile(r"^\s*connect\s+(\w+)(?:\s+(\S+))?", re.I)
+# NOT anchored to the start: spoken input arrives as "Friday, connect slack
+# xoxp-…" and requiring "connect" first meant it never matched.
+_CONNECT_RE = re.compile(r"\bconnect\s+(?:to\s+)?(\w+)(?:\s+([\w.\-]{8,}))?", re.I)
+# A pasted token is unmistakable, so accept it on its own and work out where it
+# belongs from its prefix. Asking someone to remember command syntax while
+# holding a secret in their clipboard is bad design.
+_TOKEN_RE = re.compile(r"\b(xoxp-[\w-]{10,}|xoxb-[\w-]{10,}|ya29\.[\w.\-]{20,})\b")
 _CONNS_RE = re.compile(
     r"\b(?:what(?:'s| is)? connected|connections?|integrations?|"
     r"what (?:tools|apps) (?:do you have|are connected))\b", re.I)
@@ -205,9 +211,16 @@ def classify(text: str) -> tuple:
         if name.lower() in _PRONOUNS:
             return OPEN, {"name": ""}   # "open it": we must ask which
         return OPEN, {"name": name}
+    # a bare token, pasted with no command around it
+    m = _TOKEN_RE.search(t)
+    if m:
+        tok = m.group(1)
+        which = ("slack" if tok.startswith(("xoxp-", "xoxb-"))
+                 else "gmail" if tok.startswith("ya29.") else "")
+        return CONNECT, {"which": which, "token": tok}
     if _CONNS_RE.search(t):
         return CONNECT, {"which": "", "token": ""}
-    m = _CONNECT_RE.match(t)
+    m = _CONNECT_RE.search(t)
     if m:
         return CONNECT, {"which": m.group(1), "token": m.group(2) or ""}
     if _SLACK_RE.search(t):
@@ -415,6 +428,7 @@ class Friday:
 
     # ---- connectors: Friday's own eyes on your tools ---------------------
     def _connect(self, which: str, token: str) -> dict:
+        which = (which or "").strip().lower()   # "Friday Connect Slack." -> slack
         # no argument: report what is connected and what is not
         if not which:
             rows = connectors.status()
@@ -456,14 +470,26 @@ class Friday:
             return self._say(f"I don't have a {which} connector.")
         if not connectors.save_secret(f"{which}_token", token):
             return self._say(f"I couldn't save the {which} token.")
+        # Verify against the BUILT-IN connector (the token path), not the MCP
+        # wrapper, which looks for a token in a different place.
+        c = connectors.REGISTRY.get(which) or c
         ok = False
         try:
             ok = c.ready()
         except Exception:
             ok = False
-        return self._say(f"{which} connected." if ok else
-                         f"Saved it, but {which} still isn't answering. "
-                         f"Check the token's scopes.")
+        if not ok:
+            return self._say(f"Saved it, but {which} isn't answering. The token "
+                             f"may be the wrong one (I need the User OAuth "
+                             f"Token, starting xoxp-) or missing a scope.")
+        who = ""
+        try:
+            who = c.whoami() if hasattr(c, "whoami") else ""
+        except Exception:
+            pass
+        extra = f" I can see you as {who}." if who else ""
+        return self._say(f"{which} connected.{extra} Try: go to my <channel> "
+                         f"group in slack and read the chat.")
 
     def _github(self, query: str) -> dict:
         gh = connectors.get("github")

@@ -210,8 +210,24 @@ class Slack:
     def token(self) -> str:
         return os.environ.get("SLACK_TOKEN") or _secret("slack_token")
 
+    _checked = {}        # token -> (ok, when): ask Slack once, not per sentence
+
     def ready(self) -> bool:
-        return bool(self.token())
+        """Connected means the token WORKS.
+
+        Checking only that a token EXISTS accepted a made-up string as
+        'connected', which is the worst kind of pass: it looks fine right up to
+        the moment you rely on it. Verified against auth.test, cached briefly so
+        a conversation does not make an API call per message."""
+        tok = self.token()
+        if not tok:
+            return False
+        hit = self._checked.get(tok)
+        if hit and time.time() - hit[1] < 300:
+            return hit[0]
+        ok = bool(self._call("auth.test").get("ok"))
+        self._checked[tok] = (ok, time.time())
+        return ok
 
     # A pre-filled app manifest, so "create an app with these ten scopes" is
     # replaced by clicking a link and pressing Create. The scopes are all READ:
@@ -219,8 +235,13 @@ class Slack:
     MANIFEST_URL = 'https://api.slack.com/apps?new_app=1&manifest_json=%7B%22display_information%22%3A%20%7B%22name%22%3A%20%22Friday%22%2C%20%22description%22%3A%20%22Read-only%20assistant%20that%20reads%20your%20Slack%20for%20you%22%2C%20%22background_color%22%3A%20%22%230b0d12%22%7D%2C%20%22oauth_config%22%3A%20%7B%22scopes%22%3A%20%7B%22user%22%3A%20%5B%22search%3Aread%22%2C%20%22channels%3Ahistory%22%2C%20%22groups%3Ahistory%22%2C%20%22im%3Ahistory%22%2C%20%22mpim%3Ahistory%22%2C%20%22channels%3Aread%22%2C%20%22groups%3Aread%22%2C%20%22im%3Aread%22%2C%20%22mpim%3Aread%22%2C%20%22users%3Aread%22%5D%7D%7D%2C%20%22settings%22%3A%20%7B%22org_deploy_enabled%22%3A%20false%2C%20%22socket_mode_enabled%22%3A%20false%2C%20%22token_rotation_enabled%22%3A%20false%7D%7D'
 
     def setup_hint(self) -> str:
-        return ("open this, press Create, then Install to Workspace, and paste "
-                "me the xoxp- token:\n" + self.MANIFEST_URL)
+        return ("Three steps:\n"
+                "1. Open this and press Create:\n" + self.MANIFEST_URL + "\n"
+                "2. Then OAuth & Permissions, Install to Workspace, and copy "
+                "the User OAuth Token (it starts with xoxp-).\n"
+                "3. TYPE it into the box here (don't say it out loud, a token "
+                "can't survive being dictated). Just paste the token on its "
+                "own, I'll work out the rest.")
 
     def setup_link(self) -> str:
         return self.MANIFEST_URL
@@ -335,8 +356,19 @@ class Gmail:
     def token(self) -> str:
         return os.environ.get("GMAIL_TOKEN") or _secret("gmail_token")
 
+    _checked = {}
+
     def ready(self) -> bool:
-        return bool(self.token())
+        """Same rule as Slack: a token that does not work is not a connection."""
+        tok = self.token()
+        if not tok:
+            return False
+        hit = self._checked.get(tok)
+        if hit and time.time() - hit[1] < 300:
+            return hit[0]
+        ok = bool(self._call("profile").get("emailAddress"))
+        self._checked[tok] = (ok, time.time())
+        return ok
 
     def setup_hint(self) -> str:
         return ("get an OAuth access token with the gmail.readonly scope (the "
@@ -450,7 +482,8 @@ class MCPConnector:
         return bool(c and not c.connect())
 
     def setup_hint(self) -> str:
-        return f"connect it once with: friday connect {self.name}"
+        return (f"{self.name} isn't connected. Say \"connect {self.name}\" and "
+                f"I'll give you the shortest way to do it.")
 
     def tools(self) -> list:
         c = self._c()
