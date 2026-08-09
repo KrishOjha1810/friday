@@ -162,6 +162,18 @@ def classify(text: str) -> tuple:
     # Specific multi-word intents go FIRST. "resume that session" is not the
     # voice command "resume", and "open a new session" is not "open <name>":
     # the generic patterns would otherwise swallow both.
+    # a bare token, pasted with no command around it
+    m = _TOKEN_RE.search(t)
+    if m:
+        tok = m.group(1)
+        which = ("slack" if tok.startswith(("xoxp-", "xoxb-"))
+                 else "gmail" if tok.startswith("ya29.") else "")
+        return CONNECT, {"which": which, "token": tok}
+    if _CONNS_RE.search(t):
+        return CONNECT, {"which": "", "token": ""}
+    m = _CONNECT_RE.search(t)
+    if m:
+        return CONNECT, {"which": m.group(1), "token": m.group(2) or ""}
     if _DIDWE_RE.search(t):
         return DID_WE, {}
     m = _READCHAN_RE.search(t)
@@ -211,18 +223,6 @@ def classify(text: str) -> tuple:
         if name.lower() in _PRONOUNS:
             return OPEN, {"name": ""}   # "open it": we must ask which
         return OPEN, {"name": name}
-    # a bare token, pasted with no command around it
-    m = _TOKEN_RE.search(t)
-    if m:
-        tok = m.group(1)
-        which = ("slack" if tok.startswith(("xoxp-", "xoxb-"))
-                 else "gmail" if tok.startswith("ya29.") else "")
-        return CONNECT, {"which": which, "token": tok}
-    if _CONNS_RE.search(t):
-        return CONNECT, {"which": "", "token": ""}
-    m = _CONNECT_RE.search(t)
-    if m:
-        return CONNECT, {"which": m.group(1), "token": m.group(2) or ""}
     if _SLACK_RE.search(t):
         return SLACK, {"query": _strip_verbs(_SLACK_RE.search(t).group(1) or t)}
     m = _GITHUB_RE.search(t)
