@@ -45,6 +45,8 @@ OTHERS = "others"          # "are there other users' sessions?"
 READ_CHANNEL = "readchan"  # "go to my #eng slack and read the chat"
 GITHUB = "github"          # "anything on github", "search github for X"
 ISSUES = "issues"          # "what are my open issues"
+BROKEN = "broken"          # "what's broken?" / "is anything failing?"
+ACTIVITY = "activity"      # "what have I been doing lately"
 MAIL = "mail"              # "any new email"
 JIRA = "jira"              # "my jira tickets"
 DID_WE = "didwe"           # "did we ever talk about this?"
@@ -96,6 +98,12 @@ _READCHAN_RE = re.compile(
     r"(?:group|channel)\b[^.]*?\b(?:slack|read|chat|messages?)\b|"
     r"\bslack\b[^.]*?\b#?([\w.\-]+)\s*(?:group|channel)\b", re.I)
 _ISSUES_RE = re.compile(r"\b(?:open\s+)?issues?\b", re.I)
+_BROKEN_RE = re.compile(
+    r"\b(?:what(?:'s| is)? (?:broken|failing|red)|anything (?:broken|failing)|"
+    r"failing (?:tests?|builds?|ci|workflows?)|ci status|builds? failing)\b", re.I)
+_ACTIVITY_RE = re.compile(
+    r"\b(?:what have i been (?:doing|up to)|my (?:recent )?activity|"
+    r"what did i (?:do|push|ship))\b", re.I)
 _MAIL_RE = re.compile(r"\b(?:e-?mail|gmail|inbox|mails?)\b\s*(.*)$", re.I)
 _JIRA_RE = re.compile(r"\bjira\b|\btickets?\b", re.I)
 # "did we ever talk about this?" right after reading something
@@ -158,6 +166,10 @@ def classify(text: str) -> tuple:
     m = _MAIL_RE.search(t)
     if m:
         return MAIL, {"query": _strip_verbs(m.group(1))}
+    if _BROKEN_RE.search(t):
+        return BROKEN, {}
+    if _ACTIVITY_RE.search(t):
+        return ACTIVITY, {}
     if _ISSUES_RE.search(t) and "github" not in t.lower():
         return ISSUES, {}
     m = _NEWSESSION_RE.search(t)
@@ -289,6 +301,10 @@ class Friday:
             return self._did_we_discuss()
         if intent == ISSUES:
             return self._issues()
+        if intent == BROKEN:
+            return self._broken()
+        if intent == ACTIVITY:
+            return self._activity()
         if intent == MAIL:
             return self._mail(payload.get("query", ""))
         if intent == JIRA:
@@ -414,13 +430,24 @@ class Friday:
         # no token: try the browser flow (MCP), which is the one-time approval
         if not token:
             from . import mcp as _mcp
-            if which in _mcp.servers():
-                self._say(f"Opening your browser to approve {which}…")
-                r = _mcp.authorize(which, _mcp.servers()[which]["url"])
-                if r.get("ok"):
-                    return self._say(f"{which} connected.")
-                return self._say(f"That didn't complete: {r.get('error')}")
-            c0 = connectors.get(which)
+            cfg = _mcp.servers().get(which)
+            # Only open a browser if the flow can actually succeed. Otherwise
+            # fall through to the connector's own instructions, which for Slack
+            # is a pre-filled app link rather than a scope checklist.
+            if cfg and _mcp.can_authorize(cfg["url"]):
+                def _flow():
+                    r = _mcp.authorize(which, cfg["url"])
+                    self.announce(f"{which} connected." if r.get("ok") else
+                                  f"{which} didn't connect: {r.get('error')}")
+                import threading
+                threading.Thread(target=_flow, daemon=True).start()
+                return self._say(f"Opening your browser to approve {which}. "
+                                 "I'll tell you when it's done.")
+            # The MCP wrapper's hint is generic. If we have a hand-written
+            # connector for the same service, ITS instructions are the useful
+            # ones (Slack's is a pre-filled app link, not a scope checklist).
+            builtin = connectors.REGISTRY.get(which)
+            c0 = builtin or connectors.get(which)
             if c0:
                 return self._say(c0.setup_hint())
             return self._say(f"I don't know a connector called {which}.")
@@ -557,6 +584,40 @@ class Friday:
         return self._say(f"{len(rows)} open issue"
                          f"{'s' if len(rows) != 1 else ''}:\n- "
                          + "\n- ".join(lines))
+
+    def _broken(self) -> dict:
+        """What is actually broken right now, deduplicated.
+
+        A notification list says 49 things happened; this says four things are
+        wrong. Repeats are counted, not listed, because ten failures of the
+        same nightly job is one problem you have not looked at."""
+        gh = connectors.get("github")
+        if not gh or not gh.ready():
+            return self._say("GitHub isn't connected, so I can't see your builds.")
+        rows = gh.failing(6)
+        if not rows:
+            return self._say("Nothing's failing on GitHub.")
+        lines = []
+        for r in rows:
+            times = f" ({r['count']} times)" if r.get("count", 1) > 1 else ""
+            lines.append(f"{r['repo']}: {r['workflow']}{times}")
+        n = len(lines)
+        return self._say(f"{n} thing{'s' if n != 1 else ''} failing:\n- "
+                         + "\n- ".join(lines))
+
+    def _activity(self) -> dict:
+        gh = connectors.get("github")
+        if not gh or not gh.ready():
+            return self._say("GitHub isn't connected.")
+        rows = gh.activity(6)
+        if not rows:
+            return self._say("No recent GitHub activity.")
+        pretty = {"PushEvent": "pushed to", "IssuesEvent": "worked on issues in",
+                  "PullRequestEvent": "opened a PR in", "CreateEvent": "created",
+                  "DeleteEvent": "deleted in", "WatchEvent": "starred"}
+        lines = [f"{pretty.get(r.get('type'), r.get('type', ''))} {r.get('repo', '')}"
+                 for r in rows]
+        return self._say("Lately you:\n- " + "\n- ".join(lines))
 
     def _mail(self, query: str) -> dict:
         gm = connectors.get("gmail")

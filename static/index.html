@@ -278,11 +278,32 @@ function turn(who, text, opts){
     f.textContent = opts.first ? 'friday · unprompted' : 'friday';
     b.appendChild(f);
   }
-  b.appendChild(document.createTextNode(text));
+  /* Links must be clickable: Friday hands you setup URLs that are hundreds of
+     characters long, and a link you have to select by hand is not a link.
+     Built with createTextNode + createElement, never innerHTML, so a message
+     can never inject markup into the page. */
+  linkify(b, text);
   t.appendChild(b); thread.appendChild(t);
   if(!atBottom() && who !== 'you') bumpUnread(opts.first);
   if(atBottom()) thread.scrollTop = thread.scrollHeight;
   return t;
+}
+
+const URL_RE = /https?:\/\/[^\s<>"']+/g;
+function linkify(el, text){
+  let last = 0, m;
+  URL_RE.lastIndex = 0;
+  while((m = URL_RE.exec(text)) !== null){
+    if(m.index > last) el.appendChild(document.createTextNode(text.slice(last, m.index)));
+    const a = document.createElement('a');
+    a.href = m[0]; a.target = '_blank'; a.rel = 'noopener noreferrer';
+    /* a 700-character setup URL must not blow up the bubble */
+    a.textContent = m[0].length > 60 ? m[0].slice(0, 57) + '…' : m[0];
+    a.style.cssText = 'color:var(--live);text-decoration:underline;word-break:break-all';
+    el.appendChild(a);
+    last = m.index + m[0].length;
+  }
+  if(last < text.length) el.appendChild(document.createTextNode(text.slice(last)));
 }
 
 let workEl = null;

@@ -253,18 +253,36 @@ class _Catcher(BaseHTTPRequestHandler):
         pass
 
 
+def can_authorize(url: str) -> bool:
+    """True only if a browser flow can actually SUCCEED here.
+
+    Advertising an authorization endpoint is not enough: without dynamic client
+    registration there is no client id to send, and the server will reject us.
+    Checking this first is what stops Friday from opening a browser tab that
+    can only ever end in an error."""
+    meta = _discover(url)
+    return bool(meta.get("authorization_endpoint")
+                and meta.get("registration_endpoint"))
+
+
 def authorize(name: str, url: str, timeout: float = 180) -> dict:
     """The one-time browser approval. Returns {'ok': True} or {'error': …}.
 
     Standard authorization-code flow with PKCE, and a throwaway local server to
-    catch the redirect. Nothing is typed, nothing is pasted."""
+    catch the redirect. Nothing is typed, nothing is pasted.
+
+    BLOCKS until you approve, so callers on a request path must run it in the
+    background: a three-minute HTTP request is indistinguishable from a hang."""
     meta = _discover(url)
     if not meta.get("authorization_endpoint"):
         return {"error": "this server does not advertise OAuth; it may need a "
                          "token instead"}
     redirect = f"http://127.0.0.1:{CALLBACK_PORT}/callback"
 
-    client_id = _register(meta, redirect) or "friday"
+    client_id = _register(meta, redirect)
+    if not client_id:
+        return {"error": "this server needs an app registered by hand; it does "
+                         "not support automatic registration"}
     verifier = base64.urlsafe_b64encode(os.urandom(40)).decode().rstrip("=")
     challenge = base64.urlsafe_b64encode(
         hashlib.sha256(verifier.encode()).digest()).decode().rstrip("=")

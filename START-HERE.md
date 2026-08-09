@@ -62,6 +62,16 @@ one already carrying the Slack context, so you never retype it.
 - `open that one` — after a search: raises it if running, RESUMES it if closed
 - `start a new session on <thing>` — opens a new window already briefed
 
+**What's broken / what you've been doing** (GitHub, already connected)
+- `what's broken?` — failing CI, grouped so 49 notifications read as 4 problems
+- `what have I been doing lately?`
+- `what are my open issues?`
+
+**Connections**
+- `what's connected?`
+- `connect slack` / `connect gmail` / `connect jira` — Friday gives you the
+  shortest real path for each, and opens a browser itself where that works
+
 **Slack** (needs one setup step)
 - `go to my <name> group in slack and read the chat` — reads it and tells you
   what is actually being asked

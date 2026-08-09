@@ -119,6 +119,73 @@ class GitHub:
         except Exception:
             return []
 
+    def failing(self, limit: int = 6) -> list:
+        """Workflow runs that failed recently, across your repos.
+
+        This is the question a notification list cannot answer: not 'what
+        happened' but 'what is broken right now'. Grouped per repo+workflow so
+        five failures of the same nightly job read as one problem, which is
+        what it is."""
+        out = _run(["gh", "api", "/notifications?all=true",
+                    "--jq", "[.[] | select(.subject.type==\"CheckSuite\") | "
+                            "{repo: .repository.full_name, "
+                            "title: .subject.title, when: .updated_at}]"], 15)
+        try:
+            rows = json.loads(out) if out else []
+        except Exception:
+            return []
+        seen, grouped = {}, []
+        for r in rows:
+            title = (r.get("title") or "")
+            if "fail" not in title.lower():
+                continue
+            wf = title.split(" workflow")[0]
+            key = (r.get("repo"), wf)
+            if key in seen:
+                seen[key]["count"] += 1
+                continue
+            item = {"repo": r.get("repo"), "workflow": wf,
+                    "when": r.get("when", ""), "count": 1}
+            seen[key] = item
+            grouped.append(item)
+        return grouped[:limit]
+
+    def runs(self, repo: str, limit: int = 5) -> list:
+        """Recent CI runs for one repo, with their conclusions."""
+        out = _run(["gh", "run", "list", "--repo", repo, "--limit", str(limit),
+                    "--json", "name,conclusion,status,createdAt,headBranch"], 20)
+        try:
+            return json.loads(out) if out else []
+        except Exception:
+            return []
+
+    def issue(self, repo: str, number: str) -> dict:
+        """One issue in full, with its conversation, so Friday can summarise
+        what is actually being asked rather than reading you a title."""
+        out = _run(["gh", "issue", "view", str(number), "--repo", repo,
+                    "--json", "title,body,state,author,comments,url"], 20)
+        try:
+            return json.loads(out) if out else {}
+        except Exception:
+            return {}
+
+    def activity(self, limit: int = 8) -> list:
+        """What you have actually been doing on GitHub lately."""
+        out = _run(["gh", "api", "/users/{}/events?per_page=30".format(self.me() or ""),
+                    "--jq", "[.[] | {type, repo: .repo.name, when: .created_at}]"], 15)
+        try:
+            rows = json.loads(out) if out else []
+        except Exception:
+            return []
+        seen, grouped = set(), []
+        for r in rows:
+            key = (r.get("repo"), r.get("type"))
+            if key in seen:
+                continue
+            seen.add(key)
+            grouped.append(r)
+        return grouped[:limit]
+
     def search(self, query: str, limit: int = 5) -> list:
         """Issues and PRs matching a query, in repos you can see."""
         out = _run(["gh", "search", "issues", query, "--limit", str(limit),
@@ -146,11 +213,17 @@ class Slack:
     def ready(self) -> bool:
         return bool(self.token())
 
+    # A pre-filled app manifest, so "create an app with these ten scopes" is
+    # replaced by clicking a link and pressing Create. The scopes are all READ:
+    # history and search, never chat:write. Friday physically cannot post.
+    MANIFEST_URL = 'https://api.slack.com/apps?new_app=1&manifest_json=%7B%22display_information%22%3A%20%7B%22name%22%3A%20%22Friday%22%2C%20%22description%22%3A%20%22Read-only%20assistant%20that%20reads%20your%20Slack%20for%20you%22%2C%20%22background_color%22%3A%20%22%230b0d12%22%7D%2C%20%22oauth_config%22%3A%20%7B%22scopes%22%3A%20%7B%22user%22%3A%20%5B%22search%3Aread%22%2C%20%22channels%3Ahistory%22%2C%20%22groups%3Ahistory%22%2C%20%22im%3Ahistory%22%2C%20%22mpim%3Ahistory%22%2C%20%22channels%3Aread%22%2C%20%22groups%3Aread%22%2C%20%22im%3Aread%22%2C%20%22mpim%3Aread%22%2C%20%22users%3Aread%22%5D%7D%7D%2C%20%22settings%22%3A%20%7B%22org_deploy_enabled%22%3A%20false%2C%20%22socket_mode_enabled%22%3A%20false%2C%20%22token_rotation_enabled%22%3A%20false%7D%7D'
+
     def setup_hint(self) -> str:
-        return ("create a Slack app at api.slack.com/apps, give it the user "
-                "scopes search:read, channels:history and users:read, install "
-                "it to your workspace, then save the xoxp- token with: "
-                "friday connect slack <token>")
+        return ("open this, press Create, then Install to Workspace, and paste "
+                "me the xoxp- token:\n" + self.MANIFEST_URL)
+
+    def setup_link(self) -> str:
+        return self.MANIFEST_URL
 
     def _call(self, method: str, **params) -> dict:
         tok = self.token()
