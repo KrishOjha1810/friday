@@ -294,7 +294,8 @@ def classify(text: str) -> tuple:
             # which is not a sentence anyone would type into an agent.
             if want and msg.lower().startswith("for "):
                 msg = "Give me " + msg[4:]
-            return TELL, {"name": name, "message": msg, "await": want}
+            return TELL, {"name": name, "message": msg, "await": want,
+                          "said": t}
     m = _TELL_RE.search(t)
     if m:
         name, msg = m.group(1), m.group(2).strip()
@@ -306,7 +307,8 @@ def classify(text: str) -> tuple:
             # which is not a sentence anyone would type into an agent.
             if want and msg.lower().startswith("for "):
                 msg = "Give me " + msg[4:]
-            return TELL, {"name": name, "message": msg, "await": want}
+            return TELL, {"name": name, "message": msg, "await": want,
+                          "said": t}
     m = _OPEN_RE.search(t)
     if m and len(t.split()) <= 6:      # a command, not a sentence about opening
         name = m.group(2)
@@ -444,7 +446,8 @@ class Friday:
             return self._propose_open(payload["name"])
         if intent == TELL:
             return self._propose_tell(payload["name"], payload["message"],
-                                      payload.get("await", False))
+                                      payload.get("await", False),
+                                      payload.get("said", ""))
         if intent in (CONFIRM, CANCEL):
             return self._say("Nothing was waiting on you." if intent == CONFIRM
                              else "Okay.")
@@ -1087,8 +1090,57 @@ class Friday:
         return self._perform({"kind": "open", "sid": hit.get("sid", ""),
                               "label": hit.get("label", name)})
 
+    # Between a session's name and your message sit two kinds of word: filler
+    # that is never part of either, and one boundary word that says which kind
+    # of message this is. They must be treated differently, or "for a summary"
+    # loses both the "for" (which means you want an answer) and the "a".
+    _FILLER_AFTER_NAME = {"session", "in", "claude", "please"}
+    _BOUNDARY = {"that", "to", "about", "for"}
+
+    def _resplit(self, said: str, name: str, message: str,
+                 want: bool) -> tuple:
+        """Find the session name in the sentence and take the rest as the
+        message.
+
+        Splitting on the first space put "voice" as the session and sent
+        voicebridge the words "bridge session in claude for a summary of
+        changes". Worse, "voice" is a close enough match to voicebridge that
+        Friday acted on it without asking. The live list of session names is the
+        only reliable place to cut."""
+        names = self._names_of_sessions()
+        if not (said and names):
+            return name, message, want, False
+        found, i, j, _sc = nearest.best_span(said, names)
+        if not found:
+            return name, message, want, False
+        # Whether you actually SAID the name, or Friday worked it out. Resolving
+        # "ap" to "api" and then treating it as though you had typed "api"
+        # skipped the confirmation that stops a wrong instruction being written
+        # into a running agent.
+        heard = " ".join(said.split()[i:j])
+        exact = nearest.flat(heard) == nearest.flat(found)
+        toks = [w for w in said.split() if w.strip(".,?!:;")]
+        rest = toks[j:]
+        bare = lambda w: w.lower().strip(".,?!:;")
+        while rest and bare(rest[0]) in self._FILLER_AFTER_NAME:
+            rest.pop(0)
+        joiner = ""
+        if rest and bare(rest[0]) in self._BOUNDARY:
+            joiner = bare(rest.pop(0))
+        msg = " ".join(rest).strip(" .,")
+        if not msg:
+            return found, message, want, exact
+        # "ask X FOR a summary" is a request for something, not an instruction:
+        # sending the fragment "a summary of changes" is not what you would type.
+        if joiner == "for":
+            msg = "Give me " + msg
+            want = True
+        return found, msg, want, exact
+
     def _propose_tell(self, name: str, message: str,
-                      want_answer: bool = False) -> dict:
+                      want_answer: bool = False, said: str = "") -> dict:
+        name, message, want_answer, said_exactly = self._resplit(
+            said, name, message, want_answer)
         """TIER 0 when you named the session exactly (that was your
         confirmation), TIER 1 when Friday had to guess which one you meant."""
         hit, how = self._find_how(name)
@@ -1098,7 +1150,7 @@ class Friday:
         act = {"kind": "tell", "sid": hit.get("sid", ""),
                "await": want_answer, "path": hit.get("path", ""),
                "label": hit.get("label", name), "message": message}
-        if how == "exact":
+        if how == "exact" and (said_exactly or not said):
             return self._perform(act)
         self.pending = act
         self._offered = None     # likewise: the newer question owns "yes"

@@ -103,6 +103,48 @@ def test_naming_a_session_exactly_is_your_confirmation():
         C.actions.send_to_session = orig
 
 
+def test_a_two_word_session_name_is_not_split_at_the_space():
+    """'Ask the voice bridge session in claude for a summary of changes' sent
+    voicebridge the literal words 'bridge session in claude for a summary of
+    changes': the name was cut at the first space, and 'voice' matched
+    voicebridge closely enough to act on. The live list of names is the only
+    reliable place to cut a sentence."""
+    _fake_engine()
+    f = Friday()
+    f._names_of_sessions = lambda: ["voicebridge", "api"]
+    name, msg, want, exact = f._resplit(
+        "Ask the voice bridge session in claude for a summary of changes",
+        "voice", "bridge session in claude for a summary of changes", True)
+    assert name == "voicebridge", name
+    assert msg == "Give me a summary of changes", msg
+    assert want is True and exact is True, (want, exact)
+
+
+def test_for_means_you_want_an_answer_back():
+    """'ask X for a summary' is a request, not an instruction. Sending the
+    fragment 'a summary of changes' is not what anyone would type into an
+    agent, and not waiting for the reply leaves the answer in a window you are
+    not looking at."""
+    _fake_engine()
+    f = Friday()
+    f._names_of_sessions = lambda: ["api"]
+    _n, msg, want, _e = f._resplit("ask api for the test results",
+                                   "api", "the test results", False)
+    assert msg == "Give me the test results", msg
+    assert want is True
+
+
+def test_a_name_friday_worked_out_is_still_confirmed():
+    """Resolving 'ap' to 'api' must not be treated as though you typed 'api':
+    writing the wrong instruction into a running agent is not undoable."""
+    _fake_engine()
+    f = Friday()
+    f._names_of_sessions = lambda: ["api", "jobhunt"]
+    _n, _m, _w, exact = f._resplit("tell ap to use redis", "ap",
+                                   "use redis", False)
+    assert exact is False, "a guess was recorded as something you said"
+
+
 def test_a_guessed_target_is_confirmed_first():
     """TIER 1. Friday inferred which session you meant, so it checks. Writing
     the wrong instruction into a running agent is not undoable."""

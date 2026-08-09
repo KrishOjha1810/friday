@@ -83,22 +83,26 @@ def resolve(heard: str, names) -> tuple:
 
 
 def best_window(text: str, names, act: float = ACT, words: int = 3) -> str:
-    """Find a known name hiding anywhere in a sentence.
+    """The name only. See best_span for where in the sentence it was found."""
+    name, _, _, _ = best_span(text, names, act, words)
+    return name
 
-    Pulling the name out by grammar is fragile: "catch me up on my chat in
-    moon shot" has two candidate prepositions and the wrong one wins, and
-    "discussed in X in the morning" ends up meaning 'morning'. The real list is
-    the reliable anchor, so instead of parsing the sentence, look for the place
-    in it that matches something that actually exists."""
+
+def best_span(text: str, names, act: float = ACT, words: int = 3) -> tuple:
+    """(name, first_word_index, last_word_index_exclusive, score).
+
+    Knowing WHERE the name sat matters as much as knowing it is there: the rest
+    of the sentence is the message, and splitting it in the wrong place sent an
+    agent the literal words "bridge session in claude for a summary of changes"."""
     toks = [w.strip(".,?!:;#") for w in (text or "").split()]
     toks = [w for w in toks if w]
-    best, score = "", 0.0
+    best, score, span = "", 0.0, (0, 0)
     for n in range(words, 0, -1):
         for i in range(len(toks) - n + 1):
             window = " ".join(toks[i:i + n])
             for sc, name in rank(window, names)[:1]:
-                # Prefer longer windows at equal quality: "moon shot" is a
-                # better reading than "nether".
                 if sc > score + 1e-9:
-                    best, score = name, sc
-    return best if score >= act else ""
+                    best, score, span = name, sc, (i, i + n)
+    if score < act:
+        return "", 0, 0, score
+    return best, span[0], span[1], score
