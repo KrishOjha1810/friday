@@ -66,11 +66,21 @@ def _messages(path: str) -> list:
     return out
 
 
+def last_said(path: str) -> str:
+    """The last thing the AGENT said, ignoring what was said TO it.
+
+    Taking the last message of any role meant the prompt Friday had just typed
+    in came straight back as the answer: "voicebridge answered: what are the
+    future plans of Friday?", which is the question. Only the agent's own words
+    can ever be a reply."""
+    msgs = [m for m in _messages(path) if m[1] == "assistant"]
+    return msgs[-1][2] if msgs else ""
+
+
 def mark(path: str) -> str:
     """Where the transcript is now, so a later reply can be told apart from an
     older one. Returns an opaque marker."""
-    msgs = _messages(path)
-    return msgs[-1][2][:200] if msgs else ""
+    return last_said(path)[:200]
 
 
 def wait_for_reply(path: str, marker: str, timeout: float = 120,

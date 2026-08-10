@@ -29,8 +29,8 @@ import re
 import time
 from pathlib import Path
 
-from . import (actions, connectors, engine, fleetcache, memory,
-               nearest, replies, watchtower)
+from . import (actions, connectors, engine, fleetcache, inbox, memory,
+               nearest, replies, watchtower, when)
 
 # What kind of thing the user just said.
 ASK_FLEET = "fleet"        # "what's running", "who needs me"
@@ -60,6 +60,7 @@ ENGINE = "engine"          # "are you using claude for this?"
 ASK_ALL = "askall"         # "ask everyone what they're working on"
 MORE = "more"              # "say more", "what exactly did it say"
 MISSED = "missed"          # "what did I miss?"
+DRAFT = "draft"            # "draft a reply"
 MUTE = "mute"              # "ignore jobhunt for now"
 STUCK = "stuck"            # "is anyone stuck?"
 WHO = "who"                # "who am I talking to?"
@@ -74,6 +75,14 @@ CHAT = "chat"              # anything else: a real conversation
 # agent's own words, and tell you who a bare reply would reach.
 # Coming back to the desk. Scrolling to work out what happened while you were
 # away is the same manual sweep as walking the windows.
+# Friday holds no write scope in Slack on purpose, so a reply is something it
+# writes and you send. Offering to "reply" and then not sending would be the
+# worst of both.
+_DRAFT_RE = re.compile(
+    r"\b(?:draft|write|compose)\s+(?:me\s+)?(?:a\s+|the\s+)?"
+    r"(?:reply|response|answer|message)\b(?:\s+(?:saying|that says)\s+(.*))?$"
+    r"|\breply\s+(?:saying|with)\s+(.*)$", re.I)
+
 _MISSED_RE = re.compile(
     r"\bwhat\s+(?:did\s+i|have\s+i)\s+miss(?:ed)?\b|\bcatch\s+me\s+up\b"
     r"(?!\s+on\b)|\bwhat\s+happened\s+while\s+i\s+was\s+(?:away|out|gone)\b|"
@@ -333,6 +342,9 @@ def classify(text: str) -> tuple:
         return CONNECT, {"which": m.group(1), "token": m.group(2) or ""}
     if _ENGINE_RE.search(t):
         return ENGINE, {}
+    m = _DRAFT_RE.search(t)
+    if m:
+        return DRAFT, {"gist": (m.group(1) or m.group(2) or "").strip()}
     if _MISSED_RE.search(t):
         return MISSED, {}
     if _STUCK_RE.search(t):
@@ -475,6 +487,12 @@ class Friday:
             self.announce,
             log=(engine.core.log if engine.AVAILABLE else None),
             hushed=lambda: self.quiet)
+        # The same idea for people rather than agents: a Slack message brought
+        # to you with something you can do about it.
+        self.inbox = inbox.Inbox(
+            self.announce,
+            log=(engine.core.log if engine.AVAILABLE else None),
+            hushed=lambda: self.quiet)
         self.history = []          # [{role, text, ts, kind}]
         self.focus = (engine.routing.new_focus()
                       if engine.AVAILABLE else {"mentioned": [], "ts": 0})
@@ -573,6 +591,8 @@ class Friday:
             return self._slack(payload.get("query", ""))
         if intent == OPEN:
             return self._propose_open(payload["name"])
+        if intent == DRAFT:
+            return self._draft(payload.get("gist", ""))
         if intent == MISSED:
             return self._missed()
         if intent == STUCK:
@@ -695,6 +715,45 @@ class Friday:
             return True
         except Exception:
             return False
+
+    def _draft(self, gist: str = "") -> dict:
+        """Write the reply; you send it.
+
+        Friday's Slack app holds read scopes only, and that is deliberate: an
+        assistant that can post as you is a different risk entirely. So the
+        useful version of "reply for me" is a draft in your own register that
+        you paste, and saying plainly that you are the one sending it."""
+        last = None
+        for cid, m in reversed(list(self.inbox.last.items())):
+            last = m
+            break
+        if not last:
+            return self._say("Reply to what? Nothing has come in that I know "
+                             "of.")
+        if not (engine.AVAILABLE and engine.brain.up()):
+            return self._say(f"My brain isn't loaded, so I can't write it. "
+                             f"{last['who']} said: {last['text'][:200]}")
+        want = (f"\nThe reply should say: {gist}" if gist else "")
+        out = ""
+        try:
+            out = engine.brain._chat(
+                [{"role": "system", "content":
+                  "Write a short Slack reply for Krish to send. Two or three "
+                  "sentences at most, plain and direct, no greeting padding, no "
+                  "sign-off, no markdown. Only commit to things the instruction "
+                  "says; never invent a date, a number or a promise."},
+                 {"role": "user", "content":
+                  f"{last['who']} wrote in {last['where']}:\n"
+                  f"{last['text'][:1200]}{want}"}],
+                timeout=engine.brain.TIMEOUT_SLOW, max_tokens=180)
+            out = engine.brain._clean(out) if out else ""
+        except Exception:
+            out = ""
+        if not out:
+            return self._say("I couldn't get a draft out of my brain. "
+                             f"{last['who']} said: {last['text'][:200]}")
+        return self._say(f"Here's a draft for {last['who']} in {last['where']}. "
+                         f"I can't post to Slack, so send it yourself:\n\n{out}")
 
     def _missed(self) -> dict:
         """Everything Friday brought up since you last said something.
@@ -1197,26 +1256,40 @@ class Friday:
                 return self._say(f"I don't have a channel called {name}. What I "
                                  f"can see: " + ", ".join("#" + n for n in names[:8]))
             return self._say(f"I can't find a Slack channel called {name}.")
-        rows = sl.read_channel(ch["id"], limit=15)
+        # A named day is a real bound, not a hint. Reading the last fifteen
+        # messages whatever their date and then answering as though they were
+        # yesterday's is the worst kind of wrong: the answer's shape says the
+        # question was understood.
+        oldest, latest, span = when.parse(said)
+        rows = sl.read_channel(ch["id"], limit=(200 if span else 15),
+                              oldest=oldest, latest=latest)
         if not rows:
             why = err()
             if why:
                 return self._say(f"I couldn't read #{ch['name']}: " + why + ".")
+            if span:
+                return self._say(f"Nothing was said in #{ch['name']} {span}.")
             return self._say(f"#{ch['name']} is empty.")
         self._last_slack = rows
         convo = "\n".join(f"{r['who']}: {r['text']}" for r in rows[-12:])
-        summary = self._summarise_thread(convo, said)
+        summary = self._summarise_thread(convo, said, span)
         # Say WHICH messages were read. Asked what was discussed yesterday and
         # given a summary with no timeframe, you cannot tell whether Friday
         # honoured "yesterday" or quietly ignored it.
-        span = ""
+        # Say exactly what was read, so the window and the claim can never
+        # disagree.
         stamps = [r.get("when") or 0 for r in rows if r.get("when")]
-        if stamps:
-            span = (f" (last {len(rows)} messages, "
+        if span:
+            head = f" ({span}, {len(rows)} message{'s' if len(rows) != 1 else ''})"
+        elif stamps:
+            head = (f" (last {len(rows)} messages, "
                     f"{memory.ago(min(stamps))} to {memory.ago(max(stamps))})")
-        return self._say(f"In #{ch['name']}{span}:\n{summary}")
+        else:
+            head = ""
+        return self._say(f"In #{ch['name']}{head}:\n{summary}")
 
-    def _summarise_thread(self, convo: str, question: str = "") -> str:
+    def _summarise_thread(self, convo: str, question: str = "",
+                          span: str = "") -> str:
         """What is actually being ASKED, in a sentence or two.
 
         If you asked something specific ("what did Sam say"), answer THAT
@@ -1232,7 +1305,15 @@ class Friday:
                 "asking what, and what they need. Only use what is in the "
                 "messages." + RULES)
         q = (question or "").strip()
-        if q and len(q.split()) > 2:
+        if span:
+            # These messages ARE the window asked for, so it must not hedge
+            # about whether they cover it. It used to answer "there is no
+            # information about yesterday" while holding yesterday's messages.
+            task = (f"These are the messages from {span}. Summarise what was "
+                    f"discussed and who wants what. Do not say you lack "
+                    f"information about {span}: these messages are exactly "
+                    f"that period." + RULES)
+        elif q and len(q.split()) > 2:
             task = ("Answer this question using ONLY these messages: " + q[:160]
                     + "\nAnswer it directly. If the messages genuinely do not "
                       "cover it, say only that and summarise what they do say. "
@@ -1687,6 +1768,12 @@ class Friday:
         "give you a session's exact words instead of the summary (say: say more)",
         "tell you which session a bare reply would reach (say: who am I "
         "talking to)",
+        "watch Slack and bring you a new message with who sent it and what "
+        "they want, unprompted",
+        "write a Slack reply for you to send (say: draft a reply). It cannot "
+        "post to Slack itself, on purpose",
+        "read a channel for a named day (say: what was said in <channel> "
+        "yesterday, or on Friday)",
         "take your answer to a session that asked you a question",
         "go quiet, or start speaking again",
     ]
@@ -1698,6 +1785,8 @@ class Friday:
         "search your Slack, once you connect it",
     ]
     CANNOT_YET = [
+        "post or send anything in Slack (it can draft, you send)",
+        "put anything in your calendar, or schedule a meeting",
         "search Jira or email",
         "post, comment, merge or change anything (everything is read-only)",
         "start a brand new session, or write code itself",

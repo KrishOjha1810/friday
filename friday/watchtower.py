@@ -121,7 +121,9 @@ class Watchtower:
             if not path:
                 continue
             try:
-                text = replies.mark(path)
+                # The agent's own words only. Reading the last message of any
+                # role reported Friday's own injected prompt as the answer.
+                text = replies.last_said(path)
             except Exception:
                 continue
             if not text or text == self.seen.get(sid):

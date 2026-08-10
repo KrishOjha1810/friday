@@ -427,10 +427,20 @@ class Slack:
         options beats asking someone to rephrase a name they said correctly."""
         return [c["name"] for c in self.channels()[:limit]]
 
-    def read_channel(self, channel_id: str, limit: int = 15) -> list:
-        """The recent conversation in a channel, oldest-first so it reads like
-        a conversation rather than a reversed feed."""
-        d = self._call("conversations.history", channel=channel_id, limit=limit)
+    def read_channel(self, channel_id: str, limit: int = 15,
+                     oldest: float = 0, latest: float = 0) -> list:
+        """The conversation in a channel, oldest-first so it reads like a
+        conversation rather than a reversed feed.
+
+        `oldest`/`latest` are real Slack bounds. Without them, asking what
+        happened yesterday read the last fifteen messages whatever their date,
+        and then answered as though that were yesterday."""
+        args = {"channel": channel_id, "limit": limit}
+        if oldest:
+            args["oldest"] = f"{oldest:.6f}"
+        if latest:
+            args["latest"] = f"{latest:.6f}"
+        d = self._call("conversations.history", **args)
         if not d.get("ok"):
             return []
         rows = [{"who": m.get("user", "") or m.get("username", ""),

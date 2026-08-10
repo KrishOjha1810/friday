@@ -63,6 +63,22 @@ def test_the_reply_comes_back_once_it_stops_changing():
         assert got == "Three files changed: a, b, c", got
 
 
+def test_the_question_is_never_reported_as_the_answer():
+    """Friday types a prompt INTO the session, so that prompt is the newest
+    thing in the transcript. Reading the last message of any role reported it
+    straight back: "voicebridge answered: what are the future plans of Friday?",
+    which is the question."""
+    with tempfile.TemporaryDirectory() as d:
+        p = Path(d) / "s.jsonl"
+        _write(p, [("assistant", "an earlier answer"),
+                   ("user", "what are the future plans of Friday?")])
+        assert replies.last_said(str(p)) == "an earlier answer"
+        assert replies.mark(str(p)).startswith("an earlier answer")
+        got = replies.wait_for_reply(str(p), replies.mark(str(p)),
+                                     timeout=1.0, settle=0.2)
+        assert got == "", "reported the prompt as a reply: " + got
+
+
 def test_silence_is_reported_as_silence():
     """A session that never answers must not leave Friday waiting forever, and
     must not produce an invented summary either."""
