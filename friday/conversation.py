@@ -29,8 +29,8 @@ import re
 import time
 from pathlib import Path
 
-from . import (actions, connectors, engine, fleetcache, inbox, memory,
-               nearest, replies, watchtower, when)
+from . import (actions, connectors, engine, feeds, fleetcache, inbox,
+               memory, nearest, replies, watchtower, when)
 
 # What kind of thing the user just said.
 ASK_FLEET = "fleet"        # "what's running", "who needs me"
@@ -61,6 +61,7 @@ ASK_ALL = "askall"         # "ask everyone what they're working on"
 MORE = "more"              # "say more", "what exactly did it say"
 MISSED = "missed"          # "what did I miss?"
 DRAFT = "draft"            # "draft a reply"
+BRIEF = "brief"            # "brief me", "where does everything stand"
 MUTE = "mute"              # "ignore jobhunt for now"
 STUCK = "stuck"            # "is anyone stuck?"
 WHO = "who"                # "who am I talking to?"
@@ -78,6 +79,15 @@ CHAT = "chat"              # anything else: a real conversation
 # Friday holds no write scope in Slack on purpose, so a reply is something it
 # writes and you send. Offering to "reply" and then not sending would be the
 # worst of both.
+# The whole picture, asked for rather than waited on. The unprompted stream is
+# deliberately sparse, so there has to be a way to pull everything at once.
+_BRIEF_RE = re.compile(
+    r"\bbrief\s+me\b|\bwhere\s+(?:does|do)\s+everything\s+stand\b|"
+    r"\bwhat(?:'?s| is|\s+are)?\s+(?:the\s+)?"
+    r"(?:situation|status|state\s+of\s+play)\b|"
+    r"\bfull\s+(?:picture|rundown)\b|\beverything\s+i\s+need\s+to\s+know\b",
+    re.I)
+
 _DRAFT_RE = re.compile(
     r"\b(?:draft|write|compose)\s+(?:me\s+)?(?:a\s+|the\s+)?"
     r"(?:reply|response|answer|message)\b(?:\s+(?:saying|that says)\s+(.*))?$"
@@ -321,6 +331,8 @@ def classify(text: str) -> tuple:
     """(intent, payload). Deterministic and ordered: the most specific command
     wins, and only what is left over counts as conversation."""
     t = (text or "").strip()
+    if _BRIEF_RE.search(t):
+        return BRIEF, {}
     if not t:
         return CHAT, {}
     # Specific multi-word intents go FIRST. "resume that session" is not the
@@ -489,6 +501,16 @@ class Friday:
             hushed=lambda: self.quiet)
         # The same idea for people rather than agents: a Slack message brought
         # to you with something you can do about it.
+        # Everything that is not an agent and not Slack: GitHub, your repos,
+        # your calendar. One dispatcher so each new tool inherits the same
+        # rules instead of inventing its own idea of what is worth saying.
+        self.feeds = feeds.Feeds(
+            self.announce,
+            log=(engine.core.log if engine.AVAILABLE else None),
+            hushed=lambda: self.quiet)
+        self.feeds.add("github", feeds.GitHubFeed(), period=180)
+        self.feeds.add("git", feeds.GitFeed(), period=900)
+        self.feeds.add("calendar", feeds.CalendarFeed(), period=120)
         self.inbox = inbox.Inbox(
             self.announce,
             log=(engine.core.log if engine.AVAILABLE else None),
@@ -591,6 +613,8 @@ class Friday:
             return self._slack(payload.get("query", ""))
         if intent == OPEN:
             return self._propose_open(payload["name"])
+        if intent == BRIEF:
+            return self._brief()
         if intent == DRAFT:
             return self._draft(payload.get("gist", ""))
         if intent == MISSED:
@@ -715,6 +739,41 @@ class Friday:
             return True
         except Exception:
             return False
+
+    def _brief(self) -> dict:
+        """One answer covering everything Friday can see.
+
+        This is the single point of contact in one command: agents, people,
+        GitHub, your repos, your calendar. Anything unreadable says so, because
+        a brief with a silent hole in it is worse than a short one."""
+        lines = []
+        fleet = self.fleet_summary()
+        if fleet:
+            lines.append(fleet)
+        waiting = self._waiting()
+        if waiting:
+            lines.append("Waiting on you: "
+                         + _join([r.get("label", "?") for r in waiting]) + ".")
+        try:
+            for _name, line in self.feeds.brief():
+                lines.append(line)
+        except Exception:
+            lines.append("I couldn't read GitHub or your repos just now.")
+        try:
+            sl = connectors.get("slack")
+            if sl and sl.ready():
+                unread = len(self.inbox.last)
+                if unread:
+                    who = ", ".join(sorted({m["who"] for m
+                                            in self.inbox.last.values()}))
+                    lines.append(f"Slack: recent messages from {who}.")
+            else:
+                lines.append("Slack isn't connected.")
+        except Exception:
+            pass
+        return self._say("\n- ".join(["Here's where everything stands:"] + lines)
+                         if lines else "Nothing is running and nothing is "
+                                       "waiting.")
 
     def _draft(self, gist: str = "") -> dict:
         """Write the reply; you send it.
@@ -1774,6 +1833,13 @@ class Friday:
         "post to Slack itself, on purpose",
         "read a channel for a named day (say: what was said in <channel> "
         "yesterday, or on Friday)",
+        "watch GitHub and tell you about review requests, mentions and broken "
+        "builds, unprompted",
+        "notice work on this machine that exists nowhere else: uncommitted "
+        "changes and unpushed commits",
+        "warn you before a meeting starts, if macOS has allowed calendar access",
+        "give you everything in one answer across agents, Slack, GitHub, your "
+        "repos and your calendar (say: brief me)",
         "take your answer to a session that asked you a question",
         "go quiet, or start speaking again",
     ]

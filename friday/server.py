@@ -324,6 +324,8 @@ def run(port: int = PORT, expose: bool = False):
     _friday.watch.start()
     _friday.inbox.announce = _friday.watch.announce
     _friday.inbox.start()
+    _friday.feeds.announce = _friday.watch.announce
+    _friday.feeds.start()
     srv = ThreadingHTTPServer((host, port), Handler)
     if expose:
         print(f"Friday is listening on http://{host}:{port}?k={SECRET}")
