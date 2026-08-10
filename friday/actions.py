@@ -67,6 +67,8 @@ def focus_session(sid: str) -> bool:
     Works by tty rather than by window title, because titles are unreliable and
     a tty is exactly the session. Returns False (never raises) when the session
     has no known tty, which is the honest answer: we could not do it."""
+    if _blocked("focus", sid):
+        return True
     if not (sid and engine.AVAILABLE):
         return False
     try:
@@ -123,6 +125,8 @@ def resume_session(sid: str, cwd: str = "") -> bool:
     half: 'open that session' about something you finished last Tuesday has to
     actually bring the conversation back, which is `claude --resume <id>` in a
     fresh window."""
+    if _blocked("resume", sid, cwd):
+        return True
     if not sid:
         return False
     where = cwd or str(Path.home())
@@ -136,6 +140,8 @@ def new_session(prompt: str = "", cwd: str = "") -> bool:
     This is how a Slack thread becomes work: Friday read the thread, you said
     'start something on this', and the new session opens already knowing what
     it is for instead of you retyping it."""
+    if _blocked("new", prompt, cwd):
+        return True
     where = cwd or str(Path.home())
     cmd = f"cd {_q(where)} && claude"
     if prompt:

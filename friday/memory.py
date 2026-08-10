@@ -82,6 +82,86 @@ def _texts(path: Path, limit: int = MAX_BYTES_PER_FILE):
             yield role, text
 
 
+def projects() -> list:
+    """[(name, directory)] for every project you have worked in.
+
+    Claude stores a session under a directory named for its working directory,
+    so the project name is on disk whether or not anything is running. This is
+    how a closed session can be found by name at all: "ask promptguard to ..."
+    used to fail simply because promptguard was not running, even though every
+    conversation you ever had with it is right here."""
+    out = []
+    try:
+        for d in PROJECTS.iterdir():
+            if not d.is_dir():
+                continue
+            # "-Users-krishojha-Desktop-promptguard" is the cwd with slashes
+            # turned into dashes. The last part is the name you would use.
+            name = d.name.rstrip("-").rsplit("-", 1)[-1]
+            if name:
+                out.append((name, d))
+    except Exception:
+        return []
+    return out
+
+
+def project_names(with_sessions: bool = False) -> list:
+    """Project names. With `with_sessions`, only those that have transcripts.
+
+    The distinction matters: a directory can exist with nothing in it, and
+    telling somebody "promptguard has no conversations" is a different answer
+    from "there is no promptguard"."""
+    out = []
+    for name, d in projects():
+        if with_sessions:
+            try:
+                if not any(d.glob("*.jsonl")):
+                    continue
+            except Exception:
+                continue
+        out.append(name)
+    return out
+
+
+def by_project(name: str, limit: int = 5) -> list:
+    """Sessions from the project whose name matches, newest first."""
+    from . import nearest
+    rows = projects()
+    if not rows:
+        return []
+    # Reopening the wrong project is a window full of somebody else's work, so
+    # this needs a clear match rather than the closest one.
+    picked = nearest.pick(name, [n for n, _d in rows], act=0.72)
+    if not picked:
+        return []
+    out = []
+    for n, d in rows:
+        if n != picked:
+            continue
+        for f in d.glob("*.jsonl"):
+            try:
+                mtime = f.stat().st_mtime
+            except OSError:
+                continue
+            about = ""
+            for role, text in _texts(f, limit=60_000):
+                if role == "user" and len(text) > 12 and not text.startswith("/"):
+                    about = text[:110]
+                    break
+            out.append({"sid": f.stem, "path": str(f), "when": mtime,
+                        "project": n, "cwd": _cwd_of(d), "about": about})
+    out.sort(key=lambda h: -h["when"])
+    return out[:limit]
+
+
+def _cwd_of(d) -> str:
+    """The working directory a project directory was named for."""
+    name = d.name
+    if not name.startswith("-"):
+        return ""
+    return "/" + name[1:].replace("-", "/")
+
+
 def search(query: str, limit: int = 5) -> list:
     """Sessions matching `query`, best first.
 

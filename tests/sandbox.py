@@ -33,4 +33,10 @@ def use_temp_config() -> Path:
     from friday import actions
     actions.disarm()
 
+    # Tests must not read your real project history either: it made results
+    # depend on which folders happen to exist on this machine.
+    from friday import memory
+    memory.PROJECTS = tmp / "projects"
+    memory.PROJECTS.mkdir(parents=True, exist_ok=True)
+
     return tmp

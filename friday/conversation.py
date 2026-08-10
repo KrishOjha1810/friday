@@ -1606,20 +1606,111 @@ class Friday:
                          "what they're doing: another account's work isn't "
                          "readable from here, and shouldn't be.")
 
-    def _no_session(self, name: str, retry) -> dict:
-        """A session name Friday does not recognise, handled like every other
-        unrecognised name: offer the closest, or say what does exist."""
+    def _no_session(self, name: str, retry, message: str = "") -> dict:
+        """A name that is not running. That is not the same as unknown.
+
+        A project you worked in last week is still reachable: its transcripts are
+        on disk and `claude --resume` brings the conversation back. Answering "I
+        don't have a session called promptguard" while holding every
+        conversation you ever had with it is withholding the answer."""
+        past = []
+        try:
+            past = memory.by_project(name, limit=1)
+        except Exception:
+            past = []
+        if past:
+            hit = past[0]
+            if message:
+                return self._offer(
+                    f"{hit['project']} isn't running, but I have it from "
+                    f"{memory.ago(hit['when'])}. Want me to reopen it and send "
+                    f"that?",
+                    yes=lambda h=hit, m=message: self._resume_and_tell(h, m))
+            return self._offer(
+                f"{hit['project']} isn't running. I have it from "
+                f"{memory.ago(hit['when'])}. Reopen it?",
+                yes=lambda h=hit: self._resume_only(h))
+        # A project with a directory and no conversations is a specific fact,
+        # and a different one from "no such project".
+        try:
+            empty = nearest.pick(name, memory.project_names())
+            alive = memory.project_names(with_sessions=True)
+        except Exception:
+            empty, alive = "", []
+        if empty and empty not in alive:
+            near = nearest.suggest(name, alive)
+            if near:
+                return self._offer(
+                    f"There's a {empty} folder but no conversations in it. Did "
+                    f"you mean {near}?",
+                    yes=lambda g=near: retry(g))
+            # Nothing sounds like it, so naming what DOES have history beats
+            # guessing at something that does not.
+            tail = (" I have history for: " + ", ".join(alive[:6]) + "."
+                    if alive else "")
+            return self._say(f"There's a {empty} folder but no conversations in "
+                             f"it, so there's nothing to reopen.{tail}")
         names = self._names_of_sessions()
-        guess = nearest.suggest(name, names)
+        guess = nearest.suggest(name, names + alive)
         if guess:
             return self._offer(
                 f"I don't have a session called {name}. Did you mean {guess}?",
                 yes=lambda g=guess: retry(g), again=retry)
         if names:
             return self._say(f"I don't have a session called {name}. Running "
-                             f"now: " + ", ".join(names[:8]))
+                             f"now: " + ", ".join(names[:8])
+                             + (". Past work: " + ", ".join(alive[:6])
+                                if alive else ""))
         return self._say(f"I can't find a session called {name}, and nothing "
                          f"is running.")
+
+    def _resume_only(self, hit: dict) -> dict:
+        ok = actions.resume_session(hit["sid"], cwd=hit.get("cwd", ""))
+        fleetcache.bust()
+        return self._say(f"Reopened {hit['project']} in a new window."
+                         if ok else
+                         f"I couldn't reopen {hit['project']}.")
+
+    def _resume_and_tell(self, hit: dict, message: str) -> dict:
+        """Bring a closed conversation back, then say the thing to it.
+
+        The window takes a few seconds to exist, so this waits for the session
+        to appear before typing: sending immediately types into nothing and
+        reports success."""
+        import threading
+        label = hit.get("project") or hit["sid"][:8]
+        if not actions.resume_session(hit["sid"], cwd=hit.get("cwd", "")):
+            return self._say(f"I couldn't reopen {label}, so I haven't sent "
+                             f"anything.")
+        fleetcache.bust()
+
+        def _deliver():
+            sid, path = "", ""
+            for _ in range(40):                      # up to ~40 seconds
+                time.sleep(1.0)
+                try:
+                    rows = fleetcache.snapshot(max_age=0)
+                except Exception:
+                    rows = {}
+                row = rows.get(hit["sid"])
+                if row:
+                    sid, path = row.get("sid", ""), row.get("path", "")
+                    break
+            if not sid:
+                self.announce(f"{label} opened, but I couldn't see it come up, "
+                              f"so I haven't sent anything. It's on screen if "
+                              f"you want to paste it yourself.")
+                return
+            if self.watch.running:
+                self.watch.expect(sid)
+            if actions.send_to_session(sid, message):
+                self.target = label
+                self.announce(f"Sent it to {label}. I'll tell you what it says.")
+            else:
+                self.announce(f"{label} is open but I couldn't type into it.")
+        threading.Thread(target=_deliver, daemon=True).start()
+        return self._say(f"Reopening {label} and sending that. It takes a few "
+                         f"seconds to come up.")
 
     def _what_needs(self, name: str) -> dict:
         """Report exactly what one agent is waiting on, and remember that it is
@@ -1691,7 +1782,7 @@ class Friday:
         changes". Worse, "voice" is a close enough match to voicebridge that
         Friday acted on it without asking. The live list of session names is the
         only reliable place to cut."""
-        names = self._names_of_sessions()
+        names = self._target_names()
         if not (said and names):
             return name, message, want, False
         found, i, j, _sc = nearest.best_span(said, names)
@@ -1743,7 +1834,8 @@ class Friday:
         hit, how = self._find_how(name)
         if not hit:
             return self._no_session(
-                name, lambda n: self._propose_tell(n, message, want_answer))
+                name, lambda n: self._propose_tell(n, message, want_answer),
+                message=message)
         self.target = hit.get("label", name)
         act = {"kind": "tell", "sid": hit.get("sid", ""),
                "await": want_answer, "path": hit.get("path", ""),
@@ -1819,6 +1911,8 @@ class Friday:
         "(say: ask everyone what they are working on)",
         "keep talking to the same session without naming it again "
         "(say: ask it to also run the tests)",
+        "reopen a session that is CLOSED and send it something (say: ask "
+        "<project> to ...); it waits for the window before typing",
         "watch a session and tell you when it finishes "
         "(say: tell me when it is done)",
         "stop what a session is doing (say: stop <name>)",
@@ -2100,6 +2194,22 @@ class Friday:
                     fleetcache.snapshot().values() if r.get("label")]
         except Exception:
             return []
+
+    def _target_names(self) -> list:
+        """Everything you could plausibly be naming: what is running, and every
+        project you have ever worked in.
+
+        Only running sessions counted before, so "ask promptguard to look at my
+        resume" could not even be parsed: the name was not in the list, so it
+        was cut at the space and "prompt" was looked up instead."""
+        names = list(self._names_of_sessions())
+        try:
+            for n in memory.project_names():
+                if n not in names:
+                    names.append(n)
+        except Exception:
+            pass
+        return names
 
     def _say(self, text: str, needs_confirm: bool = False,
              action: dict = None) -> dict:

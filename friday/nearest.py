@@ -88,19 +88,41 @@ def best_window(text: str, names, act: float = ACT, words: int = 3) -> str:
     return name
 
 
-def best_span(text: str, names, act: float = ACT, words: int = 3) -> tuple:
+# Pulling a name OUT of a sentence is a weaker signal than being handed one, so
+# it needs a higher bar and a blocklist. "stop" scores 0.73 against "Desktop",
+# which is how "tell nonexistent to stop" became an offer to reopen Desktop.
+SPAN_ACT = 0.72
+_NEVER_A_NAME = {
+    "stop", "open", "tell", "ask", "send", "say", "more", "quiet", "resume",
+    "the", "that", "this", "them", "and", "for", "with", "what", "who", "when",
+    "about", "session", "sessions", "claude", "friday", "please", "also",
+    "chat", "message", "reply", "read", "here", "there", "some", "test",
+}
+
+
+def best_span(text: str, names, act: float = None, words: int = 3) -> tuple:
     """(name, first_word_index, last_word_index_exclusive, score).
 
     Knowing WHERE the name sat matters as much as knowing it is there: the rest
     of the sentence is the message, and splitting it in the wrong place sent an
     agent the literal words "bridge session in claude for a summary of changes"."""
+    act = SPAN_ACT if act is None else act
     toks = [w.strip(".,?!:;#") for w in (text or "").split()]
     toks = [w for w in toks if w]
     best, score, span = "", 0.0, (0, 0)
     for n in range(words, 0, -1):
         for i in range(len(toks) - n + 1):
-            window = " ".join(toks[i:i + n])
+            chunk = toks[i:i + n]
+            # A window made only of ordinary command words is not a name,
+            # however well it happens to score against one.
+            if all(w.lower() in _NEVER_A_NAME for w in chunk):
+                continue
+            window = " ".join(chunk)
             for sc, name in rank(window, names)[:1]:
+                # Short windows are only trusted when they match exactly: "api"
+                # is a real session name, "sto" is a fragment of a word.
+                if len(flat(window)) < 4 and flat(window) != flat(name):
+                    continue
                 if sc > score + 1e-9:
                     best, score, span = name, sc, (i, i + n)
     if score < act:
