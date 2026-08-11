@@ -22,8 +22,10 @@ from friday import conversation as C
 from friday.conversation import classify
 
 
-REAL_SHAPE = ("xoxe.xoxp-1-Mi0yLTg2NTY4OTMzNzc2MzktODcyNTY4Mzg3MzY4"
-              "Mi0xMTc3NzIyOTkwODk3OS0xMTc2ODA5MjYyODc3NQ")
+# The SHAPE of a rotating Slack token, synthetic. It carries nothing from a
+# real credential: what matters here is the xoxe. prefix and the dot.
+REAL_SHAPE = ("xoxe.xoxp-1-AAAAAAAAAAAAAAAAAAAABBBBBBBBBBBBBBBBBBBB-CCCCCCCCCCCCCCCCCC"
+              "DDDDDDDDDDDDDDDDDDDDDDDD")
 
 
 def test_a_rotating_token_is_captured_whole():
@@ -39,7 +41,7 @@ def test_a_rotating_token_is_captured_whole():
 def test_every_slack_token_shape_is_recognised_as_slack():
     """xoxe. tokens fell through the prefix check, so a pasted token silently
     turned into 'here is what is connected' instead of connecting anything."""
-    for tok in (REAL_SHAPE, "xoxe-1-Mi0yLTg2NTY4OTMz",
+    for tok in (REAL_SHAPE, "xoxe-1-EEEEEEEEEEEEEEEEEEEE",
                 "xoxp-123456789012", "xoxb-123456789012"):
         i, p = classify(tok)
         assert i == C.CONNECT and p["which"] == "slack", tok[:12]
