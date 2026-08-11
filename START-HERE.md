@@ -1,109 +1,195 @@
-# Try Friday
+# Start here
 
-    cd ~/friday
-    python3 run.py
+Five minutes, and the honest version of what works.
 
-Then open **http://127.0.0.1:8765** in your browser.
+```
+cd ~/friday
+python3 run.py
+```
+
+Open **http://127.0.0.1:8765**.
+
+Type, or hold the mic. Transcription is the local whisper, so nothing leaves the
+machine. Tap the speaker to have Friday read replies aloud, or the call button
+for a continuous hands-free conversation; anything said in a call also lands in
+the chat, so the thread is always the whole record.
 
 ### From your phone
 
-    python3 run.py --phone
+```
+python3 run.py --phone
+```
 
-It prints a URL with a key in it. Open that on your phone (same wifi, or over
-your Tailscale network). The key is required, so keep the URL private: Friday
-can open windows and type into your running agents, so anyone with that link
-can drive your machine.
+It prints a URL with a key in it. Open it on your phone, same wifi or over
+Tailscale. **Keep it private:** Friday can open windows and type into your
+running agents, so anyone with that link can drive your machine.
 
-## What to try
+---
 
-Type or hold the mic:
+## Ten minutes of things to try
 
-- `what's running?` — the fleet in plain English
-- `who needs me?`
-- `open <session>` — brings that terminal to the front (just does it, no
-  permission theatre, because it is instantly reversible)
-- `tell <session> to <something>` — routes into that session. If you name it
-  exactly, it sends; if Friday had to guess which one you meant, it asks first
-- `quiet` / `resume`
-- anything else is just conversation
+### What is going on
 
-**Your past work** (not just what is running)
-- `find the session where I was learning tokenization`
-- `what was I working on recently?`
+```
+what's running?
+who needs me?
+brief me                       everything: agents, Slack, GitHub, repos, calendar
+what did I miss                everything since you last spoke
+is anyone stuck                who cannot continue without you, and for how long
+```
 
-**Other people on this Mac**
-- `are there other users running sessions?` — it can see that they exist, and
-  deliberately cannot see inside them
+### Talking to one agent
 
-**GitHub** (already connected, it uses your `gh` login)
-- `anything on github?` — notifications and your open pull requests
-- `what are my open issues?`
-- `search github for <thing>`
+```
+open jobhunt                       raises that window
+tell jobhunt to run the tests      routes into it
+ask jobhunt for a summary of changes    sends it, waits, reports the answer here
+ask it to also run the linter      same session, no need to name it again
+say more                           its exact words instead of the summary
+who am I talking to                where a bare reply would land
+tell me when it is done            watches it, tells you when it stops
+stop it
+```
 
-**Email and Jira** (each needs a token; ask and Friday tells you how)
-- `any new email?`
-- `my jira tickets`
+`tell` means do this. `ask` means bring me the answer.
 
-**The chain this is really for**
+### Talking to all of them
 
-    you: go to my eng group in slack and read the chat
-    friday: [reads it] Rahul is asking whether the webhook retries are
-            idempotent, and wants a decision before Friday's deploy.
-    you: did we ever talk about this?
-    friday: Yes. 9 days ago: "the webhook retry thing"…  say "open that one"
-    you: open that one
-    friday: [resumes that session in a new window]
+```
+ask everyone what they are working on
+```
 
-If there is no past session, say `start a new session on this` and Friday opens
-one already carrying the Slack context, so you never retype it.
+One question to every running session. Answers arrive as they land, not after
+the slowest one.
 
-**Sessions, past and present**
-- `open <name>` — raise a running session's window
-- `open that one` — after a search: raises it if running, RESUMES it if closed
-- `start a new session on <thing>` — opens a new window already briefed
+### Reopening old work
 
-**What's broken / what you've been doing** (GitHub, already connected)
-- `what's broken?` — failing CI, grouped so 49 notifications read as 4 problems
-- `what have I been doing lately?`
-- `what are my open issues?`
+```
+ask promptguard to look at my resume
+```
 
-**Connections**
-- `what's connected?`
-- `connect slack` / `connect gmail` / `connect jira` — Friday gives you the
-  shortest real path for each, and opens a browser itself where that works
+If a project is closed, Friday offers to reopen it and send that, then waits for
+the window to actually exist before typing. A running session always wins over
+an old copy of the same work.
 
-**Slack** (needs one setup step)
-- `go to my <name> group in slack and read the chat` — reads it and tells you
-  what is actually being asked
-- `search slack for <thing>`
-- To connect: make an app at api.slack.com/apps with the user scopes
-  `search:read`, `channels:history`, `users:read`, install it to your
-  workspace, then tell Friday: `connect slack xoxp-your-token`
-- The token is saved owner-only in `~/.friday/`, and Friday refuses to use it
-  if the file is readable by anyone else. Everything is read-only: Friday never
-  posts, comments or merges.
+```
+find the session where I set up redis
+what was I working on recently?
+open that one
+```
 
-Tap the speaker icon to have Friday read replies aloud. Hold the mic to talk;
-transcription is the local whisper, nothing leaves the machine.
+### Noise control
 
-## What it does on its own
+```
+quiet                    stops everything unprompted
+resume
+ignore jobhunt for now   silences one session, keeps the rest
+unmute jobhunt
+```
 
-While it is open, Friday watches every Claude Code session and brings things up
-unprompted when one genuinely needs you (blocked on a question, errored, stuck,
-finished). Those messages look different from replies, so you can always tell
-who started talking. It will not interrupt you about a session you are already
-looking at, will not talk over you, and caps itself at four interruptions an
-hour.
+A muted session is still watched, so unmuting does not recite a backlog.
 
-## Known gaps (honest list)
+---
 
-- The fleet strip is glanceable but not yet an action surface: no peek panel to
-  read a question and answer it inline.
-- Asks have no lifecycle yet: they do not collapse into a one-line resolution,
-  and there is no "+2 waiting" queueing, so several at once would stack.
-- No suggested replies on an ask (the design calls for 2 to 4 tappable ones).
-- No target chip in the composer, so routing is inferred rather than visible.
-- No presence gating yet: it does not know whether you are at the page, at the
-  machine, or away, so notifications are not routed differently.
-- The phone uses the same page with no phone-specific layout yet (the design
-  calls for a collapsed fleet chip and one visible ask at a time).
+## What it watches on its own
+
+You do not ask for these. Friday brings them, whoever is waiting on you first,
+capped so it never floods, and each thing said once.
+
+- **Your agents.** Every reply, summarised, with the question if it is asking one.
+- **Slack.** A new message with who sent it, what they want, and what you can do.
+- **GitHub.** Review requests, mentions, broken builds. Already connected, it
+  uses your `gh` login.
+- **Your repos.** Uncommitted changes and unpushed commits. Nothing else watches
+  these, and they are the quietest way to lose a day's work.
+- **Calendar.** A meeting starting in the next fifteen minutes.
+
+---
+
+## Connecting things
+
+```
+what's connected?
+```
+
+**GitHub** needs nothing. It uses the `gh` CLI you are already signed in to, so
+no new token, and exactly your own permissions.
+
+**Slack** is two moves:
+
+```
+connect slack
+```
+
+1. Open api.slack.com/apps and press **Generate Token** at the top, under App
+   Configuration Tokens. Copy it.
+2. Paste it to Friday on its own line, then press **Allow** in the tab that
+   opens.
+
+Friday builds the Slack app itself with the ten read scopes it needs, so you
+never touch a scope list. Type the token rather than dictating it: a token cannot
+survive being spoken. It is stored owner-only in `~/.friday/`, and Friday refuses
+to use it if the file is readable by anyone else.
+
+Every scope is a read. There is no `chat:write` anywhere, so Friday physically
+cannot post as you.
+
+**Calendar** needs one macOS permission: System Settings, Privacy & Security,
+Automation, and allow Calendar for your terminal. Until that is granted Friday
+says so rather than implying your day is empty.
+
+**Gmail and Jira** are not connected. Ask and Friday tells you what it needs.
+
+---
+
+## The chain this is really for
+
+```
+you:    go to my moonshot channel and read the chat
+friday: In #moonshot (last 15 messages, 4 days ago to 1 hour ago):
+        Sam asked for a concise overview of your technical work, to help
+        plan a roadmap and align future responsibilities.
+
+you:    did we ever talk about this?
+friday: Yes. 9 days ago, matching moonshot, overview: "the technical
+        overview thing"...  Say "open that one" and I'll bring it up.
+
+you:    open that one
+friday: [resumes that session in a new window]
+```
+
+If there is no past session, `start a new session on this` opens one already
+carrying the Slack context, so you never retype it.
+
+---
+
+## What it will not do
+
+Friday says all of this itself rather than discovering it mid-task:
+
+- Post or send anything in Slack. It drafts (`draft a reply`), you send.
+- Put anything in your calendar, or schedule a meeting.
+- Comment, merge or change anything anywhere. Everything is read-only.
+- Write code, or start work by itself.
+- See inside another person's sessions on this Mac. It can see that they exist.
+
+Ask `are you using claude for this?` and it will tell you the truth: a local
+model on this Mac, local speech in and out, and nothing sent to anyone.
+
+---
+
+## When something looks wrong
+
+- **It says a session is not running when it is.** Reading the fleet is cached
+  for a few seconds. Ask again.
+- **It asks "did you mean X?" a lot.** That is deliberate. A clear match is acted
+  on, a plausible one is asked about. Acting on a weak match once meant reporting
+  on the wrong session as though you had named it.
+- **A summary looks thin.** Say `say more` for the agent's exact words. Any
+  summary containing a file, code or number that was not in the original is
+  thrown away, so occasionally you get the raw text instead of a tidy sentence.
+  That is the trade on purpose.
+- **Nothing is being announced.** Check `quiet` is off, and that you have not
+  muted that session.
+
+Deeper detail, architecture and the roadmap are in `README.md`.
