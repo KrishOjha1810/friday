@@ -31,6 +31,7 @@ running agents, so anyone with that link can drive your machine.
 ### What is going on
 
 ```
+what should I work on?         one thing to start with, and why
 what's running?
 who needs me?
 brief me                       everything: agents, Slack, GitHub, repos, calendar

@@ -130,6 +130,7 @@ you are already signed in to.
 | `stop <name>` | the same Escape you would press |
 | `say more` | that session's exact words, not the summary |
 | `who am I talking to` | where a bare reply would land |
+| `what should I work on?` | an opinion, ranked by who is blocked, with the reason |
 | `file a ticket: the parser dies on PDFs` | Jira, Linear, or GitHub issues with no setup at all |
 | `move PROJ-12 to done` | moves it, matching the states that exist |
 | `put it in for Thursday at 4` | into your calendar, after reading the time back |
@@ -348,11 +349,12 @@ sessions.
    authorized. Slack needed its own app because the hosted MCP has no dynamic
    client registration; Atlassian and Google will have the same shape, so the
    app-building trick generalizes.
-4. **Phase 2, the conductor core.** The plan runner exists: plans are written
-   down, approved, and run one step at a time on evidence, holding when an agent
-   asks something. What is left of Phase 2 is the front half, Friday reading your
-   tickets and having an opinion about which to start with, which needs Jira
-   connected first.
+4. **Phase 2, the conductor core.** Both halves exist now. Friday reads your
+   tickets and has an opinion about what to start with, ranked by who is blocked
+   and stated with its reason; and the plan runner takes it from there, one step
+   at a time on evidence, holding when an agent asks something. What Phase 2
+   still lacks is the middle: Friday asking an agent for a plan and turning its
+   answer into steps automatically, rather than you writing the steps.
 5. **Phase 3, the signature trick.** A plan step that holds until a human replies:
    Friday asks a colleague in Slack, the step releases when they answer. A mailbox
    on the plan runner plus one integration, not new science.

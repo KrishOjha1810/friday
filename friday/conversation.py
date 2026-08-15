@@ -64,6 +64,7 @@ MISSED = "missed"          # "what did I miss?"
 DRAFT = "draft"            # "draft a reply"
 SEND = "send"              # "send it" after a draft
 ALLOW = "allow"            # "let yourself post to slack"
+NEXT = "next"              # "what should I work on?"
 SCHEDULE = "schedule"      # "put it in for Thursday at 4"
 TICKET = "ticket"          # "file a ticket: the parser breaks on PDFs"
 MOVE = "move"              # "move PROJ-12 to done"
@@ -103,6 +104,13 @@ _GOOGLE_CREDS_RE = re.compile(
 # and it is the whole front half of the conductor idea.
 # The other half of "Sam wants a meeting Thursday". Friday could report it and
 # do nothing about it, which is half a sentence.
+# The front half of the conductor idea, and the only place Friday is allowed an
+# opinion rather than a report.
+_NEXT_RE = re.compile(
+    r"\bwhat\s+(?:should|shall|do)\s+i\s+(?:work\s+on|do|start\s+with|pick)\b"
+    r"|\bwhat'?s?\s+next\b|\bwhere\s+(?:should|do)\s+i\s+start\b"
+    r"|\bwhat\s+should\s+i\s+be\s+doing\b", re.I)
+
 _SCHEDULE_RE = re.compile(
     r"\b(?:put|add|book|schedule|pencil)\s+(?:it|that|a\s+\w+|the\s+\w+|"
     r"us|me)?\s*(?:in|down|on)?\b.*?"
@@ -392,6 +400,8 @@ def classify(text: str) -> tuple:
     """(intent, payload). Deterministic and ordered: the most specific command
     wins, and only what is left over counts as conversation."""
     t = (text or "").strip()
+    if _NEXT_RE.search(t):
+        return NEXT, {}
     m = _SCHEDULE_RE.search(t)
     if m and re.search(r"\b(meet|meeting|call|sync|calendar|invite|catch\s?up|"
                        r"put it in|pencil)\b", t, re.I):
@@ -736,6 +746,8 @@ class Friday:
             return self._propose_open(payload["name"])
         if intent == BRIEF:
             return self._brief()
+        if intent == NEXT:
+            return self._what_next()
         if intent == SCHEDULE:
             return self._schedule(payload["said"])
         if intent == TICKET:
@@ -1024,6 +1036,87 @@ class Friday:
         if not p:
             return self._say("There's no plan.")
         return self._say(plans.describe(p))
+
+    def _what_next(self) -> dict:
+        """What to pick up, and why.
+
+        The one place Friday offers an opinion rather than a report, and the
+        front half of the conductor idea: it is not useful to be handed six
+        lists, it is useful to be told which one thing to start with.
+
+        The ranking is deliberately explainable and boring. Something waiting on
+        you outranks something waiting on nobody, because your answer is the
+        only thing that unblocks it. A broken build outranks a new task, because
+        it is blocking everybody including you. Everything else is work, and
+        work can wait its turn. No model decides this; a model would be more
+        fluent and less predictable, and the whole value is that you can argue
+        with the reason."""
+        candidates = []
+
+        # 1. an agent that cannot continue without you
+        for r in self._waiting():
+            q = (r.get("question") or r.get("permission") or "").strip()
+            mins = int(max(0, time.time() - (r.get("mtime") or 0)) // 60)
+            candidates.append((0, f"answer {r.get('label', 'a session')}",
+                               f"it has been stuck {mins} minutes on: "
+                               f"{q[:110]}" if mins else f"it is asking: {q[:110]}"))
+
+        # 2. something of yours that is broken
+        try:
+            gh = connectors.get("github")
+            if gh and gh.ready():
+                for it in feeds.GitHubFeed().poll():
+                    if "failing" in it.get("text", "") and it.get("urgency", 9) <= 1:
+                        candidates.append((1, "fix the build", it["text"]))
+                        break
+        except Exception:
+            pass
+
+        # 3. work you have not lost yet, but could
+        try:
+            for it in feeds.GitFeed().poll():
+                if "not pushed" in it.get("text", ""):
+                    candidates.append((2, "push what you have",
+                                       it["text"]))
+                    break
+        except Exception:
+            pass
+
+        # 4. an actual ticket
+        try:
+            tracker = self._tracker()
+            rows = tracker.my_issues(5) if tracker else []
+            rows = [r for r in rows if not r.get("error")]
+            if rows:
+                top = rows[0]
+                title = (top.get("summary") or top.get("title") or "").strip()
+                key = (top.get("key") or "").strip()
+                # A ticket with no key would read as "start ." An item that
+                # cannot be named is not worth offering.
+                label = f"start {key}" if key else (
+                    f"start on {title[:40]}" if title else "")
+                if label:
+                    candidates.append((3, label, title[:110] or "no description"))
+        except Exception:
+            pass
+
+        if not candidates:
+            return self._say("Nothing is waiting on you, nothing is broken, and "
+                             "there are no tickets I can see. That is either a "
+                             "good day or a disconnected one: say \"what's "
+                             "connected\" to tell which.")
+        candidates.sort(key=lambda c: c[0])
+        pick = candidates[0]
+        rest = candidates[1:3]
+        # Only the first letter: capitalize() lowercases everything after it,
+        # which turned "start PROJ-7" into "start proj-7". That is a key
+        # somebody copies.
+        head = pick[1][:1].upper() + pick[1][1:]
+        out = [f"{head}. {pick[2]}"]
+        if rest:
+            out.append("After that: "
+                       + "; ".join(f"{r[1]}" for r in rest) + ".")
+        return self._say("\n".join(out))
 
     def _schedule(self, said: str) -> dict:
         """Put something in the calendar, from what you just said.
@@ -2450,6 +2543,7 @@ class Friday:
         "warn you before a meeting starts, if macOS has allowed calendar access",
         "give you everything in one answer across agents, Slack, GitHub, your "
         "repos and your calendar (say: brief me)",
+        "tell you what to work on next, and why (say: what should I work on)",
         "take your answer to a session that asked you a question",
         "go quiet, or start speaking again",
     ]
