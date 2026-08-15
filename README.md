@@ -211,6 +211,7 @@ friday/
   nearest.py            matching what you said to the names that exist
   when.py               "yesterday", "on Friday" -> a real range of time
   vocab.py              tells the transcriber the names it is about to hear
+  budget.py             one allowance for everything that speaks unprompted
   plan.py               a multi-step plan in SQLite, run one step at a time
   push.py               alerts to a locked phone (VAPID + aes128gcm)
 static/index.html       the page
@@ -248,9 +249,15 @@ every caller judges by the same standard. A pronoun (`stop it`) resolves from
 context and **never** by sound: "it" scores 0.8 against "api", and stopping the
 wrong agent is not a small mistake.
 
-**3. Say each thing once, and admit what you held back.**
-Polling sees the same message repeatedly. A silent cap reads as "nothing
-happened", so anything not read out is counted and mentioned.
+**3. Say each thing once, hold what you cannot say, and never destroy it.**
+Polling sees the same message repeatedly, so each thing has a stable key. A
+silent cap reads as "nothing happened", so anything held back is counted and
+mentioned. And it is genuinely *held*: quiet suppresses the notification, never
+the alert, because the alternative is a delete key wearing a promise. One
+allowance is shared by everything that speaks, since three private counters
+produced three separate "and N more" notes in the same second. Anything that
+truly needs you is exempt, because rationing that is rationing the only category
+worth interrupting for.
 
 **4. Wait for an agent to stop talking.**
 Answers arrive in stages. Reporting the first one reports "Let me look at that".
@@ -276,7 +283,18 @@ tells you nothing at all.
 **8. Nothing blocks on a subprocess.**
 Reading the fleet costs 3.2 seconds of CLI startup. Two callers each doing it per
 poll made `/state` take eight seconds and the status strip permanently stale. One
-warm reading is shared and refreshed behind you: now 0.3ms.
+warm reading is shared and refreshed behind you: now 0.3ms. Startup does not wait
+on the network either; priming the feeds used to shell out to `gh`, scan every
+repo and wake Calendar *before* the server bound its port.
+
+**9. Prefer measurement to argument.**
+Three of the bigger changes here were decided by benchmark rather than by taste,
+and each is kept as a test so a future change has to beat it:
+[matching](tests/test_matching.py) (a phonetic pair over a string ratio, 18/19
+against 16/19 on real mishearings), [retrieval](tests/test_memory.py) (BM25 at
+`b=1.0`, +26% MRR, where the published defaults measured *worse* than what they
+replaced), and the summariser's grounding check, which was catching 2 of 9
+inventions while rejecting 8 of 10 good summaries.
 
 ### Testing
 

@@ -85,9 +85,15 @@ quiet                    stops everything unprompted
 resume
 ignore jobhunt for now   silences one session, keeps the rest
 unmute jobhunt
+what did I miss          everything held back while you were quiet or busy
 ```
 
-A muted session is still watched, so unmuting does not recite a backlog.
+A muted session is still watched, so unmuting does not recite a backlog. And
+quiet genuinely holds rather than deletes: anything that arrives while Friday is
+silent is kept, and `what did I miss` hands it over once.
+
+Friday also stays quiet about the session whose window you are actually looking
+at, since it already said it on your screen.
 
 ---
 

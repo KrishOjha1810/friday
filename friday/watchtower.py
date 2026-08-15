@@ -148,6 +148,19 @@ class Watchtower:
                 continue          # watched, marked seen, not mentioned
             self._report(rows[sid], text)
 
+    def _looking_at(self) -> str:
+        """The session whose window is in front of you right now, or "".
+
+        Telling somebody what is on their own screen is the cheapest possible
+        way to be annoying, and voicebridge already works this out from the
+        frontmost terminal's tty. Friday had the signal available and never
+        asked for it."""
+        try:
+            from vb import signals
+            return signals.gather().get("focused_sid") or ""
+        except Exception:
+            return ""
+
     def _hushed(self) -> bool:
         try:
             if self._own_hush():
@@ -171,6 +184,11 @@ class Watchtower:
         if q and q[:40] not in short:
             short = short.rstrip(".") + f". It's asking: {q}"
         urgency = 0 if q else 1
+        if row.get("sid") and row["sid"] == self._looking_at():
+            # You are watching this window. It said it on your screen a moment
+            # ago; repeating it here is noise with extra steps. Not held
+            # either: you have already seen it.
+            return
         if self.budget and not self.budget.allow(urgency):
             self.budget.hold(f"{lead}: {short}", label)
             return

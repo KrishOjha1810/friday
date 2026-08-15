@@ -320,3 +320,29 @@ def test_only_the_unsupported_sentence_is_dropped():
     out = watchtower._drop_invented(
         "It broke on page 3. Use config_v2.yaml to retry.", src)
     assert "page 3" in out and "config_v2.yaml" not in out, out
+
+
+def test_the_session_you_are_looking_at_stays_quiet():
+    """Telling somebody what is on their own screen is the cheapest possible
+    way to be annoying. voicebridge already works out which terminal is in
+    front, and Friday never asked."""
+    _Fleet.rows.clear()
+    with tempfile.TemporaryDirectory() as d:
+        p = _session(d, "s1", "api", "old")
+        w, said = _tower()
+        w.prime()
+        w._looking_at = lambda: "s1"          # you are in that window
+        with open(p, "w") as f:
+            f.write(json.dumps({"type": "assistant", "message": {"content": [
+                {"type": "text", "text": "the migration finished"}]}}) + "\n")
+        w._tick()
+        time.sleep(watchtower.SETTLE + 0.1)
+        w._tick()
+        assert said == [], said
+        # and it speaks about a session you are NOT looking at
+        w.seen.clear()
+        w._looking_at = lambda: "somewhere-else"
+        w._tick()
+        time.sleep(watchtower.SETTLE + 0.1)
+        w._tick()
+        assert said, "went silent about a session you were not watching"
