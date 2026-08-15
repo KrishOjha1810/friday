@@ -65,6 +65,7 @@ DRAFT = "draft"            # "draft a reply"
 SEND = "send"              # "send it" after a draft
 ALLOW = "allow"            # "let yourself post to slack"
 NEXT = "next"              # "what should I work on?"
+FIRE = "fire"              # "what's on fire?"
 SCHEDULE = "schedule"      # "put it in for Thursday at 4"
 TICKET = "ticket"          # "file a ticket: the parser breaks on PDFs"
 MOVE = "move"              # "move PROJ-12 to done"
@@ -305,6 +306,16 @@ _ACTIVITY_RE = re.compile(
     r"what did i (?:do|push|ship))\b", re.I)
 _MAIL_RE = re.compile(r"\b(?:e-?mail|gmail|inbox|mails?)\b\s*(.*)$", re.I)
 _JIRA_RE = re.compile(r"\bjira\b|\btickets?\b", re.I)
+# "errors" alone is too broad, it catches "what errors did the build hit". This
+# wants the production question specifically.
+_FIRE_RE = re.compile(
+    r"\bsentry\b|\bon fire\b|\banything (?:broken|breaking) in prod"
+    r"|\bprod(?:uction)?\s+(?:errors?|issues?|exceptions?|ok|okay|healthy)"
+    r"|\bare (?:there|we) (?:any )?(?:new )?(?:errors?|exceptions?|crashes)"
+    r"|\bwhat(?:'?s| is) (?:on fire|breaking|crashing)\b"
+    r"|\bany (?:new )?(?:errors?|exceptions?|crashes)\b", re.I)
+# ...unless you plainly meant CI, where "errors" means a failing job.
+_NOT_FIRE_RE = re.compile(r"\b(?:build|ci|tests?|workflow|pipeline)\b", re.I)
 # "are you using Claude for this?" A fair question with a real answer, and one
 # a language model asked to improvise will get wrong in the flattering direction.
 _ENGINE_RE = re.compile(
@@ -328,7 +339,20 @@ _CONNECT_RE = re.compile(r"\bconnect\s+(?:to\s+)?(\w+)(?:\s+([\w.\-]{8,}))?", re
 # that can never work. Slack issues xoxe.xoxp- when token rotation is on.
 _TOKEN_RE = re.compile(
     r"(xoxe\.xoxp-[\w.\-]{10,}|xoxe-[\w.\-]{10,}|xoxp-[\w-]{10,}"
-    r"|xoxb-[\w-]{10,}|ya29\.[\w.\-]{20,}|lin_api_[\w-]{20,})")
+    r"|xoxb-[\w-]{10,}|ya29\.[\w.\-]{20,}|lin_api_[\w-]{20,}"
+    r"|sntryu_[\w]{20,}|sntrys_[\w]{20,})")
+# What to say next, per connector. This was one hard-coded Slack sentence for
+# every connector, so connecting Sentry told you to go read a Slack channel.
+# The first thing you try after connecting something is the moment it either
+# works or gets abandoned, and it should be about the thing you just connected.
+_FIRST_TRY = {
+    "slack": "go to my <channel> group in slack and read the chat",
+    "github": "what's failing?",
+    "jira": "what are my tickets?",
+    "linear": "what are my tickets?",
+    "sentry": "what's on fire?",
+    "gmail": "any new email?",
+}
 _CONNS_RE = re.compile(
     r"\b(?:what(?:'?s| is)? connected|connections?|integrations?|"
     r"what (?:tools|apps) (?:do you have|are connected))\b", re.I)
@@ -444,7 +468,8 @@ def classify(text: str) -> tuple:
         # them here meant a pasted token silently became "what's connected?".
         which = ("slack" if tok.startswith(("xoxp-", "xoxb-", "xoxe.", "xoxe-"))
                  else "gmail" if tok.startswith("ya29.")
-                 else "linear" if tok.startswith("lin_api_") else "")
+                 else "linear" if tok.startswith("lin_api_")
+                 else "sentry" if tok.startswith(("sntryu_", "sntrys_")) else "")
         return CONNECT, {"which": which, "token": tok}
     m = _GOOGLE_CREDS_RE.search(t)
     if m:
@@ -500,6 +525,8 @@ def classify(text: str) -> tuple:
         srcs = [x for x in srcs if x]
         return READ_CHANNEL, {"channel": srcs[-1] if srcs else "",
                               "said": t}
+    if _FIRE_RE.search(t) and not _NOT_FIRE_RE.search(t):
+        return FIRE, {}
     if _JIRA_RE.search(t):
         return JIRA, {}
     m = _MAIL_RE.search(t)
@@ -634,6 +661,9 @@ class Friday:
         self.feeds.add("github", feeds.GitHubFeed(), period=180)
         self.feeds.add("git", feeds.GitFeed(), period=900)
         self.feeds.add("calendar", feeds.CalendarFeed(), period=120)
+        # Faster than the rest on purpose: production being down is the one
+        # thing where three minutes of delay is three minutes of outage.
+        self.feeds.add("sentry", feeds.SentryFeed(), period=90)
         self.inbox = inbox.Inbox(
             self.announce,
             log=engine.log,
@@ -748,6 +778,8 @@ class Friday:
             return self._brief()
         if intent == NEXT:
             return self._what_next()
+        if intent == FIRE:
+            return self._fire()
         if intent == SCHEDULE:
             return self._schedule(payload["said"])
         if intent == TICKET:
@@ -1061,28 +1093,36 @@ class Friday:
                                f"it has been stuck {mins} minutes on: "
                                f"{q[:110]}" if mins else f"it is asking: {q[:110]}"))
 
-        # 2. something of yours that is broken
+        # 2. production, which is broken for people who are not you
+        try:
+            for it in feeds.SentryFeed().poll():
+                candidates.append((1, "look at production", it["text"]))
+                break
+        except Exception:
+            pass
+
+        # 3. something of yours that is broken
         try:
             gh = connectors.get("github")
             if gh and gh.ready():
                 for it in feeds.GitHubFeed().poll():
                     if "failing" in it.get("text", "") and it.get("urgency", 9) <= 1:
-                        candidates.append((1, "fix the build", it["text"]))
+                        candidates.append((2, "fix the build", it["text"]))
                         break
         except Exception:
             pass
 
-        # 3. work you have not lost yet, but could
+        # 4. work you have not lost yet, but could
         try:
             for it in feeds.GitFeed().poll():
                 if "not pushed" in it.get("text", ""):
-                    candidates.append((2, "push what you have",
+                    candidates.append((3, "push what you have",
                                        it["text"]))
                     break
         except Exception:
             pass
 
-        # 4. an actual ticket
+        # 5. an actual ticket
         try:
             tracker = self._tracker()
             rows = tracker.my_issues(5) if tracker else []
@@ -1096,7 +1136,7 @@ class Friday:
                 label = f"start {key}" if key else (
                     f"start on {title[:40]}" if title else "")
                 if label:
-                    candidates.append((3, label, title[:110] or "no description"))
+                    candidates.append((4, label, title[:110] or "no description"))
         except Exception:
             pass
 
@@ -1782,8 +1822,7 @@ class Friday:
         except Exception:
             pass
         extra = f" I can see you as {who}." if who else ""
-        return self._say(f"{which} connected.{extra} Try: go to my <channel> "
-                         f"group in slack and read the chat.")
+        return self._say(f"{which} connected.{extra} Try: {_FIRST_TRY.get(which, 'ask me about it')}.")
 
     def _github(self, query: str) -> dict:
         gh = connectors.get("github")
@@ -2096,6 +2135,38 @@ class Friday:
             return self._say("Nothing matching in your mail.")
         lines = [f"{r['from'][:40]}: {r['subject'][:90]}" for r in rows]
         return self._say("Mail:\n- " + "\n- ".join(lines))
+
+    def _fire(self) -> dict:
+        """What production is doing, asked directly.
+
+        Wider than the feed on purpose. The feed only ever volunteers things it
+        has never seen, because an alert about a month-old error is noise. When
+        you ASK, the month-old error is exactly what you want, so this reports
+        the state rather than the news."""
+        se = connectors.get("sentry")
+        if not se or not hasattr(se, "issues"):
+            return self._say("I don't have Sentry connected. " + (
+                se.setup_hint() if se else ""))
+        if not se.ready():
+            return self._say("Sentry isn't connected yet. " + se.setup_hint())
+        rows = se.issues(limit=8)
+        if rows and rows[0].get("error"):
+            return self._say("Sentry answered with an error: " + rows[0]["error"])
+        if not rows:
+            return self._say("Nothing unresolved in Sentry. Production is quiet.")
+        # Sorted by people affected, because 4000 events hitting one bot matters
+        # less than 40 hitting 40 people, and the count alone hides that.
+        rows.sort(key=lambda r: (-r.get("users", 0), -r.get("count", 0)))
+        lines = []
+        for r in rows[:5]:
+            who = (f", {r['users']} people" if r.get("users") else "")
+            mark = "" if r.get("unhandled") else " (handled)"
+            lines.append(f"{r['title'][:70]}{mark}: {r['count']} times{who}")
+        head = f"{len(rows)} unresolved in Sentry"
+        worst = rows[0]
+        if worst.get("users", 0) >= 10:
+            head = f"{worst['users']} people are hitting the top one"
+        return self._say(head + ":\n- " + "\n- ".join(lines))
 
     def _jira(self) -> dict:
         ji = connectors.get("jira")

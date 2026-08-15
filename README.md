@@ -131,6 +131,7 @@ you are already signed in to.
 | `say more` | that session's exact words, not the summary |
 | `who am I talking to` | where a bare reply would land |
 | `what should I work on?` | an opinion, ranked by who is blocked, with the reason |
+| `what's on fire?` | unresolved errors in production, worst by people affected |
 | `file a ticket: the parser dies on PDFs` | Jira, Linear, or GitHub issues with no setup at all |
 | `move PROJ-12 to done` | moves it, matching the states that exist |
 | `put it in for Thursday at 4` | into your calendar, after reading the time back |

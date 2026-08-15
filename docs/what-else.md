@@ -61,7 +61,12 @@ Ranked by how often a developer has to go and look:
 
 1. **Linear**, which for many teams replaced Jira entirely.
 2. **Sentry** or whatever error tracker: production is on fire is the one alert
-   that outranks everything Friday currently watches.
+   that outranks everything Friday currently watches. **Built.** The connector
+   was the easy half; the restraint is the feature. It volunteers only issues it
+   has never seen, unhandled, that happened more than once, and says nothing at
+   all on first connect. Asked directly it reports everything, because a
+   month-old error is noise when volunteered and exactly what you wanted when
+   requested.
 3. **Calendar**, already read, needs writing.
 4. **PagerDuty**, if you are on call, though for one person this is Sentry with
    a phone number.

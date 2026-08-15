@@ -407,6 +407,41 @@ class GitFeed:
             "Your repos are all clean and pushed."
 
 
+# -------------------------------------------------------------- sentry ----
+class SentryFeed:
+    """Production, when it breaks.
+
+    Urgency 0, which exempts it from the budget, and that is a deliberate and
+    slightly uncomfortable choice: urgency 0 is meant for an agent that cannot
+    continue without you, and everything else is rationed. A new unhandled
+    exception reaching real users earns it. What makes it safe is that the
+    connector's own filter is narrow enough that this cannot flood, plus the
+    hard cap below: at most two exempt in a poll, and the rest wait their turn
+    like everything else."""
+
+    EXEMPT = 2
+
+    def poll(self) -> list:
+        try:
+            from . import connectors
+            s = connectors.get("sentry")
+            if not s or not hasattr(s, "news") or not s.ready():
+                return []
+            rows = s.news(limit=4)
+        except Exception:
+            return []
+        out = []
+        for n, r in enumerate(rows):
+            out.append({
+                "key": f"sentry:{r['id']}",
+                "source": "sentry",
+                "urgency": 0 if n < self.EXEMPT else 1,
+                "text": s.describe(r),
+                "url": r.get("url", ""),
+            })
+        return out
+
+
 # ------------------------------------------------------------ calendar ----
 class CalendarFeed:
     """The next thing you are supposed to be at.

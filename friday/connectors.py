@@ -1441,7 +1441,184 @@ class Linear:
                 "url": made.get("url", "")}
 
 
-REGISTRY = {c.name: c() for c in (GitHub, Slack, Gmail, Jira, Linear)}
+class Sentry:
+    """Whatever is on fire in production.
+
+    The one alert that outranks everything else Friday watches: a failing build
+    blocks the people who work on it, a new unhandled exception is already
+    reaching the people who use it.
+
+    The whole difficulty is volume, and it is not a small one. A busy Sentry
+    produces thousands of events an hour, and something that reports thousands
+    of events an hour is a feed you check, which is exactly what `docs/what-else`
+    refuses to build. So the rule here is narrower than "show me errors":
+
+        an issue Friday has never seen before, unhandled, seen more than once.
+
+    Not every event, because one issue can be a million events. Not every issue,
+    because an error that has fired every day for a month is not news, it is
+    the weather. Not a single occurrence, because the long tail of things that
+    happen once is where an error tracker turns into noise. What survives that
+    filter is the thing you would actually want to be interrupted for.
+    """
+
+    name = "sentry"
+    URL = "https://sentry.io/api/0"
+    MAX_SEEN = 500
+
+    @property
+    def SEEN(self) -> Path:
+        """Resolved per call, not at import. A class-level `CONF_DIR / ...`
+        captures whatever the config dir was when the module loaded, so
+        anything that redirects it later (the tests do) writes to one file and
+        reads from another."""
+        return CONF_DIR / "sentry_seen"
+
+    def token(self) -> str:
+        return os.environ.get("SENTRY_TOKEN") or _secret("sentry_token")
+
+    def base(self) -> str:
+        """Self-hosted Sentry is common and lives on your own domain."""
+        got = (os.environ.get("SENTRY_URL") or _secret("sentry_url") or "").strip()
+        return got.rstrip("/") + "/api/0" if got else self.URL
+
+    _checked = {}
+
+    def ready(self) -> bool:
+        tok = self.token()
+        if not tok:
+            return False
+        hit = self._checked.get(tok)
+        if hit and time.time() - hit[1] < 300:
+            return hit[0]
+        ok = bool(self.orgs())
+        self._checked[tok] = (ok, time.time())
+        return ok
+
+    def setup_hint(self) -> str:
+        return ("make a token at sentry.io/settings/account/api/auth-tokens/ "
+                "with org:read, project:read and event:read, then paste it to "
+                "me on its own. It starts with sntryu_.")
+
+    def _get(self, path: str, params: dict = None) -> object:
+        tok = self.token()
+        if not tok:
+            return {"error": "no_token"}
+        url = self.base() + path
+        if params:
+            url += "?" + urllib.parse.urlencode(params)
+        try:
+            req = urllib.request.Request(url, headers={
+                "Authorization": f"Bearer {tok}",
+                "Content-Type": "application/json"})
+            with urllib.request.urlopen(req, timeout=TIMEOUT) as r:
+                return json.loads(r.read())
+        except urllib.error.HTTPError as e:
+            # 403 here almost always means the token is missing a scope rather
+            # than being wrong, and those are two different things to fix.
+            if e.code == 403:
+                return {"error": "the token is missing a scope (needs "
+                                 "org:read, project:read, event:read)"}
+            return {"error": f"sentry {e.code}"}
+        except Exception as e:
+            return {"error": str(e)[:160]}
+
+    def orgs(self) -> list:
+        got = self._get("/organizations/")
+        if isinstance(got, list):
+            return [{"slug": o.get("slug", ""), "name": o.get("name", "")}
+                    for o in got if o.get("slug")]
+        return []
+
+    def _org(self) -> str:
+        want = (os.environ.get("SENTRY_ORG") or _secret("sentry_org") or "").strip()
+        if want:
+            return want
+        got = self.orgs()
+        return got[0]["slug"] if got else ""
+
+    # ---- what is on fire --------------------------------------------------
+    def issues(self, limit: int = 25, hours: int = 24) -> list:
+        """Unresolved issues, newest first.
+
+        `is:unresolved` and not `is:unassigned` deliberately: something assigned
+        to you is more your problem, not less."""
+        org = self._org()
+        if not org:
+            return []
+        got = self._get(f"/organizations/{org}/issues/", {
+            "query": "is:unresolved", "statsPeriod": f"{max(1, hours)}h",
+            "limit": min(100, limit), "sort": "freq"})
+        if isinstance(got, dict):
+            return [got] if got.get("error") else []
+        out = []
+        for i in got:
+            meta = i.get("metadata") or {}
+            out.append({
+                "id": str(i.get("id", "")),
+                "title": (i.get("title") or meta.get("value") or "").strip(),
+                "where": (i.get("culprit") or "").strip(),
+                "project": ((i.get("project") or {}).get("slug") or ""),
+                "count": int(i.get("count") or 0),
+                "users": int(i.get("userCount") or 0),
+                "level": i.get("level") or "",
+                "unhandled": bool(i.get("isUnhandled")),
+                "first": i.get("firstSeen") or "",
+                "url": i.get("permalink") or "",
+            })
+        return out
+
+    # ---- what counts as news ----------------------------------------------
+    def _seen(self) -> set:
+        try:
+            return set(self.SEEN.read_text().split())
+        except Exception:
+            return set()
+
+    def _remember(self, ids) -> None:
+        keep = list(self._seen() | set(ids))[-self.MAX_SEEN:]
+        try:
+            save_secret("sentry_seen", "\n".join(keep))
+        except Exception:
+            pass
+
+    def news(self, limit: int = 3) -> list:
+        """New unhandled issues, and nothing else.
+
+        Called by the feed, so this is the method that decides whether Friday is
+        useful or unbearable here. See the class docstring for why the filter is
+        this narrow."""
+        rows = [r for r in self.issues(limit=25)
+                if not r.get("error") and r.get("unhandled")
+                and r.get("count", 0) > 1]
+        known = self._seen()
+        fresh = [r for r in rows if r["id"] not in known]
+        # Everything present the first time Friday looks is history. Announcing
+        # a two-month-old error backlog on first connect would be the worst
+        # possible introduction to the feature.
+        first_look = not known
+        self._remember([r["id"] for r in rows])
+        if first_look:
+            return []
+        fresh.sort(key=lambda r: (-r.get("users", 0), -r.get("count", 0)))
+        return fresh[:limit]
+
+    def whoami(self) -> str:
+        got = self.orgs()
+        return f"the {got[0]['slug']} org" if got else ""
+
+    def describe(self, r: dict) -> str:
+        who = (f"{r['users']} people" if r.get("users", 0) > 1
+               else "1 person" if r.get("users") == 1 else "")
+        where = f" in {r['project']}" if r.get("project") else ""
+        bits = [f"{r.get('count', 0)} times"]
+        if who:
+            bits.append(f"{who} hit")
+        return (f"Sentry{where}: {r.get('title', 'an error')[:90]}"
+                f" ({', '.join(bits)}).")
+
+
+REGISTRY = {c.name: c() for c in (GitHub, Slack, Gmail, Jira, Linear, Sentry)}
 
 
 def _works(c) -> bool:
