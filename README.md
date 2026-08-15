@@ -130,7 +130,7 @@ you are already signed in to.
 | `stop <name>` | the same Escape you would press |
 | `say more` | that session's exact words, not the summary |
 | `who am I talking to` | where a bare reply would land |
-| `file a ticket: the parser dies on PDFs` | files it in Jira or Linear, after reading it back |
+| `file a ticket: the parser dies on PDFs` | Jira, Linear, or GitHub issues with no setup at all |
 | `move PROJ-12 to done` | moves it, matching the states that exist |
 | `put it in for Thursday at 4` | into your calendar, after reading the time back |
 | `plan: run the tests, then fix what fails, then commit` | writes it down; nothing runs yet |

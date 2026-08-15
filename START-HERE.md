@@ -61,7 +61,9 @@ move PROJ-12 to done
 put it in for Thursday at 4
 ```
 
-Each one reads it back and waits for a yes. Filing and moving need `let
+These go to Jira or Linear if you have connected one, and to GitHub issues in
+the repo you are standing in if you have not, which needs no setup because `gh`
+is already signed in. Each one reads it back and waits for a yes. Filing and moving need `let
 yourself post`; the calendar does not, since your own diary is not the same risk
 as writing under your name where colleagues read it.
 

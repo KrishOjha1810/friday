@@ -201,6 +201,48 @@ class GitHub:
         except Exception:
             return []
 
+    # ---- as a ticket tracker -------------------------------------------
+    # `gh` is already signed in, so this is the one tracker that works with no
+    # setup at all. For a personal project the issues ARE the backlog, and
+    # making somebody connect Jira to file a note about their own repo is
+    # ceremony for nothing.
+    def _repo_here(self) -> str:
+        """The repo you are standing in, if you are standing in one."""
+        try:
+            r = subprocess.run(["gh", "repo", "view", "--json", "nameWithOwner",
+                                "-q", ".nameWithOwner"],
+                               capture_output=True, text=True, timeout=15)
+            return (r.stdout or "").strip() if r.returncode == 0 else ""
+        except Exception:
+            return ""
+
+    def projects(self) -> list:
+        here = self._repo_here()
+        return [{"key": here, "name": here}] if here else []
+
+    def create(self, summary: str, project: str = "", body: str = "",
+               kind: str = "") -> dict:
+        """Open an issue. Same gate as every other verb."""
+        if not gh_can_write():
+            return {"error": "writing_not_enabled"}
+        if not summary.strip():
+            return {"error": "nothing_to_file"}
+        repo = (project or "").strip() or self._repo_here()
+        if not repo:
+            return {"error": "which_project", "projects": []}
+        args = ["gh", "issue", "create", "--repo", repo,
+                "--title", summary.strip()[:250],
+                "--body", body.strip()[:4000] or summary.strip()[:250]]
+        try:
+            r = subprocess.run(args, capture_output=True, text=True, timeout=40)
+        except Exception as e:
+            return {"error": str(e)[:160]}
+        if r.returncode != 0:
+            return {"error": (r.stderr or "").strip()[:200]}
+        url = (r.stdout or "").strip().splitlines()[-1] if r.stdout else ""
+        return {"ok": True, "key": url.rsplit("/", 1)[-1] if url else "",
+                "url": url}
+
     def comment(self, target: str, body: str) -> dict:
         """Comment on an issue or pull request, as you.
 

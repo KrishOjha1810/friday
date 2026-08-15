@@ -179,7 +179,9 @@ def test_no_tracker_connected_says_so_rather_than_failing_oddly():
         def ready(self):
             return False
 
-    connectors.get = lambda n: Off() if n == "jira" else real(n)
+    # Every tracker off, including the GitHub fallback, which is genuinely
+    # connected on a machine where `gh` is signed in.
+    connectors.get = lambda n: Off()
     try:
         f = Friday()
         f.announce = lambda *a, **k: None
@@ -198,3 +200,51 @@ if __name__ == "__main__":
     connectors.allow_write(False)
     connectors.gh_allow_write(False)
     print("ok  tickets: filed, moved, and never without you reading it first")
+
+
+def test_github_is_the_tracker_that_needs_no_setup():
+    """`gh` is already signed in, so this works on a fresh machine with nothing
+    connected. Making somebody connect Jira to file a note about their own repo
+    is ceremony for nothing."""
+    connectors.allow_write(True)
+    connectors.gh_allow_write(True)
+    real = connectors.get
+
+    class NotConnected(_Jira):
+        def ready(self):
+            return False
+
+    gh = _Jira()
+    gh.name = "github"
+    connectors.get = lambda n: (gh if n == "github" else NotConnected())
+    try:
+        f = Friday()
+        f.announce = lambda *a, **k: None
+        assert f._tracker() is gh, "fell through to nothing"
+        f.handle("file a ticket: the parser dies")
+        f.handle("yes")
+        assert gh.created, "the issue never got filed"
+    finally:
+        connectors.get = real
+        connectors.allow_write(False)
+        connectors.gh_allow_write(False)
+
+
+def test_a_real_tracker_beats_the_fallback():
+    """If Jira or Linear is connected, that is where colleagues will look, so
+    GitHub issues must not quietly win."""
+    connectors.allow_write(True)
+    connectors.gh_allow_write(True)
+    real = connectors.get
+    jira, gh = _Jira(), _Jira()
+    gh.name = "github"
+    connectors.get = lambda n: (jira if n == "jira" else
+                                gh if n == "github" else real(n))
+    try:
+        f = Friday()
+        f.announce = lambda *a, **k: None
+        assert f._tracker() is jira, "the fallback beat the real tracker"
+    finally:
+        connectors.get = real
+        connectors.allow_write(False)
+        connectors.gh_allow_write(False)

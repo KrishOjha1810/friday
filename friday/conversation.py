@@ -1060,7 +1060,10 @@ class Friday:
     def _tracker(self):
         """Whichever tracker you actually use. Jira and Linear answer the same
         questions, so nothing above here needs to know which one it got."""
-        for name in ("jira", "linear"):
+        # GitHub last, because it is the fallback that always works rather
+        # than the tracker a team runs on. If you have Jira or Linear
+        # connected, that is where your colleagues will look.
+        for name in ("jira", "linear", "github"):
             c = connectors.get(name)
             try:
                 if c and c.ready():
