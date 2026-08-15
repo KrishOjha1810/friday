@@ -2,6 +2,10 @@
 
 A conductor for your coding agents, and for the tools around them.
 
+*Personal project by Krish Ojha. macOS, Python, no build step, 17 test suites.
+Everything below is running code; the honest list of what is missing is near the
+bottom.*
+
 You run several Claude Code sessions at once. Each one works, asks you
 something, finishes, or gets stuck, and the only way to find out which is to go
 and look at its window. Meanwhile Slack, GitHub and your calendar are all
@@ -15,12 +19,36 @@ whole point here is the third part of every report: what you can **do** about it
 * api says: Rebase has conflicts in two files. It's asking: Should I force-push?
 * voicebridge says: Fixed the Kokoro crash in vb/core.py line 812. Two tests
                     were failing and both pass now.
-* U_MAN in #moonshot: are you free Thursday?
+* U_SAM in #moonshot: are you free Thursday?
     tell me a time and I'll put it in the draft, or "ask <session> about this"
 ```
 
 Nobody asked for those. Friday brought them, urgent first, and the answer you
 type next goes to whichever one asked.
+
+### If you have five minutes
+
+Three pieces of the design are the ones worth looking at, and each exists
+because of a specific failure rather than a preference:
+
+- **[`friday/watchtower.py`](friday/watchtower.py)** reads agent transcripts off
+  disk to report what each session said. The interesting part is `summarise()`:
+  asked to compress "the parser broke on page 3 of the PDF", the local model
+  produced "retry with report_2024_q3.pdf, error code PDF_PARSE_003". Both
+  invented. Every summary is now checked against its source and thrown away if
+  it contains a file, code or number that was never there.
+- **[`friday/nearest.py`](friday/nearest.py)** decides whether a heard name is a
+  match. Three outcomes, never two: act on a clear one, ask about a plausible
+  one, and otherwise say what exists. A pronoun resolves from context and never
+  by sound, because "it" scores 0.8 against a session called "api".
+- **[`friday/plan.py`](friday/plan.py)** runs a multi-step plan one step at a
+  time, advancing only when the agent has actually replied. A question mid-plan
+  holds everything, because running the next step past it is answering it by
+  ignoring it.
+
+And **[`tests/test_no_escape.py`](tests/test_no_escape.py)**, which exists
+because two of my own test runs escaped into the real machine: one deleted a
+live credential, one typed prompts into a terminal someone was working in.
 
 ---
 
@@ -180,7 +208,7 @@ friday/
   plan.py               a multi-step plan in SQLite, run one step at a time
   push.py               alerts to a locked phone (VAPID + aes128gcm)
 static/index.html       the page
-tests/                  16 suites, all runnable with plain python3
+tests/                  17 suites, all runnable with plain python3
 ```
 
 ### The three watchers, and why they are separate
