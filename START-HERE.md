@@ -134,11 +134,16 @@ to use it if the file is readable by anyone else.
 Every scope Friday asks for is a read. `chat:write` is not among them unless you
 say `let yourself post`, so by default Friday physically cannot post as you.
 
-**Calendar** needs one macOS permission: System Settings, Privacy & Security,
-Automation, and allow Calendar for your terminal. Until that is granted Friday
-says so rather than implying your day is empty.
+**Calendar**: say `connect calendar` and allow it when macOS asks. It reads
+through EventKit, so it covers whichever accounts are already in Calendar, and
+if the package is missing it tells you the one line to run.
 
-**Gmail and Jira** are not connected. Ask and Friday tells you what it needs.
+**Gmail**: say `connect gmail`. Google needs an OAuth client created once, which
+Friday cannot do for you, so it gives you the four exact steps; paste the client
+ID and secret back and it handles the rest forever, refreshing the token itself.
+
+**Jira**: `connect jira https://yoursite.atlassian.net|you@email|TOKEN`, with the
+token from id.atlassian.com/manage/api-tokens.
 
 ---
 

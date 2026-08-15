@@ -78,6 +78,13 @@ CHAT = "chat"              # anything else: a real conversation
 # agent's own words, and tell you who a bare reply would reach.
 # Coming back to the desk. Scrolling to work out what happened while you were
 # away is the same manual sweep as walking the windows.
+# Google client credentials pasted as a pair. Without this, "gmail 123.apps...
+# GOCSPX-..." reads as a question about mail, and the setup silently never
+# starts.
+_GOOGLE_CREDS_RE = re.compile(
+    r"\b(?:gmail|google)\s+([\w.\-]+\.apps\.googleusercontent\.com)\s+"
+    r"(\S{8,})", re.I)
+
 # Friday holds no write scope in Slack on purpose, so a reply is something it
 # writes and you send. Offering to "reply" and then not sending would be the
 # worst of both.
@@ -366,6 +373,10 @@ def classify(text: str) -> tuple:
         which = ("slack" if tok.startswith(("xoxp-", "xoxb-", "xoxe.", "xoxe-"))
                  else "gmail" if tok.startswith("ya29.") else "")
         return CONNECT, {"which": which, "token": tok}
+    m = _GOOGLE_CREDS_RE.search(t)
+    if m:
+        return CONNECT, {"which": "gmail",
+                         "token": f"{m.group(1)} {m.group(2)}"}
     if _CONNS_RE.search(t):
         return CONNECT, {"which": "", "token": ""}
     m = _CONNECT_RE.search(t)
@@ -1299,6 +1310,10 @@ class Friday:
             # The MCP wrapper's hint is generic. If we have a hand-written
             # connector for the same service, ITS instructions are the useful
             # ones (Slack's is a pre-filled app link, not a scope checklist).
+            if which == "gmail":
+                return self._say(connectors.gmail_setup_steps())
+            if which == "calendar":
+                return self._connect("calendar", "x")
             builtin = connectors.REGISTRY.get(which)
             c0 = builtin or connectors.get(which)
             if c0:
@@ -1312,6 +1327,29 @@ class Friday:
                     again=lambda t: self._connect(t.strip().lower(), ""))
             return self._say(f"I don't know a connector called {which}. I have: "
                              + ", ".join(sorted(connectors.all_connectors())))
+        # Gmail: "gmail <client-id> <client-secret>" starts the browser flow.
+        if which == "gmail" and token and " " in token.strip():
+            cid, _, csec = token.strip().partition(" ")
+
+            def _google():
+                r = connectors.gmail_connect(cid.strip(), csec.strip())
+                self.announce("Gmail is connected. Try: any new email?"
+                              if r.get("ok") else
+                              "Gmail setup stopped: " + r.get("error", "") + ".")
+            import threading
+            threading.Thread(target=_google, daemon=True).start()
+            return self._say("Opening Google now. Press Allow and I'll keep it "
+                             "connected from then on; the token refreshes "
+                             "itself.")
+        if which == "calendar":
+            r = connectors.calendar_prompt()
+            if r.get("ok"):
+                return self._say(f"Calendar is readable, {r['calendars']} "
+                                 f"calendars. I'll warn you before meetings.")
+            return self._say("macOS wouldn't give me the calendar. If no dialog "
+                             "appeared, it was refused before: System Settings, "
+                             "Privacy & Security, Automation, and switch on "
+                             "Calendar for your terminal.")
         c = connectors.get(which)
         if not c:
             guess = nearest.suggest(which, list(connectors.all_connectors()))

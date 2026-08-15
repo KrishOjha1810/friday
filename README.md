@@ -30,6 +30,14 @@ Requires macOS, Python 3.9+, and
 [voicebridge](https://github.com/cc-vb/voicebridge) installed (Friday uses it
 for speech, session sensing and its local model).
 
+Two Python packages, both optional in the sense that Friday runs without them
+and says so rather than failing oddly:
+
+```
+pip3 install --user cryptography                 # phone alerts
+pip3 install --user pyobjc-framework-EventKit    # calendar
+```
+
 ```
 cd ~/friday
 python3 run.py
@@ -102,8 +110,8 @@ Friday reports without being asked, sessions waiting on you first:
   become two lines.
 - **Your repos.** Uncommitted changes and unpushed commits, which nothing else
   watches and which is the quietest way to lose a day.
-- **Calendar.** A meeting starting in the next fifteen minutes, once macOS has
-  granted access.
+- **Calendar.** A meeting starting in the next fifteen minutes. Read through
+  EventKit, so it covers whichever accounts are already in Calendar.
 
 Controls: `quiet` / `resume`, `ignore <name> for now` / `unmute <name>`, and
 `what did I miss` for everything since you last spoke.
@@ -132,7 +140,7 @@ perform:
   scopes only. Even with it on, nothing goes out without Friday showing you the
   exact words and waiting for a yes, and it sends them verbatim rather than
   regenerating. `turn off posting` revokes it without touching reading.
-- Put anything in your calendar, or schedule a meeting.
+- Put anything in your calendar, or schedule a meeting. It reads, and warns.
 - Comment on a pull request until you turn writing on, and merge or change
   anything at all, ever. `let yourself post` covers Slack messages and GitHub
   comments, and nothing else.
@@ -310,8 +318,7 @@ Kept honest rather than tidy.
 - No presence gating: Friday does not know whether you are at the page, at the
   machine, or away, so everything is routed the same way.
 - The phone uses the same page with no phone-specific layout.
-- Calendar access is not granted on this machine. Friday says so rather than
-  implying your day is empty.
+- Calendar is read-only: Friday warns you about a meeting and cannot move one.
 
 ---
 

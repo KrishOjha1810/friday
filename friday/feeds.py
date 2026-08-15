@@ -358,96 +358,110 @@ class GitFeed:
 class CalendarFeed:
     """The next thing you are supposed to be at.
 
-    Read from the Calendar app on this Mac, so it covers whichever accounts you
-    have already added there and needs no OAuth of its own.
+    Through EventKit, which is the API macOS actually intends for this. The
+    obvious route, AppleScript, took SEVENTY-FIVE SECONDS for one query on this
+    machine, because `every event whose start date > x` makes Calendar
+    materialise its entire history. EventKit answers the same question in twenty
+    milliseconds.
 
-    Two things this has to get right. It must know the difference between "your
-    day is empty" and "I was never given access", because reporting the second
-    as the first is a silent failure you would plan around. And it must not
-    launch Calendar every couple of minutes: one fetch of today, then the
-    arithmetic is done here.
+    That slowness also caused a lie: the query timed out, the timeout was read
+    as a refusal, and Friday reported "no calendar access" on a Mac that had
+    granted it. Two separate failures now stay separate, because "you never let
+    me" and "it did not answer" need different things from you.
     """
 
     LEAD_MINUTES = 15
-    FETCH_EVERY = 900          # today's events change rarely
+    FETCH_EVERY = 300
 
     def __init__(self):
         self._events = []      # [(epoch, title)]
         self._fetched = 0.0
-        self._access = None    # None unknown, True granted, False refused
+        self._store = None
+        self._why = ""         # why it cannot read, in words
 
-    # ---- reading the app -------------------------------------------------
-    def _ask(self, script: str, timeout: float = 25) -> tuple:
-        """(output, ok). ok is False when the app refused or was not there."""
+    # ---- reaching the calendar ------------------------------------------
+    def _kit(self):
+        """The EventKit store, asking for permission the first time."""
+        if self._store is not None:
+            return self._store
         try:
-            r = subprocess.run(["osascript", "-e", script],
-                               capture_output=True, text=True, timeout=timeout)
-            return (r.stdout or "").strip(), r.returncode == 0
-        except Exception:
-            return "", False
+            import EventKit
+        except ImportError:
+            self._why = ("calendar support needs one package: "
+                         "pip3 install --user pyobjc-framework-EventKit")
+            return None
+        try:
+            import threading as _t
+            store = EventKit.EKEventStore.alloc().init()
+            done, got = _t.Event(), {}
+
+            def _cb(granted, err):
+                got["ok"] = bool(granted)
+                done.set()
+            # The newer call exists from macOS 14; the older one is the
+            # fallback rather than an error.
+            try:
+                store.requestFullAccessToEventsWithCompletion_(_cb)
+            except AttributeError:
+                store.requestAccessToEntityType_completion_(0, _cb)
+            done.wait(20)
+            if not got.get("ok"):
+                self._why = ("macOS has not allowed calendar access. System "
+                             "Settings, Privacy & Security, Calendars.")
+                return None
+            self._store = store
+            self._why = ""
+            return store
+        except Exception as e:
+            self._why = f"calendar unavailable ({str(e)[:80]})"
+            return None
 
     def available(self) -> bool:
-        """Whether this Mac will let Friday read the calendar at all."""
-        if self._access is not None:
-            return self._access
-        out, ok = self._ask('tell application "Calendar" to return count of '
-                            'calendars', timeout=20)
-        self._access = bool(ok and out.strip().isdigit())
-        return self._access
+        return self._kit() is not None
 
     def _fetch(self) -> None:
         if time.time() - self._fetched < self.FETCH_EVERY:
             return
         self._fetched = time.time()
-        if not self.available():
+        store = self._kit()
+        if store is None:
             return
-        out, ok = self._ask('''
-tell application "Calendar"
-  set n to current date
-  set dayStart to n - (time of n)
-  set dayEnd to dayStart + (1 * days)
-  set output to ""
-  repeat with c in calendars
-    repeat with e in (every event of c whose start date is greater than dayStart and start date is less than dayEnd)
-      set output to output & ((start date of e) as «class isot» as string) & "|" & (summary of e) & linefeed
-    end repeat
-  end repeat
-  return output
-end tell''')
-        if not ok:
-            self._access = False
-            return
-        rows = []
-        for line in out.splitlines():
-            iso, _, title = line.partition("|")
-            try:
-                when = _dt.datetime.fromisoformat(iso.strip()).timestamp()
-            except Exception:
-                continue
-            if title.strip():
-                rows.append((when, title.strip()))
-        self._events = sorted(rows)
+        try:
+            import Foundation
+            start = Foundation.NSDate.date()
+            end = start.dateByAddingTimeInterval_(36 * 3600)
+            pred = store.predicateForEventsWithStartDate_endDate_calendars_(
+                start, end, None)
+            rows, seen = [], set()
+            for e in (store.eventsMatchingPredicate_(pred) or []):
+                title = str(e.title() or "").strip()
+                when = e.startDate().timeIntervalSince1970()
+                # The same event lives in several calendars when they are
+                # subscribed twice, and three notifications for one meeting is
+                # how a feature gets muted.
+                key = (title.lower(), int(when))
+                if not title or key in seen:
+                    continue
+                seen.add(key)
+                rows.append((float(when), title))
+            self._events = sorted(rows)
+            self._why = ""
+        except Exception as e:
+            # A failed query is NOT a refusal, and must not be reported as one.
+            self._why = f"I couldn't read the calendar ({str(e)[:60]})"
 
     # ---- the feed --------------------------------------------------------
     def poll(self) -> list:
         self._fetch()
-        if not self.available():
-            # Said exactly once, because the key never changes. Silence here
-            # would look like an empty diary.
-            return [{"key": "cal:no-access", "urgency": 1,
-                     "text": "I can't read your calendar yet, so I won't warn "
-                             "you about meetings. macOS needs to allow it: "
-                             "System Settings, Privacy & Security, Automation, "
-                             "and turn on Calendar for your terminal.",
-                     "offers": []}]
+        if self._why:
+            return [{"key": "cal:" + self._why[:24], "urgency": 1,
+                     "text": self._why, "offers": []}]
         now = time.time()
         out = []
         for when, title in self._events:
             left = (when - now) / 60
             if 0 < left <= self.LEAD_MINUTES:
                 out.append({
-                    # Rounded to five minutes, so one meeting is announced once
-                    # rather than every poll as the number ticks down.
                     "key": f"cal:{title}:{int(when)}",
                     "urgency": 0,
                     "text": f"{title} starts in {int(left)} minute"
@@ -457,9 +471,8 @@ end tell''')
 
     def state(self) -> str:
         self._fetch()
-        if not self.available():
-            return ("Calendar: no access yet (System Settings, Privacy & "
-                    "Security, Automation, allow Calendar).")
+        if self._why:
+            return "Calendar: " + self._why
         now = time.time()
         later = [(w, t) for w, t in self._events if w > now]
         if not later:
@@ -468,6 +481,4 @@ end tell''')
         mins = int((when - now) / 60)
         soon = (f"in {mins} minutes" if mins < 90
                 else _dt.datetime.fromtimestamp(when).strftime("at %H:%M"))
-        return (f"Calendar: {len(later)} thing"
-                f"{'s' if len(later) != 1 else ''} left today, next is "
-                f"{title} {soon}.")
+        return f"Calendar: next is {title} {soon} ({len(later)} coming up)."

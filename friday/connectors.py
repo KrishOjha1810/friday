@@ -805,7 +805,56 @@ class Gmail:
     BASE = "https://gmail.googleapis.com/gmail/v1/users/me/"
 
     def token(self) -> str:
-        return os.environ.get("GMAIL_TOKEN") or _secret("gmail_token")
+        """A LIVE access token, refreshed if the old one has expired.
+
+        Google's access tokens last an hour. Storing one and reading it back
+        forever means Friday works until lunchtime and then reports "gmail is
+        not connected" with no way to tell that from never having connected. The
+        refresh token is the thing worth keeping; the access token is a receipt
+        that goes stale."""
+        env = os.environ.get("GMAIL_TOKEN")
+        if env:
+            return env
+        d = self._creds()
+        if not d:
+            return _secret("gmail_token") or ""
+        if d.get("access") and time.time() < float(d.get("expires", 0)) - 60:
+            return d["access"]
+        return self._refresh(d)
+
+    def _creds(self) -> dict:
+        try:
+            return json.loads(_secret("gmail_oauth") or "{}")
+        except Exception:
+            return {}
+
+    def _save_creds(self, d: dict) -> None:
+        save_secret("gmail_oauth", json.dumps(d))
+
+    def _refresh(self, d: dict) -> str:
+        """Trade the refresh token for a new access token. Returns "" on
+        failure, which is honest: the connection really is down."""
+        if not (d.get("refresh") and d.get("client_id")):
+            return ""
+        body = urllib.parse.urlencode({
+            "client_id": d["client_id"],
+            "client_secret": d.get("client_secret", ""),
+            "refresh_token": d["refresh"],
+            "grant_type": "refresh_token"}).encode()
+        try:
+            req = urllib.request.Request(
+                "https://oauth2.googleapis.com/token", data=body,
+                headers={"Content-Type": "application/x-www-form-urlencoded"})
+            with urllib.request.urlopen(req, timeout=TIMEOUT) as r:
+                got = json.loads(r.read())
+        except Exception:
+            return ""
+        access = got.get("access_token", "")
+        if access:
+            d["access"] = access
+            d["expires"] = time.time() + float(got.get("expires_in", 3600))
+            self._save_creds(d)
+        return access
 
     _checked = {}
 
@@ -853,6 +902,147 @@ class Gmail:
                         "subject": (full.get("snippet") or "")[:140],
                         "when": float(full.get("internalDate", 0)) / 1000})
         return out
+
+
+# ------------------------------------------------------ Gmail self-setup ----
+# Google has no equivalent of Slack's configuration token, so an OAuth client
+# genuinely has to be created by hand once. What Friday CAN do is everything
+# after that: run the callback, exchange the code, keep the refresh token, and
+# never ask again. The instructions below are the shortest true version, and
+# they are exact, because "create OAuth credentials" spans four screens and
+# every wrong turn ends in a consent error that explains nothing.
+GMAIL_PORT = 7392
+GMAIL_SCOPE = "https://www.googleapis.com/auth/gmail.readonly"
+
+
+def calendar_prompt() -> dict:
+    """Make macOS show its own permission dialog, rather than describing where
+    to find the switch. The prompt only appears when something actually tries to
+    use Calendar, so the honest way to ask for access is to ask for access."""
+    try:
+        # `launch` starts it without bringing it to the front. Without this,
+        # a Calendar that simply is not open answers with error -600, which
+        # reads exactly like a refused permission and would send you off to
+        # System Settings to fix something that was never broken.
+        # `open -gj` starts it in the background without stealing focus, and
+        # unlike AppleScript's own `launch` it does not itself need Automation
+        # permission. AppleScript on a closed Calendar returns -600, "not
+        # running", which reads exactly like a refusal: on this machine the
+        # permission had been granted all along and the feature was dark purely
+        # because the app was shut.
+        subprocess.run(["open", "-gj", "-a", "Calendar"],
+                       capture_output=True, timeout=20)
+        time.sleep(1.0)
+        r = subprocess.run(
+            ["osascript", "-e",
+             'tell application "Calendar" to return count of calendars'],
+            capture_output=True, text=True, timeout=40)
+        out = (r.stdout or "").strip()
+        if r.returncode == 0 and out.isdigit():
+            return {"ok": True, "calendars": int(out)}
+        err = (r.stderr or "").strip()
+        if "-1743" in err or "not allowed" in err.lower():
+            return {"error": "macOS refused: System Settings, Privacy & "
+                             "Security, Automation, switch on Calendar"}
+        return {"error": err[:160] or "macOS said no"}
+    except Exception as e:
+        return {"error": str(e)[:160]}
+
+
+def gmail_setup_steps() -> str:
+    return (
+        "Google needs an app created once, and I can't do that part for you. "
+        "Four steps:\n"
+        "1. Open https://console.cloud.google.com/apis/credentials and pick or "
+        "make a project.\n"
+        "2. Enable the Gmail API: "
+        "https://console.cloud.google.com/apis/library/gmail.googleapis.com\n"
+        "3. Create Credentials, OAuth client ID, type Desktop app.\n"
+        f"4. Paste me the client ID and secret together, like: "
+        f"gmail <client-id> <client-secret>\n"
+        "Then I'll open one page for you to press Allow, and handle the rest "
+        "forever: the token refreshes itself.")
+
+
+def gmail_connect(client_id: str, client_secret: str,
+                  timeout: float = 300) -> dict:
+    """The browser half. Blocks until you approve, so run it in a thread."""
+    import secrets as _secrets
+    import webbrowser as _wb
+    from http.server import BaseHTTPRequestHandler, HTTPServer as _HTTP
+
+    redirect = f"http://localhost:{GMAIL_PORT}/gmail/callback"
+    state = _secrets.token_urlsafe(16)
+    got = {}
+
+    class _Catch(BaseHTTPRequestHandler):
+        def do_GET(self):
+            q = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
+            if (q.get("state") or [""])[0] == state:
+                got["code"] = (q.get("code") or [""])[0]
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.end_headers()
+            self.wfile.write(b"<html><body style='font:16px system-ui;"
+                             b"padding:40px;background:#0b0d12;color:#e6e8ef'>"
+                             b"<h2>Gmail connected.</h2><p>Close this and go "
+                             b"back to Friday.</p></body></html>")
+
+        def log_message(self, *a):
+            pass
+
+    try:
+        srv = _HTTP(("127.0.0.1", GMAIL_PORT), _Catch)
+    except OSError as e:
+        return {"error": f"port {GMAIL_PORT} is busy, so I can't catch the "
+                         f"approval ({e})"}
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        _wb.open("https://accounts.google.com/o/oauth2/v2/auth?"
+                 + urllib.parse.urlencode({
+                     "client_id": client_id, "redirect_uri": redirect,
+                     "response_type": "code", "scope": GMAIL_SCOPE,
+                     "access_type": "offline", "prompt": "consent",
+                     "state": state}))
+        end = time.time() + timeout
+        while time.time() < end and not got.get("code"):
+            time.sleep(0.4)
+    finally:
+        srv.shutdown()
+    if not got.get("code"):
+        return {"error": "nobody pressed Allow, so nothing changed"}
+
+    body = urllib.parse.urlencode({
+        "code": got["code"], "client_id": client_id,
+        "client_secret": client_secret, "redirect_uri": redirect,
+        "grant_type": "authorization_code"}).encode()
+    try:
+        req = urllib.request.Request(
+            "https://oauth2.googleapis.com/token", data=body,
+            headers={"Content-Type": "application/x-www-form-urlencoded"})
+        with urllib.request.urlopen(req, timeout=20) as r:
+            tok = json.loads(r.read())
+    except Exception as e:
+        return {"error": f"Google refused the exchange: {str(e)[:120]}"}
+    if not tok.get("refresh_token"):
+        # Without this the connection dies in an hour and cannot come back,
+        # which is worse than not connecting: it looks like it worked.
+        return {"error": "Google returned no refresh token. Remove Friday at "
+                         "myaccount.google.com/permissions and try again, so "
+                         "it asks for consent freshly."}
+    gm = REGISTRY.get("gmail")
+    if gm is not None:
+        gm._save_creds({"client_id": client_id, "client_secret": client_secret,
+                        "refresh": tok["refresh_token"],
+                        "access": tok.get("access_token", ""),
+                        "expires": time.time()
+                        + float(tok.get("expires_in", 3600))})
+        gm._checked = {}
+        if not gm.ready():
+            return {"error": "the token came back but Gmail won't answer with "
+                             "it. Check the Gmail API is enabled on that "
+                             "project."}
+    return {"ok": True}
 
 
 # ------------------------------------------------------------------ Jira ----

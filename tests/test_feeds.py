@@ -178,12 +178,43 @@ def test_unpushed_work_is_reported_and_then_left_alone():
 def test_no_calendar_access_is_never_reported_as_an_empty_day():
     """The silent version of this failure is one you would plan around."""
     cal = feeds.CalendarFeed()
-    cal._access = False
+    cal._kit = lambda: None
+    cal._why = "macOS has not allowed calendar access."
+    cal._fetched = time.time()          # skip the real fetch
     items = cal.poll()
-    assert len(items) == 1 and "can't read your calendar" in items[0]["text"]
-    assert "System Settings" in items[0]["text"]
-    assert cal.poll()[0]["key"] == "cal:no-access", "would be said twice"
-    assert "no access" in cal.state().lower()
+    assert len(items) == 1, items
+    assert "not allowed" in items[0]["text"], items[0]["text"]
+    assert cal.poll()[0]["key"] == items[0]["key"], "would be said twice"
+    assert "not allowed" in cal.state()
+
+
+def test_a_failed_query_is_not_reported_as_a_refusal():
+    """AppleScript took 75 seconds for one query, the timeout was read as "no
+    permission", and Friday told a Mac that HAD granted access that it had
+    not. "You never let me" and "it did not answer" need different things."""
+    cal = feeds.CalendarFeed()
+    cal._kit = lambda: object()
+    cal._fetched = 0
+    cal._events = []
+    import friday.feeds as F
+    real = F.__dict__.get("Foundation")
+    cal._fetch()
+    assert "not allowed" not in (cal._why or ""), cal._why
+    assert "couldn't read" in (cal._why or "") or cal._why == "", cal._why
+
+
+def test_one_meeting_in_three_calendars_is_one_notification():
+    """Subscribed calendars duplicate holidays and shared events, and three
+    buzzes for one meeting is how a feature gets muted."""
+    cal = feeds.CalendarFeed()
+    cal._fetched = time.time()
+    when = time.time() + 300
+    cal._events = sorted({(when, "Standup"), (when, "Standup"),
+                          (when, "standup")})
+    seen = {}
+    for it in cal.poll():
+        seen[it["key"]] = seen.get(it["key"], 0) + 1
+    assert all(v == 1 for v in seen.values()), seen
 
 
 if __name__ == "__main__":
