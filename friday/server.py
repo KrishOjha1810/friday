@@ -370,6 +370,11 @@ def run(port: int = PORT, expose: bool = False):
     _friday.inbox.start()
     _friday.feeds.announce = _friday.watch.announce
     _friday.feeds.start()
+    # The plan runner too. Each of these holds the callback it was CONSTRUCTED
+    # with, so a rebind here is not optional decoration: without it a plan's
+    # step-by-step progress lands in history and never reaches the browser, and
+    # you would see it on your next reload rather than as it happened.
+    _friday.plans.announce = _friday.watch.announce
     srv = ThreadingHTTPServer((host, port), Handler)
     if expose:
         print(f"Friday is listening on http://{host}:{port}?k={SECRET}")

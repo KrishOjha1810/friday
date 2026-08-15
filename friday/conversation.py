@@ -30,7 +30,8 @@ import time
 from pathlib import Path
 
 from . import (actions, connectors, engine, feeds, fleetcache, inbox,
-               memory, nearest, push, replies, watchtower, when)
+               memory, nearest, plan as plans, push, replies,
+               watchtower, when)
 
 # What kind of thing the user just said.
 ASK_FLEET = "fleet"        # "what's running", "who needs me"
@@ -63,6 +64,9 @@ MISSED = "missed"          # "what did I miss?"
 DRAFT = "draft"            # "draft a reply"
 SEND = "send"              # "send it" after a draft
 ALLOW = "allow"            # "let yourself post to slack"
+PLAN = "plan"              # "plan: do a, then b, then c"
+PLAN_GO = "plango"         # "run the plan"
+PLAN_WHERE = "planwhere"   # "where is the plan?"
 BRIEF = "brief"            # "brief me", "where does everything stand"
 MUTE = "mute"              # "ignore jobhunt for now"
 STUCK = "stuck"            # "is anyone stuck?"
@@ -90,6 +94,20 @@ _GOOGLE_CREDS_RE = re.compile(
 # worst of both.
 # The whole picture, asked for rather than waited on. The unprompted stream is
 # deliberately sparse, so there has to be a way to pull everything at once.
+# A plan is written down before any of it runs, and nothing runs until you say
+# so. "plan: a, then b, then c" or a numbered list.
+_PLAN_RE = re.compile(
+    r"^\s*(?:make|write|draft)?\s*a?\s*plan(?:\s+for\s+(\S+))?\s*[:,]\s*(.+)$",
+    re.I | re.S)
+_PLAN_GO_RE = re.compile(
+    r"\b(?:run|start|go ahead with|approve|do)\s+(?:the\s+)?plan\b|"
+    r"^\s*(?:approved|go ahead)\s*[.!]?\s*$", re.I)
+_PLAN_WHERE_RE = re.compile(
+    r"\b(?:where\s+(?:is|are)\s+(?:we|the plan)|how(?:'?s| is)\s+the\s+plan|"
+    r"what'?s?\s+left|plan\s+status|show\s+(?:me\s+)?the\s+plan)\b", re.I)
+_PLAN_STOP_RE = re.compile(r"\b(?:stop|pause|cancel|abandon)\s+the\s+plan\b",
+                           re.I)
+
 _BRIEF_RE = re.compile(
     r"\bbrief\s+me\b|\bwhere\s+(?:does|do)\s+everything\s+stand\b|"
     r"\bwhat(?:'?s| is|\s+are)?\s+(?:the\s+)?"
@@ -351,6 +369,16 @@ def classify(text: str) -> tuple:
     """(intent, payload). Deterministic and ordered: the most specific command
     wins, and only what is left over counts as conversation."""
     t = (text or "").strip()
+    if _PLAN_STOP_RE.search(t):
+        return PLAN_GO, {"stop": True}
+    if _PLAN_WHERE_RE.search(t):
+        return PLAN_WHERE, {}
+    m = _PLAN_RE.match(t)
+    if m:
+        return PLAN, {"target": (m.group(1) or "").strip(),
+                      "body": m.group(2).strip()}
+    if _PLAN_GO_RE.search(t):
+        return PLAN_GO, {"stop": False}
     if _BRIEF_RE.search(t):
         return BRIEF, {}
     m = _ALLOW_RE.search(t)
@@ -530,6 +558,14 @@ class Friday:
         self.watching_at = 0.0
         self._pushed = {}          # tag -> when, so one thing buzzes once
         self._last_draft = None    # the exact text "send it" refers to
+        self._plan_id = 0
+        # One plan at a time, on evidence: a step is done when the agent has
+        # answered, not when Friday sent the prompt.
+        self.plans = plans.Runner(
+            announce=self.announce,
+            send=actions.send_to_session,
+            look=lambda sid: (fleetcache.snapshot() or {}).get(sid, {}),
+            log=(engine.core.log if engine.AVAILABLE else None))
         # One place watches every session and reports what it said, so nothing
         # is announced twice and nothing is missed.
         self.watch = watchtower.Watchtower(
@@ -652,6 +688,12 @@ class Friday:
             return self._propose_open(payload["name"])
         if intent == BRIEF:
             return self._brief()
+        if intent == PLAN:
+            return self._make_plan(payload["target"], payload["body"])
+        if intent == PLAN_GO:
+            return self._run_plan(payload.get("stop", False))
+        if intent == PLAN_WHERE:
+            return self._plan_status()
         if intent == ALLOW:
             return self._allow_write(payload["on"])
         if intent == SEND:
@@ -852,6 +894,78 @@ class Friday:
         return self._say("\n- ".join(["Here's where everything stands:"] + lines)
                          if lines else "Nothing is running and nothing is "
                                        "waiting.")
+
+    def _steps_from(self, body: str) -> list:
+        """Turn what you said into ordered steps.
+
+        Split on the words people actually use for sequence. A plan is written
+        down before any of it runs precisely so a bad split is something you
+        SEE rather than something an agent discovers halfway through."""
+        text = " ".join((body or "").split())
+        parts = re.split(r"\s*(?:\d+[.)]\s+|;|,\s*then\s+|\s+then\s+|,\s+and\s+"
+                         r"|\.\s+(?=[A-Z])|,\s+)", text)
+        return [p.strip(" .;,") for p in parts if p and len(p.strip()) > 2]
+
+    def _make_plan(self, target: str, body: str) -> dict:
+        """Write it down and show it. Nothing runs yet."""
+        steps = self._steps_from(body)
+        if len(steps) < 2:
+            return self._say("That's one instruction rather than a plan. Say "
+                             "\"tell <session> to ...\" for a single thing, or "
+                             "give me two or more steps.")
+        name = target or self.target
+        if not name:
+            names = self._names_of_sessions()
+            if not names:
+                return self._say("Nothing is running to plan against.")
+            return self._offer(
+                "Which session is this plan for? " + ", ".join(names[:8]),
+                yes=lambda n=names[0], b=body: self._make_plan(n, b),
+                again=lambda t, b=body: self._make_plan(t, b))
+        hit, how = self._find_how(name)
+        if not hit:
+            return self._no_session(name, lambda n: self._make_plan(n, body))
+        pid = plans.create(f"{len(steps)} steps", hit.get("label", name),
+                           steps, sid=hit.get("sid", ""))
+        if not pid:
+            return self._say("I couldn't write that plan down.")
+        self._plan_id = pid
+        listed = "\n".join(f"{i + 1}. {s}" for i, s in enumerate(steps))
+        return self._say(
+            f"Here's the plan for {hit.get('label', name)}. Nothing has run "
+            f"yet:\n{listed}\n\nSay \"run the plan\" and I'll do them in "
+            f"order, one at a time, stopping if it asks you anything.")
+
+    def _run_plan(self, stop: bool = False) -> dict:
+        if stop:
+            self.plans.stop()
+            p = plans.active() or plans.latest()
+            if p:
+                plans.set_plan(p["id"], plans.HELD)
+            return self._say("Plan paused. Say \"run the plan\" to pick it up "
+                             "where it stopped.")
+        p = plans.active() or plans.latest()
+        if not p:
+            return self._say("There's no plan yet. Say \"plan: first thing, "
+                             "then second thing\" and I'll write one down.")
+        if p["state"] == plans.DONE:
+            return self._say(f"That plan is already finished. "
+                             f"{plans.describe(p)}")
+        if self.plans.running:
+            return self._say("It's already running. Say \"where is the plan\" "
+                             "to see how far it has got.")
+        left = [s for s in p["steps"] if s["state"] in (plans.PENDING,)]
+        self.plans.start(p["id"])
+        return self._say(f"Running it: {len(left)} step"
+                         f"{'s' if len(left) != 1 else ''} left on "
+                         f"{p['target']}. I'll tell you after each one, and "
+                         f"stop if it needs you.")
+
+    def _plan_status(self) -> dict:
+        p = plans.active() or plans.latest()
+        if not p:
+            return self._say("There's no plan.")
+        return self._say(plans.describe(p))
 
     def _allow_write(self, on: bool) -> dict:
         """Turn posting on or off. The scope is only requested when you ask.
@@ -2095,6 +2209,10 @@ class Friday:
         "watch a session and tell you when it finishes "
         "(say: tell me when it is done)",
         "stop what a session is doing (say: stop <name>)",
+        "hold a multi-step plan and run it one step at a time, stopping if the "
+        "agent asks you something (say: plan: first thing, then second thing)",
+        "tell you where a plan has got to, and pick it up where it stopped "
+        "(say: where is the plan)",
         "tell you, unprompted, whenever any session replies, summarised, with "
         "the ones waiting on you first",
         "send an alert to your phone when something needs you, even with the "
@@ -2126,6 +2244,7 @@ class Friday:
         "search your Slack, once you connect it",
     ]
     CANNOT_YET = [
+        "run two plans at once, on purpose: one at a time is the point",
         "put anything in your calendar, or schedule a meeting",
         "search Jira or email",
         "post, comment, merge or change anything (everything is read-only)",

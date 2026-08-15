@@ -93,6 +93,20 @@ def test_the_secret_is_not_world_readable():
         assert mode == 0o600, f"secret is {oct(mode)}, must be 0600"
 
 
+def test_every_background_voice_reaches_the_browser():
+    """Each watcher keeps the callback it was constructed with, so anything
+    started in run() must have its announce rebound to the pushing one. Miss it
+    and that source's news lands in history only: you see it on your next
+    reload rather than when it happened. This has now been missed twice."""
+    src = (Path(__file__).resolve().parents[1] / "friday" / "server.py").read_text()
+    run = src[src.index("def run("):]
+    started = {line.split(".")[1] for line in run.splitlines()
+               if ".start()" in line and "_friday." in line}
+    for name in started:
+        assert f"_friday.{name}.announce =" in run, \
+            f"{name} is started but its announce was never rebound"
+
+
 if __name__ == "__main__":
     for name, fn in sorted(globals().items()):
         if name.startswith("test_") and callable(fn):

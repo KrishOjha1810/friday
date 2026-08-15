@@ -97,6 +97,9 @@ you are already signed in to.
 | `stop <name>` | the same Escape you would press |
 | `say more` | that session's exact words, not the summary |
 | `who am I talking to` | where a bare reply would land |
+| `plan: run the tests, then fix what fails, then commit` | writes it down; nothing runs yet |
+| `run the plan` | one step at a time, on evidence, stopping if it asks you |
+| `where is the plan` | how far it got, and what is left |
 
 `tell` means do this. `ask` means bring me the answer. Only one of them waits.
 
@@ -174,6 +177,8 @@ friday/
   memory.py             your past sessions and projects, searchable
   nearest.py            matching what you said to the names that exist
   when.py               "yesterday", "on Friday" -> a real range of time
+  plan.py               a multi-step plan in SQLite, run one step at a time
+  push.py               alerts to a locked phone (VAPID + aes128gcm)
 static/index.html       the page
 tests/                  16 suites, all runnable with plain python3
 ```
@@ -285,11 +290,11 @@ sessions.
    authorized. Slack needed its own app because the hosted MCP has no dynamic
    client registration; Atlassian and Google will have the same shape, so the
    app-building trick generalizes.
-4. **Phase 2, the conductor core.** Friday reads your tickets, has an opinion
-   ("start with the login bug, it is high priority and small"), you pick, an agent
-   plans, Friday speaks the plan, you approve by voice, it runs the steps with a
-   checkpoint at each one. Needs a plan runner, a small SQLite state machine. This
-   is where Friday stops being a very good intercom.
+4. **Phase 2, the conductor core.** The plan runner exists: plans are written
+   down, approved, and run one step at a time on evidence, holding when an agent
+   asks something. What is left of Phase 2 is the front half, Friday reading your
+   tickets and having an opinion about which to start with, which needs Jira
+   connected first.
 5. **Phase 3, the signature trick.** A plan step that holds until a human replies:
    Friday asks a colleague in Slack, the step releases when they answer. A mailbox
    on the plan runner plus one integration, not new science.
