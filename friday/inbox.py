@@ -12,10 +12,12 @@ So a report has three parts, and the third is the point:
     what they want      a concise overview of your technical work
     what you can do     draft a reply / ask a session / open the thread
 
-What Friday can honestly offer depends on what it can do, and it must never
-offer something it cannot perform. It reads Slack; it cannot post, because the
-app deliberately holds no write scope. So "reply" means Friday drafts and you
-send, and it says so.
+What Friday can honestly offer depends on what it can do RIGHT NOW, and it must
+never offer something it cannot perform. Posting is off until you turn it on, so
+by default "reply" means Friday drafts and you send, and it says exactly that.
+Once you have allowed posting, the offer changes to match, because understating
+what it can do is its own kind of wrong: you would go and paste it yourself for
+no reason.
 
 It only reads channels you are already in, it never reports your own messages
 back to you, and it says each thing once.
@@ -148,25 +150,33 @@ class Inbox:
         where = "#" + (ch.get("name") or "slack")
         who = row.get("who") or "someone"
         text = " ".join((row.get("text") or "").split())
-        self.last[ch.get("id", "")] = {"where": where, "who": who, "text": text}
+        # The channel id travels with it: a draft with no destination is a
+        # draft you have to send yourself, which is the thing being fixed.
+        self.last[ch.get("id", "")] = {"where": where, "who": who,
+                                       "text": text,
+                                       "channel": ch.get("id", "")}
         gist = text if len(text) <= 200 else text[:200].rsplit(" ", 1)[0] + "…"
         offer = ", ".join(self._offers(text, where))
         self.announce(f"{who} in {where}: {gist}\n{offer}",
                       items=[{"sid": "", "label": where, "kind": "slack"}])
 
     def _offers(self, text: str, where: str) -> list:
-        """What Friday can actually do about this message.
+        """What Friday can actually do about this message, right now.
 
-        Never offer what cannot be performed. Friday has no write scope in
-        Slack on purpose, so it can draft but not send, and it says which."""
-        out = []
+        Never offer what cannot be performed, and never understate it either:
+        promising a draft you have to paste, when Friday could send it, sends
+        you off to do something by hand for no reason."""
+        try:
+            can_send = connectors.can_write()
+        except Exception:
+            can_send = False
+        reply = ('say "draft a reply" and I\'ll write one; "send it" and it goes'
+                 if can_send else
+                 'say "draft a reply" and I\'ll write one you can paste')
+        out = [reply]
         if _WANTS_TIME.search(text):
-            # Calendar is not connected, so the honest offer is the draft.
-            out.append('say "draft a reply" and I\'ll write one you can paste')
             out.append("tell me a time and I'll put it in the draft")
-        else:
-            out.append('say "draft a reply" and I\'ll write one you can paste')
-        out.append(f'or "ask <session> about this" to put it to an agent')
+        out.append('or "ask <session> about this" to put it to an agent')
         return out
 
 

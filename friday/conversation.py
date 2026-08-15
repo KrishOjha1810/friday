@@ -61,6 +61,8 @@ ASK_ALL = "askall"         # "ask everyone what they're working on"
 MORE = "more"              # "say more", "what exactly did it say"
 MISSED = "missed"          # "what did I miss?"
 DRAFT = "draft"            # "draft a reply"
+SEND = "send"              # "send it" after a draft
+ALLOW = "allow"            # "let yourself post to slack"
 BRIEF = "brief"            # "brief me", "where does everything stand"
 MUTE = "mute"              # "ignore jobhunt for now"
 STUCK = "stuck"            # "is anyone stuck?"
@@ -87,6 +89,17 @@ _BRIEF_RE = re.compile(
     r"(?:situation|status|state\s+of\s+play)\b|"
     r"\bfull\s+(?:picture|rundown)\b|\beverything\s+i\s+need\s+to\s+know\b",
     re.I)
+
+# Sending is never inferred from a sentence about sending. It happens only when
+# you say yes to a specific piece of text Friday has just shown you.
+_SEND_RE = re.compile(
+    r"^\s*(?:go ahead and\s+)?(?:send|post)\s*(?:it|that|this)?\s*"
+    r"(?:to\s+(?:slack|#?[\w.\-]+))?\s*[.!]?\s*$", re.I)
+_ALLOW_RE = re.compile(
+    r"\b(?:let|allow)\s+(?:yourself|you)\s+(?:to\s+)?(post|write|reply|comment)"
+    r"|\b(?:enable|turn on)\s+(?:slack\s+)?(?:posting|writing|replies)\b"
+    r"|\b(?:stop|disable|turn off)\s+(?:yourself\s+)?(?:posting|writing)\b"
+    r"|\byou\s+can\s+(?:post|reply|comment)\b", re.I)
 
 _DRAFT_RE = re.compile(
     r"\b(?:draft|write|compose)\s+(?:me\s+)?(?:a\s+|the\s+)?"
@@ -333,6 +346,12 @@ def classify(text: str) -> tuple:
     t = (text or "").strip()
     if _BRIEF_RE.search(t):
         return BRIEF, {}
+    m = _ALLOW_RE.search(t)
+    if m:
+        off = bool(re.search(r"\b(stop|disable|turn off)\b", t, re.I))
+        return ALLOW, {"on": not off}
+    if _SEND_RE.match(t):
+        return SEND, {}
     if not t:
         return CHAT, {}
     # Specific multi-word intents go FIRST. "resume that session" is not the
@@ -499,6 +518,7 @@ class Friday:
         self.watching = False
         self.watching_at = 0.0
         self._pushed = {}          # tag -> when, so one thing buzzes once
+        self._last_draft = None    # the exact text "send it" refers to
         # One place watches every session and reports what it said, so nothing
         # is announced twice and nothing is missed.
         self.watch = watchtower.Watchtower(
@@ -621,6 +641,10 @@ class Friday:
             return self._propose_open(payload["name"])
         if intent == BRIEF:
             return self._brief()
+        if intent == ALLOW:
+            return self._allow_write(payload["on"])
+        if intent == SEND:
+            return self._send_draft()
         if intent == DRAFT:
             return self._draft(payload.get("gist", ""))
         if intent == MISSED:
@@ -818,6 +842,73 @@ class Friday:
                          if lines else "Nothing is running and nothing is "
                                        "waiting.")
 
+    def _allow_write(self, on: bool) -> dict:
+        """Turn posting on or off. The scope is only requested when you ask.
+
+        Off by default and revocable on its own, without tearing down the read
+        connection, because those are genuinely different risks: reading your
+        Slack is a privacy question, writing to it is a question about what
+        arrives in a channel of your colleagues under your name."""
+        connectors.allow_write(on)
+        connectors.gh_allow_write(on)
+        if not on:
+            return self._say("Posting is off again. I'll go back to drafting "
+                             "and you send.")
+        sl = connectors.get("slack")
+        needs_reinstall = True
+        try:
+            needs_reinstall = not self._slack_scope("chat:write")
+        except Exception:
+            pass
+        extra = ""
+        if needs_reinstall and sl and getattr(sl, "ready", lambda: False)():
+            extra = (" Slack itself still needs the permission: say \"connect "
+                     "slack\" and press Allow once more, and I'll ask for "
+                     "chat:write this time.")
+        return self._say("Alright. I'll still show you the exact words and "
+                         "wait for a yes before anything goes out, every "
+                         "time." + extra)
+
+    def _slack_scope(self, scope: str) -> bool:
+        """Whether the saved token actually carries a scope. Slack returns the
+        granted list in a header, so this is a fact rather than a guess."""
+        import urllib.request
+        sl = connectors.get("slack")
+        tok = sl.token() if hasattr(sl, "token") else ""
+        if not tok:
+            return False
+        req = urllib.request.Request(
+            "https://slack.com/api/auth.test",
+            headers={"Authorization": "Bearer " + tok}, method="POST")
+        with urllib.request.urlopen(req, timeout=6) as r:
+            return scope in (r.headers.get("x-oauth-scopes") or "")
+
+    def _send_draft(self) -> dict:
+        """Send the thing you were just shown. Never anything else.
+
+        There is no path from "reply to Sam saying yes" straight to a
+        message in Slack. Friday writes it, you read it, and only then does
+        "send it" mean anything."""
+        d = getattr(self, "_last_draft", None)
+        if not d:
+            return self._say("There's nothing drafted. Say \"draft a reply\" "
+                             "and I'll write one for you to check first.")
+        if not connectors.can_write():
+            return self._say("I can't post to Slack yet. Say \"let yourself "
+                             "post\" if you want me to be able to, and I'll "
+                             "still show you every message before it goes.")
+        sl = connectors.get("slack")
+        r = sl.post(d["channel"], d["text"]) if hasattr(sl, "post") else {}
+        if r.get("ok"):
+            self._last_draft = None
+            return self._say(f"Sent to {d['where']}.")
+        why = r.get("error", "")
+        if why == "missing_scope":
+            why = ("the token has no permission to post. Say \"connect slack\" "
+                   "and press Allow once more to add it")
+        return self._say(f"It didn't go: {why or 'Slack refused it'}. Nothing "
+                         f"was sent.")
+
     def _draft(self, gist: str = "") -> dict:
         """Write the reply; you send it.
 
@@ -854,6 +945,13 @@ class Friday:
         if not out:
             return self._say("I couldn't get a draft out of my brain. "
                              f"{last['who']} said: {last['text'][:200]}")
+        self._last_draft = {"text": out, "where": last["where"],
+                            "channel": last.get("channel", ""),
+                            "who": last["who"]}
+        if connectors.can_write() and last.get("channel"):
+            return self._say(f"Here's a draft for {last['who']} in "
+                             f"{last['where']}:\n\n{out}\n\nSay \"send it\" "
+                             f"and it goes as written. I won't change a word.")
         return self._say(f"Here's a draft for {last['who']} in {last['where']}. "
                          f"I can't post to Slack, so send it yourself:\n\n{out}")
 
@@ -1990,7 +2088,6 @@ class Friday:
         "search your Slack, once you connect it",
     ]
     CANNOT_YET = [
-        "post or send anything in Slack (it can draft, you send)",
         "put anything in your calendar, or schedule a meeting",
         "search Jira or email",
         "post, comment, merge or change anything (everything is read-only)",
@@ -2006,6 +2103,17 @@ class Friday:
         connect it", and duly told you it had no access to your channels while
         Friday was reading them."""
         can, cannot = list(self.CAN_DO), []
+        # Posting is off until you allow it, so which list it belongs in is a
+        # live fact rather than a fixed one.
+        try:
+            writing = connectors.can_write()
+        except Exception:
+            writing = False
+        (can if writing else cannot).append(
+            "send a Slack message as you, after showing you the exact words "
+            "and waiting for a yes" if writing else
+            "post or send anything in Slack (it drafts, you send). Say "
+            "\"let yourself post\" to change that")
         try:
             live = {n: v["ready"] for n, v in connectors.status().items()}
         except Exception:

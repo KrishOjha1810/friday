@@ -127,8 +127,11 @@ are you using claude for this?                (a real answer: a local model)
 Stated plainly because Friday states it too, and never offers what it cannot
 perform:
 
-- Post or send anything in Slack. It drafts, you send. The app holds read scopes
-  only, on purpose: an assistant that can post as you is a different risk.
+- Post or send anything in Slack **until you turn it on**. Say `let yourself
+  post` and Friday asks Slack for `chat:write`; until then the app holds read
+  scopes only. Even with it on, nothing goes out without Friday showing you the
+  exact words and waiting for a yes, and it sends them verbatim rather than
+  regenerating. `turn off posting` revokes it without touching reading.
 - Put anything in your calendar, or schedule a meeting.
 - Comment, merge or change anything anywhere. Everything is read-only.
 - Write code, or start work by itself.

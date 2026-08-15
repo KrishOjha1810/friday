@@ -200,6 +200,34 @@ class GitHub:
         except Exception:
             return []
 
+    def comment(self, target: str, body: str) -> dict:
+        """Comment on an issue or pull request, as you.
+
+        `gh` is already signed in as you and can already do this, so the only
+        thing standing between an inference and a public comment on somebody's
+        pull request is this switch and the confirmation above it."""
+        if not gh_can_write():
+            return {"ok": False, "error": "writing_not_enabled"}
+        if not (target and body.strip()):
+            return {"ok": False, "error": "nothing_to_send"}
+        try:
+            r = subprocess.run(["gh", "issue", "comment", target,
+                                "--body", body],
+                               capture_output=True, text=True, timeout=30)
+            if r.returncode != 0:
+                # A pull request is not an issue to `gh issue comment` when the
+                # number is ambiguous, so fall back rather than reporting a
+                # failure that only means "wrong subcommand".
+                r = subprocess.run(["gh", "pr", "comment", target,
+                                    "--body", body],
+                                   capture_output=True, text=True, timeout=30)
+            if r.returncode == 0:
+                return {"ok": True, "url": (r.stdout or "").strip()}
+            return {"ok": False, "error": (r.stderr or "").strip()[:200]}
+        except Exception as e:
+            return {"ok": False, "error": str(e)[:160]}
+
+
 
 # ----------------------------------------------------------------- Slack ----
 class Slack:
@@ -500,6 +528,23 @@ class Slack:
             r["who"] = names.get(r["who"], r["who"])
         return rows
 
+    def post(self, channel: str, text: str, thread_ts: str = "") -> dict:
+        """Send a message as you. Refuses unless posting was turned on.
+
+        Two separate refusals on purpose. The token may simply not carry the
+        scope, which Slack reports as missing_scope; and posting may be switched
+        off here even when it does. Sending something as somebody, into a
+        channel of their colleagues, is not a thing to do on an inference."""
+        if not can_write():
+            return {"ok": False, "error": "writing_not_enabled"}
+        if not (channel and text.strip()):
+            return {"ok": False, "error": "nothing_to_send"}
+        args = {"channel": channel, "text": text}
+        if thread_ts:
+            args["thread_ts"] = thread_ts
+        d = self._call("chat.postMessage", **args)
+        return d
+
     def thread(self, channel: str, ts: str, limit: int = 30) -> list:
         """A whole conversation, so Friday can read it and summarise."""
         d = self._call("conversations.replies", channel=channel, ts=ts, limit=limit)
@@ -509,6 +554,14 @@ class Slack:
                  "text": " ".join((m.get("text") or "").split())[:500],
                  "when": float(m.get("ts") or 0)}
                 for m in (d.get("messages") or [])]
+
+
+def gh_can_write() -> bool:
+    return (_secret("github_can_write") or "").strip() == "yes"
+
+
+def gh_allow_write(on: bool = True) -> None:
+    save_secret("github_can_write", "yes" if on else "no")
 
 
 # ------------------------------------------------------- Slack self-setup ----
@@ -526,6 +579,21 @@ class Slack:
 SCOPE_LIST = ["search:read", "channels:history", "groups:history", "im:history",
               "mpim:history", "channels:read", "groups:read", "im:read",
               "mpim:read", "users:read"]
+# Posting is a different thing from reading, and it is not granted by default.
+# An assistant that can write as you is a different risk from one that reads for
+# you, so this is asked for separately, stored separately, and revocable on its
+# own without tearing down the whole connection.
+WRITE_SCOPES = ["chat:write"]
+WRITE_FLAG = "slack_can_write"
+
+
+def can_write() -> bool:
+    """Whether you have turned posting on. Off until you say otherwise."""
+    return (_secret(WRITE_FLAG) or "").strip() == "yes"
+
+
+def allow_write(on: bool = True) -> None:
+    save_secret(WRITE_FLAG, "yes" if on else "no")
 
 SETUP_PORT = 7391
 CONFIG_TOKEN_SCOPES = "app_configurations"
@@ -585,7 +653,8 @@ def _manifest(redirect: str) -> str:
             "redirect_urls": [redirect],
             # USER scopes only, and every one is a read. There is no chat:write
             # anywhere in here, so Friday physically cannot post as you.
-            "scopes": {"user": SCOPE_LIST}},
+            "scopes": {"user": SCOPE_LIST
+                       + (WRITE_SCOPES if can_write() else [])}},
         "settings": {"org_deploy_enabled": False,
                      "socket_mode_enabled": False,
                      # Rotation off, so the result is a plain xoxp- token that

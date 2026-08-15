@@ -167,7 +167,9 @@ carrying the Slack context, so you never retype it.
 
 Friday says all of this itself rather than discovering it mid-task:
 
-- Post or send anything in Slack. It drafts (`draft a reply`), you send.
+- Post or send anything in Slack until you allow it. `draft a reply` writes one;
+  `let yourself post` lets Friday send it, and even then only after showing you
+  the words and waiting for `send it`. `turn off posting` undoes it.
 - Put anything in your calendar, or schedule a meeting.
 - Comment, merge or change anything anywhere. Everything is read-only.
 - Write code, or start work by itself.
