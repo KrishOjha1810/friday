@@ -68,6 +68,7 @@ ALLOW = "allow"            # "let yourself post to slack"
 NEXT = "next"              # "what should I work on?"
 FIRE = "fire"              # "what's on fire?"
 HELP = "help"              # "what can you do?"
+PLAN_ASK = "plan_ask"      # "work out a plan for adding OAuth"
 SCHEDULE = "schedule"      # "put it in for Thursday at 4"
 TICKET = "ticket"          # "file a ticket: the parser breaks on PDFs"
 MOVE = "move"              # "move PROJ-12 to done"
@@ -313,6 +314,15 @@ _JIRA_RE = re.compile(r"\bjira\b|\btickets?\b", re.I)
 # The first thing a new user types, and until now it fell through to the model,
 # which on a fresh machine is not loaded, so the answer was "my brain isn't
 # loaded yet". A dead end on the first word.
+# Asking the AGENT for the plan, rather than dictating one. "plan: a, then b"
+# is you writing the steps; this is you naming the goal. The distinction is the
+# colon and the word "then", so this pattern deliberately does not match those.
+_PLAN_ASK_RE = re.compile(
+    r"\b(?:work out|figure out|come up with|draw up|propose|think through)\s+"
+    r"(?:an? |the )?(?:plan|approach)\s+(?:for|to|on)\s+(.+)$"
+    r"|\bask\s+(\S+)\s+(?:for|to (?:make|write|draw up))\s+a plan\s+"
+    r"(?:for|to|on)\s+(.+)$"
+    r"|\bhow (?:should|would) (?:we|i|you)\s+(.+)$", re.I)
 _HELP_RE = re.compile(
     r"^\s*(?:help|\?|what can you do|what do you do|what are you|"
     r"what can i (?:ask|say|do)|how does this work|commands?|"
@@ -536,6 +546,10 @@ def classify(text: str) -> tuple:
                               "said": t}
     if _HELP_RE.search(t):
         return HELP, {}
+    m = _PLAN_ASK_RE.search(t)
+    if m and ":" not in t.split(" ", 1)[-1][:14]:
+        goal = (m.group(1) or m.group(3) or m.group(4) or "").strip(" .?")
+        return PLAN_ASK, {"goal": goal, "target": (m.group(2) or "").strip()}
     if _FIRE_RE.search(t) and not _NOT_FIRE_RE.search(t):
         return FIRE, {}
     if _JIRA_RE.search(t):
@@ -789,6 +803,8 @@ class Friday:
             return self._brief()
         if intent == NEXT:
             return self._what_next()
+        if intent == PLAN_ASK:
+            return self._ask_for_plan(payload["goal"], payload.get("target", ""))
         if intent == HELP:
             return self._help()
         if intent == FIRE:
@@ -1020,6 +1036,81 @@ class Friday:
         parts = re.split(r"\s*(?:\d+[.)]\s+|;|,\s*then\s+|\s+then\s+|,\s+and\s+"
                          r"|\.\s+(?=[A-Z])|,\s+)", text)
         return [p.strip(" .;,") for p in parts if p and len(p.strip()) > 2]
+
+    def _ask_for_plan(self, goal: str, target: str = "") -> dict:
+        """Have the agent write the plan, then hold it for you to approve.
+
+        The missing middle of the conductor idea. Friday could run a plan and
+        Friday could have an opinion about what to start on, but the steps in
+        between had to be typed by you, which meant the one part needing actual
+        knowledge of the codebase was the part left to the person who had
+        delegated it.
+
+        Nothing runs off the back of this. The agent is asked to plan and told
+        explicitly not to start, and the steps come back for approval before a
+        single one is sent. That ordering is the whole safety story: an agent
+        that plans and executes in one go is an agent you cannot say no to."""
+        if not goal:
+            return self._say("A plan for what?")
+        name = target or self.target
+        if not name:
+            names = self._names_of_sessions()
+            if not names:
+                return self._say("Nothing is running to plan with.")
+            return self._offer(
+                "Which session should work it out? " + ", ".join(names[:8]),
+                yes=lambda n=names[0], g=goal: self._ask_for_plan(g, n),
+                again=lambda t, g=goal: self._ask_for_plan(g, t))
+        hit, _how = self._find_how(name)
+        if not hit:
+            return self._no_session(name,
+                                    lambda n, g=goal: self._ask_for_plan(g, n))
+        if not agents.can_conduct(hit):
+            return self._say(f"I can read {hit.get('label', name)} but I can't "
+                             f"ask it anything: it runs in its own app.")
+        path, sid = hit.get("path", ""), hit.get("sid", "")
+        label = hit.get("label", name)
+        prompt = plans.ASK_FOR_PLAN.format(n=plans.MAX_STEPS, task=goal)
+        try:
+            marker = replies.mark(path)
+        except Exception:
+            marker = ""
+        if not actions.send_to_session(sid, prompt):
+            return self._say(f"I couldn't reach {label}.")
+
+        def _collect():
+            answer = ""
+            try:
+                answer = replies.wait_for_reply(path, marker, timeout=240) or ""
+            except Exception:
+                answer = ""
+            if not answer:
+                self.announce(f"{label} hasn't come back with a plan yet. Say "
+                              f"\"say more\" to see where it got to.")
+                return
+            steps = plans.steps_from_answer(answer)
+            if len(steps) < 2:
+                # Refusing beats manufacturing steps out of prose. What it
+                # actually said is more useful than a plan nobody wrote.
+                self.announce(f"{label} answered but not with a numbered plan, "
+                              f"so I haven't written anything down. It said: "
+                              f"{answer[:300]}")
+                return
+            pid = plans.create(goal[:60], label, steps, sid=sid)
+            if not pid:
+                self.announce("I couldn't write that plan down.")
+                return
+            self._plan_id = pid
+            listed = "\n".join(f"{i + 1}. {s}" for i, s in enumerate(steps))
+            self.announce(
+                f"{label}'s plan for {goal[:60]}. Nothing has run yet:\n{listed}"
+                f"\n\nSay \"run the plan\" to do them in order, one at a time.",
+                items=[{"sid": sid, "label": label, "kind": "plan"}])
+        import threading
+        threading.Thread(target=_collect, daemon=True).start()
+        return self._say(f"Asked {label} to work out a plan for {goal[:60]}, "
+                         f"and told it not to start. I'll bring you the steps "
+                         f"to approve.")
 
     def _make_plan(self, target: str, body: str) -> dict:
         """Write it down and show it. Nothing runs yet."""

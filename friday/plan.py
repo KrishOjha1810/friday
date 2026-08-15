@@ -23,11 +23,132 @@ Three rules, each of which is a way this goes wrong:
   runs on an assumption nobody made.
 """
 
+import re
 import sqlite3
 import threading
 import time
 
 from . import connectors
+
+# ------------------------------------------------- turning prose into steps ----
+# What an agent's answer looks like when you ask it for a plan: some preamble,
+# a numbered or bulleted list, and then caveats. Only the list is the plan.
+_NUMBERED = re.compile(r"^\s*(?:\d{1,2}[.)]|[-*\u2022])\s+(.+)$")
+_HEADING = re.compile(r"^\s*#{1,6}\s|^\s*\*\*[^*]+\*\*\s*:?\s*$")
+# Markdown decoration, which is for the eye and not for a terminal prompt.
+_DECOR = re.compile(r"[`*_]+")
+MAX_STEPS = 10
+MIN_STEP_CHARS = 12
+
+
+# An agent's answer does not reach here with its line breaks intact: the
+# transcript readers normalise whitespace, so a numbered plan arrives as one
+# long line. Finding the enumerators inside it needs a stronger signal than
+# "there is a number here", because "1." also appears in prose and in version
+# numbers. The signal used is that the numbers run 1, 2, 3 in order.
+_INLINE = re.compile(r"(?:(?<=\s)|^)(\d{1,2})[.)]\s+")
+
+
+def _unwrap(text: str) -> str:
+    """Put the line breaks back, when a list has been flattened into a line."""
+    if len([l for l in text.splitlines() if _NUMBERED.match(l)]) >= 2:
+        return text                     # the breaks are still there
+    found = list(_INLINE.finditer(text))
+    runs, current = [], []
+    for m in found:
+        n = int(m.group(1))
+        if n == (int(current[-1].group(1)) + 1 if current else 1):
+            current.append(m)
+        else:
+            if len(current) >= 2:
+                runs.append(current)
+            current = [m] if n == 1 else []
+    if len(current) >= 2:
+        runs.append(current)
+    if not runs:
+        return text
+    # The longest ascending run is the list; anything else is prose that
+    # happened to contain a number.
+    best = max(runs, key=len)
+    out, at = [], 0
+    for m in best:
+        out.append(text[at:m.start()])
+        at = m.start()
+        out.append("\n")
+    out.append(text[at:])
+    return "".join(out)
+
+
+def steps_from_answer(text: str) -> list:
+    """The steps an agent proposed, and nothing else it said.
+
+    Deliberately conservative, and the reason is asymmetric cost. A missed step
+    means you type one line. An invented step means an agent is told to do
+    something nobody asked for, and it will do it. So this only ever takes lines
+    that are explicitly enumerated, never sentences it thinks look actionable.
+
+    It also refuses rather than guessing: an answer with no list at all returns
+    nothing, and the caller shows you what the agent actually said instead of
+    manufacturing a plan out of prose.
+    """
+    if not text:
+        return []
+    text = _unwrap(text)
+    out, seen = [], set()
+    fenced = False
+    for raw in text.splitlines():
+        # Code blocks are the answer's example, not its plan, and a plan made of
+        # half a diff sent back as a prompt is worse than no plan.
+        if raw.lstrip().startswith("```"):
+            fenced = not fenced
+            continue
+        if fenced or _HEADING.match(raw):
+            continue
+        m = _NUMBERED.match(raw)
+        if not m:
+            continue
+        step = _DECOR.sub("", m.group(1)).strip().rstrip(":")
+        # A question in the list is the agent asking you something, not a step
+        # it can carry out. Sending it back as an instruction is a loop.
+        if step.endswith("?"):
+            continue
+        if len(step) < MIN_STEP_CHARS:
+            continue
+        key = step.lower()[:60]
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(step[:280])
+        if len(out) >= MAX_STEPS:
+            break
+    if out:
+        out[-1] = _trim_tail(out[-1])
+    return out
+
+
+# What an answer says after the list: "Caveats: ...", "Note: ...", "Let me know
+# if ...". Once the line breaks are gone, that tail is glued to the final step,
+# and the final step is the one thing here that gets sent to an agent verbatim.
+_TAIL = re.compile(r"\s+(?=(?:[A-Z][a-z]+:)|(?:Let me know|Once you|Note that))"
+                   r"|(?<=[.!?])\s+(?=[A-Z])")
+
+
+def _trim_tail(step: str) -> str:
+    """Cut the trailing prose off the last step.
+
+    Only the last one can pick it up, and only when the answer arrived
+    flattened. Kept narrow on purpose: a step cut short is something you notice
+    in the approval list and fix, a step with a paragraph of caveats glued on is
+    something an agent tries to carry out."""
+    cut = _TAIL.split(step, 1)[0].strip()
+    return cut if len(cut) >= MIN_STEP_CHARS else step
+
+
+ASK_FOR_PLAN = (
+    "Before you do anything: give me a short numbered plan for this, and do "
+    "not start yet. One line per step, at most {n} steps, each a concrete "
+    "action. No preamble, no code. The task is: {task}")
+
 
 # States a step moves through. `held` is the one that matters: it means the
 # agent wants something from you and everything after it is waiting.

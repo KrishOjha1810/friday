@@ -33,6 +33,7 @@ running agents, so anyone with that link can drive your machine.
 ```
 help                           the short list, works before anything is set up
 what should I work on?         one thing to start with, and why
+work out a plan for <goal>     the agent drafts it, you approve it
 what's on fire?                unresolved errors in production
 what's running?
 who needs me?

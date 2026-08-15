@@ -132,6 +132,7 @@ you are already signed in to.
 | `who am I talking to` | where a bare reply would land |
 | `what should I work on?` | an opinion, ranked by who is blocked, with the reason |
 | `what's on fire?` | unresolved errors in production, worst by people affected |
+| `work out a plan for <goal>` | the agent writes the steps, you approve before any run |
 | `help` | the six commands that work before you connect anything |
 | `file a ticket: the parser dies on PDFs` | Jira, Linear, or GitHub issues with no setup at all |
 | `move PROJ-12 to done` | moves it, matching the states that exist |
@@ -351,12 +352,12 @@ sessions.
    authorized. Slack needed its own app because the hosted MCP has no dynamic
    client registration; Atlassian and Google will have the same shape, so the
    app-building trick generalizes.
-4. **Phase 2, the conductor core.** Both halves exist now. Friday reads your
-   tickets and has an opinion about what to start with, ranked by who is blocked
-   and stated with its reason; and the plan runner takes it from there, one step
-   at a time on evidence, holding when an agent asks something. What Phase 2
-   still lacks is the middle: Friday asking an agent for a plan and turning its
-   answer into steps automatically, rather than you writing the steps.
+4. **Phase 2, the conductor core.** Complete. Friday reads your tickets and has
+   an opinion about what to start with, ranked by who is blocked and stated with
+   its reason. It can ask an agent to work out the plan, since that is the part
+   that needs to know what is actually in the repository, and brings the steps
+   back for you to approve before any of them run. Then the runner takes it one
+   step at a time on evidence, holding when an agent asks something.
 5. **Phase 3, the signature trick.** A plan step that holds until a human replies:
    Friday asks a colleague in Slack, the step releases when they answer. A mailbox
    on the plan runner plus one integration, not new science.
