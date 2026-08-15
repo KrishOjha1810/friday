@@ -226,7 +226,10 @@ def test_a_detail_the_agent_never_mentioned_is_thrown_away():
         out = watchtower.summarise(src)
         assert "report_2024_q3.pdf" not in out, out
         assert "PDF_PARSE_003" not in out, out
-        assert "parser broke on page 3" in out.lower(), out
+        # The grounded sentence SURVIVES now. Throwing the whole summary away
+        # for one bad token cost every true sentence beside it, and fell back to
+        # a blunt truncation of the source.
+        assert "page 3" in out.lower(), out
     finally:
         watchtower.engine = old
 
@@ -289,3 +292,31 @@ if __name__ == "__main__":
         if name.startswith("test_") and callable(fn):
             fn()
     print("ok  watchtower: says it once, says it late enough, urgent first")
+
+
+def test_ordinary_english_is_not_mistaken_for_an_invented_code():
+    """The first version of this check rejected 8 of 10 good summaries: it
+    flagged "e.g.", "HTTP", "JSON", "TODO", a year, and "4096" when the source
+    had written "4,096". Every one of those threw away a perfectly good
+    summary."""
+    src = "The parser broke on page 3 of the PDF. We retried 4,096 times."
+    for good in ("Parser failed on page 3. Retried 4096 times.",
+                 "It broke, e.g. on page 3, per the HTTP JSON TODO.",
+                 "Broke on page 3 of the PDFs."):
+        assert watchtower._invented(good, src) == "", (good,
+                                                       watchtower._invented(good, src))
+
+
+def test_a_small_invented_number_is_caught():
+    """The original check only looked at numbers of three digits or more, so
+    the exact failure in its own docstring escaped whenever the fabricated
+    number was small: page 3 becoming page 7."""
+    src = "The parser broke on page 3 of the PDF."
+    assert watchtower._invented("It broke on page 7.", src) == "7"
+
+
+def test_only_the_unsupported_sentence_is_dropped():
+    src = "The parser broke on page 3 of the PDF."
+    out = watchtower._drop_invented(
+        "It broke on page 3. Use config_v2.yaml to retry.", src)
+    assert "page 3" in out and "config_v2.yaml" not in out, out

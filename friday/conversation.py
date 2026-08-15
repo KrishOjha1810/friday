@@ -1652,7 +1652,14 @@ class Friday:
         # Names, never he or she: these are real colleagues and the messages do
         # not say anyone's pronouns, so guessing gets it wrong about a person.
         RULES = (" Refer to people by name, and never use he, she, his or her."
-                 " Two or three short sentences, no lists.")
+                 " Two or three short sentences, no lists."
+                 # This summarises real colleagues by name, so an invented
+                 # attribution is somebody being told they said something they
+                 # did not. Prevention first, then the same grounding check the
+                 # agent summaries get.
+                 " Every name, file, number and date you write must appear in"
+                 " the messages themselves. Do not add a person, a commitment,"
+                 " a date or a number the messages do not state.")
         task = ("Summarise this chat for someone who has not read it. Say who is "
                 "asking what, and what they need. Only use what is in the "
                 "messages." + RULES)
@@ -1675,7 +1682,17 @@ class Friday:
             [{"role": "system", "content": task},
              {"role": "user", "content": convo[:4000]}],
             timeout=engine.brain.TIMEOUT_SLOW, max_tokens=180)
-        return engine.brain._clean(out) if out else convo[:600]
+        out = engine.brain._clean(out) if out else ""
+        if out:
+            # The same grounding as an agent summary. This one had none at all,
+            # and it is the one that puts words in a colleague's mouth.
+            from . import watchtower
+            bad = watchtower._invented(out, convo)
+            if bad:
+                engine.log(f"friday: unsupported specific in a thread "
+                           f"summary ({bad})")
+                out = watchtower._drop_invented(out, convo)
+        return out or convo[:600]
 
     def _engine(self) -> dict:
         """What is actually doing the work, stated plainly.

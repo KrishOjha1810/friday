@@ -149,10 +149,27 @@ def latest() -> dict:
 
 
 def next_step(plan: dict) -> dict:
+    """The step to run now: the one that HELD, or the first not yet started.
+
+    Returning only PENDING steps meant resuming a held plan silently skipped the
+    very step that stopped it. The module's first rule is "stop, do not skip",
+    and the resume path did exactly the thing the rule forbids: you answered the
+    question and the answer went nowhere, while the plan carried on from the
+    step after it."""
     for s in plan.get("steps", []):
-        if s["state"] == PENDING:
+        if s["state"] in (HELD, PENDING):
             return s
     return {}
+
+
+def unfinished(plan: dict) -> list:
+    """Steps that were in flight when something stopped, and are therefore of
+    unknown outcome.
+
+    A step left RUNNING by a crash is not pending and not done. Treating it as
+    neither, the old code skipped it and then announced the plan finished, for a
+    plan in which one step may never have run at all."""
+    return [s for s in plan.get("steps", []) if s["state"] == RUNNING]
 
 
 def describe(plan: dict) -> str:
@@ -183,6 +200,7 @@ class Runner:
     make Friday unresponsive for an hour."""
 
     POLL = 3.0
+    SETTLE = 4.0              # an agent answers in stages; wait for the last one
     STEP_TIMEOUT = 900        # 15 minutes on one step, then hold and say so
 
     def __init__(self, announce, send, look, log=None):
@@ -218,6 +236,20 @@ class Runner:
                     return
                 step = next_step(plan)
                 if not step:
+                    stuck = unfinished(plan)
+                    if stuck:
+                        # Something stopped while this was in flight, so nobody
+                        # knows whether it ran. Saying "all done" here is the
+                        # worst available answer: it is a claim about work that
+                        # may not exist.
+                        set_plan(plan_id, HELD)
+                        which = ", ".join(str(s["seq"] + 1) for s in stuck)
+                        self.announce(
+                            f"Plan {plan['title']} stopped with step {which} "
+                            f"already sent, so I don't know whether it "
+                            f"finished. Check that one and say \"run the "
+                            f"plan\" to carry on.")
+                        return
                     set_plan(plan_id, DONE)
                     self.announce(f"Plan finished: {plan['title']}. All "
                                   f"{len(plan['steps'])} steps done.")
@@ -247,6 +279,7 @@ class Runner:
             return False
 
         end = time.time() + self.STEP_TIMEOUT
+        settled_at, last_seen = 0.0, mark
         while time.time() < end and not self._stop.is_set():
             time.sleep(self.POLL)
             live = self.look(sid) or {}
@@ -263,9 +296,17 @@ class Runner:
                 return False
             if path:
                 said = replies.last_said(path)
-                if said and said[:200] != mark and live.get("status") != "working":
-                    set_step(step["id"], DONE, said[:300])
-                    return True
+                if said and said[:200] != mark:
+                    # Wait for it to STOP talking, the same way the watchtower
+                    # and wait_for_reply already do. Without this, an agent's
+                    # first "Let me look at that" completes the step and the
+                    # next one is sent on top of work still in progress.
+                    if said != last_seen:
+                        last_seen, settled_at = said, time.time()
+                    elif (time.time() - settled_at >= self.SETTLE
+                          and live.get("status") != "working"):
+                        set_step(step["id"], DONE, said[:300])
+                        return True
         if self._stop.is_set():
             return False
         set_step(step["id"], HELD, "no answer in fifteen minutes")

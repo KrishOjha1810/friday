@@ -68,7 +68,7 @@ def test_steps_run_one_at_a_time_and_in_order():
         pid = plans.create("ordered", "api", ["one", "two", "three"], sid="s")
         r = plans.Runner(announce=lambda *a, **k: None, send=send,
                          look=lambda sid: state)
-        r.POLL = 0.05
+        r.POLL, r.SETTLE = 0.05, 0.1
         r.start(pid)
         for _ in range(100):
             if plans.get(pid)["state"] == plans.DONE:
@@ -89,7 +89,7 @@ def test_a_step_is_not_done_because_it_was_sent():
         r = plans.Runner(announce=lambda *a, **k: None,
                          send=lambda sid, t: sent.append(t) or True,
                          look=lambda sid: state)
-        r.POLL, r.STEP_TIMEOUT = 0.05, 1.0
+        r.POLL, r.SETTLE, r.STEP_TIMEOUT = 0.05, 0.1, 1.0
         r.start(pid)
         time.sleep(0.5)
         assert sent == ["one"], "moved on before the agent answered"
@@ -113,7 +113,7 @@ def test_a_question_stops_the_plan_rather_than_being_ignored():
         pid = plans.create("asks", "api", ["one", "two", "three"], sid="s")
         r = plans.Runner(announce=lambda t, items=None: said.append(t),
                          send=send, look=lambda sid: state)
-        r.POLL = 0.05
+        r.POLL, r.SETTLE = 0.05, 0.1
         r.start(pid)
         time.sleep(0.6)
         assert sent == ["one"], f"kept going past a question: {sent}"
@@ -130,7 +130,7 @@ def test_an_unreachable_session_pauses_instead_of_pretending():
         pid = plans.create("dead", "api", ["one", "two"], sid="s")
         r = plans.Runner(announce=lambda t, items=None: said.append(t),
                          send=lambda sid, t: False, look=lambda sid: state)
-        r.POLL = 0.05
+        r.POLL, r.SETTLE = 0.05, 0.1
         r.start(pid)
         time.sleep(0.4)
         assert plans.get(pid)["state"] == plans.HELD
@@ -146,7 +146,7 @@ def test_a_silent_agent_holds_the_plan_and_says_so():
         pid = plans.create("quiet", "api", ["one", "two"], sid="s")
         r = plans.Runner(announce=lambda t, items=None: said.append(t),
                          send=lambda sid, t: True, look=lambda sid: state)
-        r.POLL, r.STEP_TIMEOUT = 0.05, 0.3
+        r.POLL, r.SETTLE, r.STEP_TIMEOUT = 0.05, 0.1, 0.3
         r.start(pid)
         time.sleep(0.9)
         assert plans.get(pid)["state"] == plans.HELD
@@ -167,3 +167,74 @@ if __name__ == "__main__":
         if name.startswith("test_") and callable(fn):
             fn()
     print("ok  plan: in order, one at a time, and it stops when asked a question")
+
+
+# ---- the three that a reading of the code found, none of which had a test ----
+
+def test_resuming_a_held_plan_re_enters_the_step_that_held():
+    """The module's first rule is "stop, do not skip", and the resume path did
+    exactly what the rule forbids: it returned the step AFTER the held one, so
+    you answered the question and the answer went nowhere."""
+    pid = plans.create("held", "api", ["one", "two", "three"], sid="s")
+    p = plans.get(pid)
+    plans.set_step(p["steps"][0]["id"], plans.DONE)
+    plans.set_step(p["steps"][1]["id"], plans.HELD, "Should I force-push?")
+    nxt = plans.next_step(plans.get(pid))
+    assert nxt["seq"] == 1, f"resumed at step {nxt['seq'] + 1}, skipping the held one"
+    assert nxt["text"] == "two"
+
+
+def test_a_step_caught_by_a_crash_is_not_counted_as_done():
+    """A step left RUNNING when the process died is of unknown outcome. The old
+    code skipped it and then announced the plan finished, which is a claim about
+    work that may never have happened."""
+    pid = plans.create("crashed", "api", ["one", "two"], sid="s")
+    p = plans.get(pid)
+    plans.set_step(p["steps"][0]["id"], plans.RUNNING)
+    plans.set_step(p["steps"][1]["id"], plans.DONE)
+    stuck = plans.unfinished(plans.get(pid))
+    assert [s["seq"] for s in stuck] == [0], stuck
+
+    said = []
+    r = plans.Runner(announce=lambda t, items=None: said.append(t),
+                     send=lambda sid, t: True,
+                     look=lambda sid: {"status": "idle", "question": "",
+                                       "path": ""})
+    r.POLL = 0.05
+    r.start(pid)
+    time.sleep(0.5)
+    assert plans.get(pid)["state"] != plans.DONE, "claimed a crashed plan finished"
+    assert any("don't know whether it" in s for s in said), said
+
+
+def test_a_step_is_not_finished_by_the_agent_clearing_its_throat():
+    """An agent answers in stages. Without a settle, "Let me look at that"
+    completes the step and the next prompt lands on work still in progress. The
+    codebase had already learned this twice elsewhere and not here."""
+    import json
+    import tempfile
+    with tempfile.TemporaryDirectory() as d:
+        path = Path(d) / "s.jsonl"
+
+        def append(text):
+            with open(path, "a") as f:
+                f.write(json.dumps({"type": "assistant", "message": {"content": [
+                    {"type": "text", "text": text}]}}) + "\n")
+
+        append("older")
+        state = {"status": "idle", "question": "", "path": str(path)}
+        sent = []
+        pid = plans.create("staged", "api", ["one", "two"], sid="s")
+
+        def send(sid, text):
+            sent.append(text)
+            append("Let me look at that")
+            return True
+
+        r = plans.Runner(announce=lambda *a, **k: None, send=send,
+                         look=lambda sid: state)
+        r.POLL, r.SETTLE = 0.05, 1.5
+        r.start(pid)
+        time.sleep(0.6)
+        assert sent == ["one"], f"moved on while it was still talking: {sent}"
+        r.stop()

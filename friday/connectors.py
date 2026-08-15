@@ -516,14 +516,15 @@ class Slack:
         return out
 
     def _name_users(self, rows: list) -> list:
-        """Swap user ids for real names: 'U03AB' means nothing spoken aloud."""
+        """Swap user ids for real names: 'U03AB' means nothing spoken aloud.
+
+        Through the same cache its sibling uses. Without it this re-fetched up
+        to twenty users.info per channel per poll: across 25 channels every 45
+        seconds that is 500 calls a minute against a limit of 100, so the
+        inbox would have been throttled into uselessness by its own politeness
+        in naming people."""
         ids = {r["who"] for r in rows if r["who"].startswith("U")}
-        names = {}
-        for uid in list(ids)[:20]:
-            d = self._call("users.info", user=uid)
-            if d.get("ok"):
-                u = d.get("user", {})
-                names[uid] = (u.get("real_name") or u.get("name") or uid)
+        names = self._user_names(list(ids)[:20])
         for r in rows:
             r["who"] = names.get(r["who"], r["who"])
         return rows
