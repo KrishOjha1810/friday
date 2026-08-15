@@ -30,7 +30,7 @@ import time
 from pathlib import Path
 
 from . import (actions, connectors, engine, feeds, fleetcache, inbox,
-               memory, nearest, replies, watchtower, when)
+               memory, nearest, push, replies, watchtower, when)
 
 # What kind of thing the user just said.
 ASK_FLEET = "fleet"        # "what's running", "who needs me"
@@ -493,6 +493,12 @@ class Friday:
         # making you say the name every time is making you do the bookkeeping.
         self.target = ""
         self.quiet = False         # Friday's own switch, independent of vb's
+        # Whether you are looking at the page. Pushing to a phone something
+        # already on the screen in front of you is how a notification
+        # permission gets revoked, and there is no second chance at that.
+        self.watching = False
+        self.watching_at = 0.0
+        self._pushed = {}          # tag -> when, so one thing buzzes once
         # One place watches every session and reports what it said, so nothing
         # is announced twice and nothing is missed.
         self.watch = watchtower.Watchtower(
@@ -725,6 +731,43 @@ class Friday:
             q = "What are you working on right now?"
         return ("Answer in one or two sentences, no tool calls if you can help "
                 "it: " + q + "?" if not q.endswith("?") else q)
+
+    # Things that are worth a locked phone lighting up. Everything else can
+    # wait until you look, and a phone that buzzes for everything gets muted.
+    PUSH_KINDS = ("blocked", "slack")
+
+    def at_the_page(self) -> bool:
+        """Whether you were looking at Friday in the last half minute."""
+        return bool(self.watching and time.time() - self.watching_at < 30)
+
+    def _maybe_push(self, text: str, items: list) -> None:
+        """Send this to the phone, or decide not to, and be strict about it.
+
+        Four gates, all of which have to pass. Quiet means quiet. Something you
+        are already reading is not news. Only things that need YOU, not every
+        agent finishing a thought. And each thing once, however many times it is
+        mentioned."""
+        try:
+            if self.quiet or self.at_the_page():
+                return
+            kinds = {(i or {}).get("kind", "") for i in (items or [])}
+            if not (kinds & set(self.PUSH_KINDS)):
+                return
+            label = ""
+            for i in (items or []):
+                label = (i or {}).get("label") or label
+            tag = (label or "friday").lower()
+            now = time.time()
+            # Same source, same minute: one buzz. An agent that repeats itself
+            # must not become a phone that repeats itself.
+            if now - self._pushed.get(tag, 0) < 60:
+                return
+            self._pushed[tag] = now
+            title = f"{label} needs you" if label else "Friday"
+            body = text.split("\n")[0][:200]
+            push.send_async(title, body, tag=tag)
+        except Exception:
+            pass
 
     def _hush(self, on: bool) -> bool:
         """Go quiet, or stop being quiet. Reports whether it took effect.
@@ -1918,6 +1961,8 @@ class Friday:
         "stop what a session is doing (say: stop <name>)",
         "tell you, unprompted, whenever any session replies, summarised, with "
         "the ones waiting on you first",
+        "send an alert to your phone when something needs you, even with the "
+        "page closed and the phone locked (tap the bell to turn it on)",
         "give you a session's exact words instead of the summary (say: say more)",
         "tell you which session a bare reply would reach (say: who am I "
         "talking to)",
@@ -2235,6 +2280,7 @@ class Friday:
         # to naming a session you were just told about.
         if items and len(items) == 1:
             self.target = items[0].get("label") or self.target
+        self._maybe_push(text, items)
         return self.add("friday", text, kind="proactive")
 
 

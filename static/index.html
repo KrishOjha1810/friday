@@ -171,6 +171,13 @@
   @media (prefers-reduced-motion:reduce){
     *{animation:none !important; transition:none !important}
   }
+
+/* The bell has to read as ON or OFF at a glance: an icon that looks the same
+   either way is why the old speaker toggle was reported as broken. */
+.btn.bell .slash { opacity: 1; }
+body[data-push="on"] .btn.bell { color: var(--accent, #5eead4); border-color: currentColor; }
+body[data-push="on"] .btn.bell .slash { opacity: 0; }
+body[data-push="off"] .btn.bell { opacity: .72; }
 </style>
 </head>
 <body data-call="off" data-mode="idle">
@@ -181,6 +188,14 @@
     <h1 class="name">Friday</h1>
     <span class="state" id="state">idle</span>
     <span class="grow"></span>
+    <button class="btn bell" id="bellBtn" title="Get alerts when this is closed">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"
+           stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/>
+        <path d="M13.7 21a2 2 0 0 1-3.4 0"/>
+        <line class="slash" x1="3" y1="3" x2="21" y2="21"/>
+      </svg>
+    </button>
     <button class="btn call" id="callBtn">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"
            stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
@@ -587,6 +602,104 @@ document.addEventListener('click', function once(){
   }catch(e){}
   connect();
 })();
+
+/* ---- alerts on a locked phone ------------------------------------------
+   Everything else here assumes a tab is open on a machine you are sitting at.
+   This is the part that reaches you when it is not. */
+const bellBtn = $('bellBtn');
+let pushOn = false;
+
+/* A line from Friday that is NOT a reply: say() would send it as a prompt. */
+function notice(text){ turn('friday', text); }
+
+function paintBell(){
+  document.body.dataset.push = pushOn ? 'on' : 'off';
+  bellBtn.title = pushOn ? 'Alerts on. Tap to turn off.'
+                         : 'Get alerts when this is closed';
+}
+
+async function pushState(){
+  if(!('serviceWorker' in navigator) || !('PushManager' in window)) return null;
+  try{
+    const reg = await navigator.serviceWorker.getRegistration();
+    if(!reg) return null;
+    return await reg.pushManager.getSubscription();
+  }catch(e){ return null; }
+}
+
+function b64ToBytes(b64){
+  const pad = '='.repeat((4 - b64.length % 4) % 4);
+  const raw = atob((b64 + pad).replace(/-/g, '+').replace(/_/g, '/'));
+  return Uint8Array.from([...raw].map(c => c.charCodeAt(0)));
+}
+
+async function enablePush(){
+  if(!('serviceWorker' in navigator) || !('PushManager' in window)){
+    notice('This browser cannot do alerts. On an iPhone, add Friday to your home '
+        + 'screen first, then turn alerts on from there.');
+    return;
+  }
+  try{
+    /* Registered at the ROOT scope: a worker only controls pages at or below
+       its own path, so /static/sw.js would control nothing. */
+    const reg = await navigator.serviceWorker.register(U('/sw.js'),
+                                                       {scope: '/'});
+    const perm = await Notification.requestPermission();
+    if(perm !== 'granted'){
+      notice('Alerts stayed off. Nothing changes until you allow them.');
+      return;
+    }
+    const {key} = await (await fetch(U('/push/key'))).json();
+    const sub = await reg.pushManager.subscribe({
+      userVisibleOnly: true,
+      applicationServerKey: b64ToBytes(key),
+    });
+    await fetch(U('/push/subscribe'), {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({subscription: sub.toJSON()}),
+    });
+    pushOn = true; paintBell();
+    notice('Alerts are on. I will only buzz you for things that actually need '
+        + 'you, and never while you are looking at this page.');
+  }catch(e){
+    notice('I could not turn alerts on: ' + (e && e.message ? e.message : e)
+        + '. Alerts need a secure connection, so over https or Tailscale '
+        + 'rather than a plain address.');
+  }
+}
+
+async function disablePush(){
+  const sub = await pushState();
+  if(sub){
+    try{
+      await fetch(U('/push/unsubscribe'), {
+        method: 'POST', headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({endpoint: sub.endpoint}),
+      });
+      await sub.unsubscribe();
+    }catch(e){ /* the server copy is gone either way */ }
+  }
+  pushOn = false; paintBell();
+  notice('Alerts off.');
+}
+
+bellBtn.addEventListener('click', () => pushOn ? disablePush() : enablePush());
+
+/* Tell Friday whether you are actually looking, so it never pushes something
+   that is already on the screen in front of you. */
+function reportPresence(){
+  const visible = document.visibilityState === 'visible' && document.hasFocus();
+  fetch(U('/here'), {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({visible}),
+  }).catch(() => {});
+}
+document.addEventListener('visibilitychange', reportPresence);
+window.addEventListener('focus', reportPresence);
+window.addEventListener('blur', reportPresence);
+setInterval(reportPresence, 15000);
+
+pushState().then(sub => { pushOn = !!sub; paintBell(); reportPresence(); });
 </script>
 </body>
 </html>

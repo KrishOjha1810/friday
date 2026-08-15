@@ -169,6 +169,22 @@ class Handler(BaseHTTPRequestHandler):
                 return
             self._send(200, html, "text/html; charset=utf-8")
             return
+        if path == "/sw.js":
+            # Served from the root, not /static/, because a worker can only
+            # control pages at or below its own path. From /static/sw.js it
+            # would control nothing and push would silently never arrive.
+            try:
+                body = (STATIC / "sw.js").read_bytes()
+            except Exception as e:
+                self._send(500, f"sw missing: {e}".encode(), "text/plain")
+                return
+            self._send(200, body, "application/javascript")
+            return
+        if path == "/push/key":
+            from . import push as _push
+            self._json({"key": _push.public_key(),
+                        "subscribed": len(_push.subscriptions())})
+            return
         if path == "/state":
             self._json({"fleet": _fleet_rows(), "engine": engine.status(),
                         "quiet": (engine.attention.is_quiet()
@@ -230,6 +246,30 @@ class Handler(BaseHTTPRequestHandler):
             self._json({"ok": True})
             return
 
+        if path == "/push/subscribe":
+            from . import push as _push
+            ok = _push.subscribe(as_json().get("subscription") or {})
+            self._json({"ok": bool(ok)})
+            return
+        if path == "/push/unsubscribe":
+            from . import push as _push
+            _push.unsubscribe((as_json().get("endpoint") or ""))
+            self._json({"ok": True})
+            return
+        if path == "/push/test":
+            from . import push as _push
+            n = _push.send("Friday", "Push is working. This is what an alert "
+                                     "looks like.", tag="test")
+            self._json({"sent": n, "subscribers": len(_push.subscriptions())})
+            return
+        if path == "/here":
+            # The page says whether you are looking at it. Pushing something to
+            # your phone that is already on the screen in front of you is how a
+            # notification permission gets revoked.
+            _friday.watching = bool(as_json().get("visible"))
+            _friday.watching_at = time.time()
+            self._json({"ok": True})
+            return
         if path == "/quiet":
             on = bool(as_json().get("on"))
             if engine.AVAILABLE:
