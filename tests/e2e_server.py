@@ -109,6 +109,19 @@ def _install():
     C.actions.interrupt_session = lambda sid: True
 
 
+def _announce_a_slack_message(friday):
+    """One message from a person, so the browser can exercise the panel that
+    turns a message into work."""
+    import threading as _t
+
+    def later():
+        time.sleep(2.5)
+        friday.watch.announce(
+            "Sam in #eng: can you send the overview by Thursday?",
+            items=[{"sid": "", "label": "#eng", "kind": "slack"}])
+    _t.Thread(target=later, daemon=True).start()
+
+
 def main():
     _install()
     from friday import server
@@ -119,6 +132,7 @@ def main():
     server.LOCAL_ONLY = True
     threading.Thread(target=lambda: server.run(port), daemon=True).start()
     time.sleep(1.5)
+    _announce_a_slack_message(server._friday)
     print(f"READY http://127.0.0.1:{port}/?k={server.SECRET}", flush=True)
     while True:
         time.sleep(1)

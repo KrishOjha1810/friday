@@ -634,8 +634,15 @@ class Friday:
                       if engine.AVAILABLE else {"mentioned": [], "ts": 0})
 
     # ---- the thread -------------------------------------------------------
-    def add(self, role: str, text: str, kind: str = "") -> dict:
+    def add(self, role: str, text: str, kind: str = "",
+            about: list = None) -> dict:
         msg = {"role": role, "text": text, "ts": time.time(), "kind": kind}
+        # What the announcement is ABOUT travels with it, so the page can offer
+        # the right thing to do. Without this an announcement is a sentence you
+        # can read and not act on, which is the dashboard Friday exists not to
+        # be.
+        if about:
+            msg["about"] = about[:4]
         self.history.append(msg)
         self.history = self.history[-400:]
         return msg
@@ -2767,7 +2774,7 @@ class Friday:
         if items and len(items) == 1:
             self.target = items[0].get("label") or self.target
         self._maybe_push(text, items)
-        return self.add("friday", text, kind="proactive")
+        return self.add("friday", text, kind="proactive", about=items)
 
 
 def _cwd_for(transcript_path: str) -> str:

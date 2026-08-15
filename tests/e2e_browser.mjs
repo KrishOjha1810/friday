@@ -143,6 +143,28 @@ await check('answering from the panel reaches that session', async () => {
          `what got sent was: ${said.slice(-120)}`);
 });
 
+await check('a message from a person can be acted on, not just read', async () => {
+  // An announcement you can read and cannot act on is the dashboard this
+  // product exists not to be.
+  await page.waitForSelector('.bub .act', { timeout: 15000 });
+  const label = await page.textContent('.bub .act');
+  assert(/reply|answer|something/i.test(label), `the action said "${label}"`);
+});
+
+await check('it offers the verbs that turn a message into work', async () => {
+  await page.click('.bub .act');
+  await page.waitForSelector('#peek:not([hidden])', { timeout: 5000 });
+  const verbs = await page.$$eval('#peekSuggest button', els =>
+    els.map(e => e.textContent));
+  for (const want of ['Draft a reply', 'File a ticket']) {
+    assert(verbs.some(v => v.includes(want)), `${want} missing from ${verbs}`);
+  }
+  const asked = await page.textContent('#peekAsk');
+  assert(/Thursday/.test(asked), `the panel showed "${asked}"`);
+  await page.keyboard.press('Escape');
+  await page.waitForSelector('#peek', { state: 'hidden', timeout: 3000 });
+});
+
 await check('the alerts bell shows on or off distinctly', async () => {
   const before = await page.getAttribute('body', 'data-push');
   assert(before === 'off' || before === 'on',

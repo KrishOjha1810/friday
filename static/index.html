@@ -260,6 +260,16 @@ body[data-push="off"] .btn.bell { opacity: .72; }
 .firstrun button:hover { border-color: rgba(255,255,255,.14);
                          background: rgba(255,255,255,.03); }
 .firstrun em { font-style: normal; font-size: 12px; opacity: .55; }
+
+/* The thing that turns a report into something you can act on. Quiet until you
+   look at it: an announcement is still mostly a sentence. */
+.bub .act { display: block; margin-top: 8px; font: inherit; font-size: 12px;
+    color: inherit; opacity: .6; cursor: pointer; text-align: left;
+    background: none; border: 0; padding: 0; text-decoration: underline;
+    text-underline-offset: 3px; }
+.bub .act:hover { opacity: 1; color: var(--accent, #5eead4); }
+.bub .act:focus-visible { outline: 2px solid var(--accent, #5eead4);
+                          outline-offset: 2px; opacity: 1; }
 </style>
 </head>
 <body data-call="off" data-mode="idle">
@@ -415,6 +425,16 @@ function turn(who, text, opts){
      Built with createTextNode + createElement, never innerHTML, so a message
      can never inject markup into the page. */
   linkify(b, text);
+  /* An announcement you can read and not act on is the dashboard this product
+     exists not to be. If Friday told us what it was about, offer the things
+     that can be done about it. */
+  if(opts.about && opts.about.length){
+    const act = document.createElement('button');
+    act.className = 'act';
+    act.textContent = actionLabel(opts.about[0]);
+    act.onclick = e => { e.stopPropagation(); openAbout(opts.about[0], text); };
+    b.appendChild(act);
+  }
   t.appendChild(b); thread.appendChild(t);
   if(!atBottom() && who !== 'you') bumpUnread(opts.first);
   if(atBottom()) thread.scrollTop = thread.scrollHeight;
@@ -646,7 +666,10 @@ input.addEventListener('keydown', e => {
 });
 
 /* ---- fleet ------------------------------------------------------------- */
+let lastFleet = [];
+
 function renderFleet(rows){
+  lastFleet = rows || [];
   const el = $('fleet'); el.textContent = '';
   if(!rows || !rows.length){
     const c = document.createElement('span');
@@ -704,7 +727,56 @@ function suggestionsFor(q){
   return out.slice(0, 4);
 }
 
+function actionLabel(about){
+  const k = (about && about.kind) || '';
+  if(k === 'slack') return 'Reply, or make it work';
+  if(k === 'blocked') return 'Answer it';
+  return 'Do something about this';
+}
+
+/* One panel, two shapes. An agent asking a question needs an answer box; a
+   message from a person needs the verbs that turn a message into work. */
+function openAbout(about, text){
+  const kind = (about && about.kind) || '';
+  if(kind === 'blocked' && about.sid){
+    const row = (lastFleet || []).find(r => r.sid === about.sid);
+    if(row) return openPeek(row);
+  }
+  peeking = null;
+  $('peekName').textContent = about.label || 'this';
+  $('peekState').textContent = kind === 'slack' ? 'from a person' : '';
+  $('peekDot').className = 'd ' + (kind === 'blocked' ? 'needs' : 'idle');
+  $('peekAsk').textContent = text.split('\n')[0].slice(0, 240);
+  const box = $('peekSuggest'); box.textContent = '';
+  const verbs = kind === 'slack'
+    ? [['Draft a reply', 'draft a reply'],
+       ['File a ticket', 'file a ticket'],
+       ['Put it in the calendar', 'schedule a meeting'],
+       ['Ask a session about it', null]]
+    : [['What did I miss', 'what did I miss'],
+       ['Brief me', 'brief me']];
+  verbs.forEach(([label, cmd]) => {
+    const b = document.createElement('button');
+    b.textContent = label;
+    b.onclick = () => {
+      closePeek();
+      if(cmd) say(cmd);
+      else { input.value = 'ask '; input.focus(); }
+    };
+    box.appendChild(b);
+  });
+  $('peekReply').placeholder = kind === 'slack'
+    ? 'Say what the reply should say' : 'Say something about this';
+  $('peekReply').value = '';
+  aboutMode = about;
+  $('peek').hidden = false;
+  setTimeout(() => $('peekReply').focus(), 30);
+}
+
+let aboutMode = null;
+
 function openPeek(row){
+  aboutMode = null;
   peeking = row;
   $('peekName').textContent = row.label || 'session';
   $('peekState').textContent = row.status === 'needs' ? 'waiting on you'
@@ -728,9 +800,16 @@ function openPeek(row){
 function closePeek(){ $('peek').hidden = true; peeking = null; }
 
 function sendPeek(text){
-  const row = peeking;
   const msg = (text !== undefined ? text : $('peekReply').value).trim();
-  if(!row || !msg) return;
+  if(!msg) return;
+  if(!peeking && aboutMode){
+    // A message from a person: what you type is what the reply should say.
+    closePeek();
+    say((aboutMode.kind === 'slack' ? 'draft a reply saying ' : '') + msg);
+    return;
+  }
+  const row = peeking;
+  if(!row) return;
   closePeek();
   /* One line, not a re-run of the whole question: an ask that has been answered
      should collapse to what you decided. */
@@ -781,7 +860,8 @@ function connect(){
         .then(st => paintTarget(st.target || '')).catch(() => {});
     }
     if(d.kind === 'message' && d.message){
-      turn('friday', d.message.text, {first: d.message.kind === 'proactive'});
+      turn('friday', d.message.text, {first: d.message.kind === 'proactive',
+                                      about: d.message.about});
       if(inCall || speakBack) speak(d.message.text, false);
       if(document.hidden) notify(d.message.text);
     }
@@ -803,7 +883,8 @@ document.addEventListener('click', function once(){
     paintTarget(s.target || '');
     setTimeout(maybeFirstRun, 60);
     (s.history || []).forEach(m => turn(m.role === 'user' ? 'you' : 'friday',
-                                        m.text, {first: m.kind === 'proactive'}));
+                                        m.text, {first: m.kind === 'proactive',
+                                                 about: m.about}));
     if(!s.engine.voicebridge)
       turn('friday', "I can't see voicebridge, so I'm half blind: " + s.engine.reason);
     else if(!s.engine.brain)
