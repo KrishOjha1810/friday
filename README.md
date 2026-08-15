@@ -39,8 +39,11 @@ because of a specific failure rather than a preference:
   it contains a file, code or number that was never there.
 - **[`friday/nearest.py`](friday/nearest.py)** decides whether a heard name is a
   match. Three outcomes, never two: act on a clear one, ask about a plausible
-  one, and otherwise say what exists. A pronoun resolves from context and never
-  by sound, because "it" scores 0.8 against a session called "api".
+  one, and otherwise say what exists. It scores with Jaro-Winkler plus a
+  phonetic code rather than a general string ratio, which is measured in
+  [`tests/test_matching.py`](tests/test_matching.py) against every mishearing
+  this project has really produced: 18 of 19 with no false matches, against 16
+  and one for the ratio it replaced.
 - **[`friday/plan.py`](friday/plan.py)** runs a multi-step plan one step at a
   time, advancing only when the agent has actually replied. A question mid-plan
   holds everything, because running the next step past it is answering it by
@@ -65,6 +68,7 @@ and says so rather than failing oddly:
 ```
 pip3 install --user cryptography                 # phone alerts
 pip3 install --user pyobjc-framework-EventKit    # calendar
+pip3 install --user jellyfish                    # phonetic name matching
 ```
 
 ```
