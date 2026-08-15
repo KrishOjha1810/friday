@@ -124,17 +124,19 @@ class Feeds:
                     self.budget.hold(it.get("text", ""), it.get("source", ""))
             return
         fresh.sort(key=lambda it: (it.get("urgency", 1), it.get("key")))
-        said, rest = 0, []
+        said, rest, batch = 0, [], []
         for it in fresh:
             self.seen.add(it["key"])
             urgency = it.get("urgency", 1)
             spendable = (self.budget.allow(urgency) if self.budget
                          else said < PER_ROUND)
             if said < PER_ROUND and spendable:
-                self._say(it)
+                batch.append(it)
                 said += 1
             else:
                 rest.append(it)
+        if batch:
+            self._say_all(batch)
         for it in rest:
             # HELD, not dropped. The line below promises a list; it has to
             # exist.
@@ -157,6 +159,25 @@ class Feeds:
             return bool(engine.attention.is_quiet())
         except Exception:
             return False
+
+    def _say_all(self, items: list) -> None:
+        """One utterance for one moment, however many things arrived in it."""
+        if len(items) == 1:
+            self._say(items[0])
+            return
+        from .budget import compose
+        lines = []
+        for it in items:
+            text = it.get("text", "")
+            offers = it.get("offers") or []
+            lines.append(text + ("  " + ", ".join(offers) if offers else ""))
+        top = min(items, key=lambda i: i.get("urgency", 1))
+        self.announce(compose(lines),
+                      items=[{"sid": i.get("sid", ""),
+                              "label": i.get("source", ""),
+                              "kind": ("blocked" if i.get("urgency") == 0
+                                       else i.get("source", ""))}
+                             for i in items[:1]] or None)
 
     def _say(self, item: dict) -> None:
         text = item.get("text", "")

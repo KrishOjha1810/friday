@@ -97,3 +97,30 @@ if __name__ == "__main__":
         if name.startswith("test_") and callable(fn):
             fn()
     print("ok  budget: one allowance, urgent exempt, nothing thrown away")
+
+
+def test_a_moment_becomes_one_utterance():
+    """Three arrivals in the same moment were three separate interruptions,
+    which costs three times the attention for one moment's worth of news."""
+    out = budgets.compose(["api is asking: force-push?",
+                           "jobhunt says: 4 postings scored",
+                           "GitHub: 1 workflow failing"])
+    assert out.startswith("3 things:"), out
+    assert out.count("\n") == 3, out
+    for want in ("force-push", "postings", "workflow"):
+        assert want in out, out
+
+
+def test_one_thing_is_said_as_itself():
+    """Wrapping a single item in "1 things:" would be worse than not merging."""
+    assert budgets.compose(["api says: done"]) == "api says: done"
+
+
+def test_merging_never_alters_what_was_going_to_be_said():
+    """Deliberately not clever: no summarising, no reordering, no dropping, so
+    nothing can be lost or changed by the merge itself."""
+    lines = ["first thing exactly as written",
+             "second thing with a number 4096 in it"]
+    out = budgets.compose(lines)
+    for original in lines:
+        assert original in out, out

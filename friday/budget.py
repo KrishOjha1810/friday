@@ -95,3 +95,26 @@ class Budget:
     def waiting(self) -> int:
         with self._lock:
             return len(self._held)
+
+
+def compose(lines: list) -> str:
+    """Several things into one utterance.
+
+    Three arrivals in the same moment were three separate interruptions, which
+    costs three times the attention for one moment's worth of news. Merging is
+    the cheapest saving available here, and it is the shape voicebridge's own
+    attention engine settled on.
+
+    Deliberately not clever: no summarising, no reordering, no dropping. It
+    joins what was already going to be said, so nothing can be lost or altered
+    in the merge."""
+    rows = [l.strip() for l in lines if l and l.strip()]
+    if not rows:
+        return ""
+    if len(rows) == 1:
+        return rows[0]
+    # Numbered, because "and also" three times is harder to follow than a list,
+    # and because the count itself is information: two things or five is the
+    # difference between reading now and reading later.
+    body = "\n".join(f"{i + 1}. {r}" for i, r in enumerate(rows))
+    return f"{len(rows)} things:\n{body}"

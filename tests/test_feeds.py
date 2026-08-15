@@ -72,7 +72,8 @@ def test_the_urgent_one_comes_first():
     f, said = _feeds()
     f.add("s", src, period=0)
     f._collect()
-    assert said[0].startswith("needs-you"), said
+    # Merged into one utterance, but the order inside it still matters.
+    assert "1. needs-you" in said[0], said[0]
 
 
 def test_a_flood_is_capped_and_what_was_held_back_is_admitted():
@@ -82,7 +83,11 @@ def test_a_flood_is_capped_and_what_was_held_back_is_admitted():
     f, said = _feeds()
     f.add("s", src, period=0)
     f._collect()
-    assert len(said) == feeds.PER_ROUND + 1, said
+    # One utterance for one moment, plus the note about what was held. Three
+    # arrivals used to be three separate interruptions, which costs three times
+    # the attention for one moment's worth of news.
+    assert len(said) == 2, said
+    assert said[0].startswith(f"{feeds.PER_ROUND} things:"), said[0]
     assert "more I haven't read out" in said[-1], said[-1]
     assert "needing you" in said[-1], said[-1]
 
