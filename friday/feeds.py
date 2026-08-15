@@ -61,11 +61,11 @@ class Feeds:
         if self._started:
             return
         self._started = True
-        # Everything present at startup is history, not news.
-        try:
-            self._collect(prime=True)
-        except Exception as e:
-            self._log(f"friday feeds prime: {e}")
+        # Prime on the loop's own thread, not here. Priming asks every source
+        # what it has, which shells out to `gh`, scans your repos and wakes
+        # Calendar: measured at 3.2 seconds, and it was happening BEFORE the
+        # server bound its port, so the page could not load until it finished.
+        # A source that hangs would have meant a Friday that never starts.
         threading.Thread(target=self._loop, daemon=True).start()
 
     def stop(self) -> None:
@@ -73,6 +73,11 @@ class Feeds:
 
     # ---- polling ---------------------------------------------------------
     def _loop(self) -> None:
+        # Everything present at startup is history, not news.
+        try:
+            self._collect(prime=True)
+        except Exception as e:
+            self._log(f"friday feeds prime: {e}")
         while not self._stop.is_set():
             try:
                 self._collect()
