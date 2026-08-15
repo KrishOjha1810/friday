@@ -25,6 +25,7 @@ import secrets
 import subprocess
 import threading
 import time
+import urllib.error
 import urllib.parse
 import urllib.request
 import webbrowser
@@ -1064,12 +1065,159 @@ class Jira:
             return {}
         return {"site": parts[0].rstrip("/"), "email": parts[1], "token": parts[2]}
 
+    _checked = {}
+
     def ready(self) -> bool:
-        return bool(self._conf())
+        """Connected means it ANSWERS. Having three strings in a file proves
+        nothing, and this is the same rule Slack and Gmail had to learn."""
+        c = self._conf()
+        if not c:
+            return False
+        key = c["site"] + c["email"]
+        hit = self._checked.get(key)
+        if hit and time.time() - hit[1] < 300:
+            return hit[0]
+        ok = bool(self._get("/rest/api/3/myself").get("accountId"))
+        self._checked[key] = (ok, time.time())
+        return ok
 
     def setup_hint(self) -> str:
-        return ("make an API token at id.atlassian.com/manage/api-tokens, then: "
-                "friday connect jira https://yoursite.atlassian.net|you@email|TOKEN")
+        return ("make an API token at id.atlassian.com/manage/api-tokens, then "
+                "paste this to me in one line:\n"
+                "connect jira https://yoursite.atlassian.net|you@email|TOKEN")
+
+    # ---- talking to it -------------------------------------------------
+    def _auth(self) -> str:
+        import base64
+        c = self._conf()
+        return "Basic " + base64.b64encode(
+            f"{c['email']}:{c['token']}".encode()).decode()
+
+    def _get(self, path: str, params: dict = None) -> dict:
+        c = self._conf()
+        if not c:
+            return {"error": "not_configured"}
+        url = c["site"] + path + (
+            "?" + urllib.parse.urlencode(params) if params else "")
+        try:
+            req = urllib.request.Request(url, headers={
+                "Authorization": self._auth(), "Accept": "application/json"})
+            with urllib.request.urlopen(req, timeout=TIMEOUT) as r:
+                return json.loads(r.read())
+        except urllib.error.HTTPError as e:
+            body = ""
+            try:
+                body = e.read().decode()[:200]
+            except Exception:
+                pass
+            return {"error": f"{e.code}: {body or e.reason}"}
+        except Exception as e:
+            return {"error": str(e)[:160]}
+
+    def _send(self, path: str, body: dict, method: str = "POST") -> dict:
+        c = self._conf()
+        if not c:
+            return {"error": "not_configured"}
+        try:
+            req = urllib.request.Request(
+                c["site"] + path, data=json.dumps(body).encode(),
+                method=method,
+                headers={"Authorization": self._auth(),
+                         "Content-Type": "application/json",
+                         "Accept": "application/json"})
+            with urllib.request.urlopen(req, timeout=20) as r:
+                raw = r.read()
+                return json.loads(raw) if raw else {"ok": True}
+        except urllib.error.HTTPError as e:
+            body = ""
+            try:
+                body = e.read().decode()[:250]
+            except Exception:
+                pass
+            return {"error": f"{e.code}: {body or e.reason}"}
+        except Exception as e:
+            return {"error": str(e)[:160]}
+
+    # ---- the verbs a day actually needs --------------------------------
+    def projects(self) -> list:
+        """Projects you can file against, so "create a ticket" has somewhere to
+        go without you reciting a key."""
+        d = self._get("/rest/api/3/project/search", {"maxResults": 50})
+        if d.get("error"):
+            return []
+        return [{"key": p.get("key", ""), "name": p.get("name", "")}
+                for p in (d.get("values") or []) if p.get("key")]
+
+    def create(self, summary: str, project: str = "", body: str = "",
+               kind: str = "Task") -> dict:
+        """File a ticket. Refuses unless writing was turned on.
+
+        Same gate as Slack and GitHub: creating something in a tracker your
+        colleagues read is not a thing to do on an inference."""
+        if not gh_can_write() and not can_write():
+            return {"error": "writing_not_enabled"}
+        if not summary.strip():
+            return {"error": "nothing_to_file"}
+        key = (project or "").strip().upper()
+        if not key:
+            got = self.projects()
+            if len(got) != 1:
+                return {"error": "which_project", "projects":
+                        [g["key"] for g in got[:8]]}
+            key = got[0]["key"]
+        fields = {"project": {"key": key},
+                  "summary": summary.strip()[:250],
+                  "issuetype": {"name": kind}}
+        if body.strip():
+            # Atlassian document format: plain text is rejected outright.
+            fields["description"] = {
+                "type": "doc", "version": 1,
+                "content": [{"type": "paragraph", "content": [
+                    {"type": "text", "text": body.strip()[:3000]}]}]}
+        d = self._send("/rest/api/3/issue", {"fields": fields})
+        if d.get("error"):
+            return d
+        return {"ok": True, "key": d.get("key", ""),
+                "url": f"{self._conf()['site']}/browse/{d.get('key', '')}"}
+
+    def comment(self, key: str, text: str) -> dict:
+        if not gh_can_write() and not can_write():
+            return {"error": "writing_not_enabled"}
+        if not (key and text.strip()):
+            return {"error": "nothing_to_say"}
+        d = self._send(f"/rest/api/3/issue/{key}/comment", {
+            "body": {"type": "doc", "version": 1,
+                     "content": [{"type": "paragraph", "content": [
+                         {"type": "text", "text": text.strip()[:3000]}]}]}})
+        return d if d.get("error") else {"ok": True}
+
+    def transitions(self, key: str) -> list:
+        """Where this ticket can actually go. Jira's states are per-project and
+        per-workflow, so guessing a name is how you get a 400 that says
+        nothing."""
+        d = self._get(f"/rest/api/3/issue/{key}/transitions")
+        if d.get("error"):
+            return []
+        return [{"id": t.get("id", ""), "name": (t.get("name") or "")}
+                for t in (d.get("transitions") or [])]
+
+    def move(self, key: str, to: str) -> dict:
+        """Move a ticket, matching the state you SAID against the ones that
+        exist rather than hoping."""
+        if not gh_can_write() and not can_write():
+            return {"error": "writing_not_enabled"}
+        options = self.transitions(key)
+        if not options:
+            return {"error": "no_transitions"}
+        from . import nearest
+        want = nearest.pick(to, [o["name"] for o in options])
+        if not want:
+            return {"error": "which_state",
+                    "states": [o["name"] for o in options]}
+        tid = next(o["id"] for o in options if o["name"] == want)
+        d = self._send(f"/rest/api/3/issue/{key}/transitions",
+                       {"transition": {"id": tid}})
+        return d if d.get("error") else {"ok": True, "state": want}
 
     def my_issues(self, limit: int = 8) -> list:
         c = self._conf()

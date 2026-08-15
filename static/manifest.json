@@ -1,0 +1,25 @@
+{
+  "name": "Friday",
+  "short_name": "Friday",
+  "description": "A conductor for your coding agents, and for the tools around them.",
+  "start_url": ".",
+  "scope": "/",
+  "display": "standalone",
+  "orientation": "portrait-primary",
+  "background_color": "#0b0d12",
+  "theme_color": "#0b0d12",
+  "categories": ["productivity", "developer"],
+  "icons": [
+    {"src": "icon-192.png", "sizes": "192x192", "type": "image/png",
+     "purpose": "any"},
+    {"src": "icon-512.png", "sizes": "512x512", "type": "image/png",
+     "purpose": "any"},
+    {"src": "icon-512.png", "sizes": "512x512", "type": "image/png",
+     "purpose": "maskable"}
+  ],
+  "shortcuts": [
+    {"name": "What needs me", "url": "?ask=who+needs+me"},
+    {"name": "Brief me", "url": "?ask=brief+me"},
+    {"name": "What did I miss", "url": "?ask=what+did+I+miss"}
+  ]
+}

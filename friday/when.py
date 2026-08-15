@@ -74,3 +74,62 @@ def parse(text: str, today: _dt.date = None) -> tuple:
             d = today - _dt.timedelta(days=back)
             return _start_of(d), _end_of(d), f"{name.capitalize()} ({d:%d %b})"
     return 0, 0, ""
+
+
+_CLOCK = re.compile(
+    r"\b(?:at\s+)?(\d{1,2})(?::(\d{2}))?\s*(am|pm|a\.m\.|p\.m\.)?\b", re.I)
+_DAY_WORD = re.compile(
+    r"\b(today|tomorrow|monday|tuesday|wednesday|thursday|friday|saturday|"
+    r"sunday)\b", re.I)
+
+
+def moment(text: str, now: _dt.datetime = None) -> tuple:
+    """(epoch, how_it_reads) for a spoken time, or (0, "").
+
+    Deliberately narrow. It handles the shapes a person actually says when
+    arranging something ("Thursday at 4", "tomorrow 10:30am") and refuses
+    everything else, because putting a meeting in the wrong slot is worse than
+    admitting you did not follow."""
+    if not text:
+        return 0, ""
+    now = now or _dt.datetime.now()
+    low = text.lower()
+
+    day = None
+    m = _DAY_WORD.search(low)
+    if m:
+        word = m.group(1)
+        if word == "today":
+            day = now.date()
+        elif word == "tomorrow":
+            day = now.date() + _dt.timedelta(days=1)
+        else:
+            want = _DAYS[word]
+            ahead = (want - now.weekday()) % 7
+            day = now.date() + _dt.timedelta(days=ahead or 7)
+
+    hour = minute = None
+    for m in _CLOCK.finditer(low):
+        h = int(m.group(1))
+        if h > 23:
+            continue
+        mer = (m.group(3) or "").replace(".", "")
+        # A bare number is only a time if it could be one and the sentence is
+        # about arranging something. 4 means 4pm to everybody arranging a
+        # meeting; 04:00 is not what anyone means.
+        if mer.startswith("p") and h < 12:
+            h += 12
+        elif mer.startswith("a") and h == 12:
+            h = 0
+        elif not mer and h <= 7:
+            h += 12
+        hour, minute = h, int(m.group(2) or 0)
+        break
+
+    if hour is None:
+        return 0, ""
+    day = day or now.date()
+    when = _dt.datetime.combine(day, _dt.time(hour, minute))
+    if when < now:
+        when += _dt.timedelta(days=1)
+    return when.timestamp(), when.strftime("%A %-d %B at %H:%M")

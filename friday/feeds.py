@@ -522,6 +522,37 @@ class CalendarFeed:
                     "offers": []})
         return out
 
+    def add(self, title: str, start_epoch: float, minutes: int = 30) -> dict:
+        """Put something in the calendar.
+
+        Read-only was the right default while Friday was still learning to be
+        honest, but it meant it could tell you Sam wants Thursday and do nothing
+        about it, which is half a sentence. EventKit writes to the default
+        calendar, which is the one a person means when they say "put it in"."""
+        store = self._kit()
+        if store is None:
+            return {"error": self._why or "no calendar access"}
+        try:
+            import EventKit
+            import Foundation
+            ev = EventKit.EKEvent.eventWithEventStore_(store)
+            ev.setTitle_(title[:200])
+            start = Foundation.NSDate.dateWithTimeIntervalSince1970_(
+                float(start_epoch))
+            ev.setStartDate_(start)
+            ev.setEndDate_(start.dateByAddingTimeInterval_(minutes * 60))
+            cal = store.defaultCalendarForNewEvents()
+            if cal is None:
+                return {"error": "this Mac has no default calendar to write to"}
+            ev.setCalendar_(cal)
+            ok, err = store.saveEvent_span_error_(ev, 0, None)
+            if not ok:
+                return {"error": str(err)[:160] if err else "the save failed"}
+            self._fetched = 0          # so the next read sees it
+            return {"ok": True, "calendar": str(cal.title() or "")}
+        except Exception as e:
+            return {"error": str(e)[:160]}
+
     def state(self) -> str:
         self._fetch()
         if self._why:

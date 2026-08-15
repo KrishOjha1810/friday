@@ -114,3 +114,33 @@ if __name__ == "__main__":
         if name.startswith("test_") and callable(fn):
             fn()
     print("ok  page: parses, and suggests only what was actually offered")
+
+
+def test_it_is_an_installable_app_not_just_a_page():
+    """"Open a browser tab and keep it open" is not a thing people adopt.
+    Friday already had the two hard parts, a service worker and Web Push; what
+    it lacked was the manifest and icons that make it something with an icon on
+    your home screen."""
+    import json
+    root = Path(__file__).resolve().parents[1]
+    html = (root / "static" / "index.html").read_text()
+    assert 'rel="manifest"' in html, "no manifest linked"
+    assert "apple-touch-icon" in html, "iOS would install a blank square"
+    manifest = json.loads((root / "static" / "manifest.json").read_text())
+    assert manifest["display"] == "standalone", manifest["display"]
+    for icon in manifest["icons"]:
+        assert (root / "static" / icon["src"]).exists(), icon["src"]
+    assert any(i.get("purpose") == "maskable" for i in manifest["icons"]), \
+        "Android will letterbox the icon without a maskable one"
+
+
+def test_the_home_screen_shortcuts_actually_go_somewhere():
+    """A shortcut that opens a blank conversation is worse than no shortcut."""
+    import json
+    import re as _re
+    root = Path(__file__).resolve().parents[1]
+    manifest = json.loads((root / "static" / "manifest.json").read_text())
+    js = _js()
+    assert "get('ask')" in js, "the page ignores the shortcut parameter"
+    for short in manifest.get("shortcuts", []):
+        assert "ask=" in short["url"], short

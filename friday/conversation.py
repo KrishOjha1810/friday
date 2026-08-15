@@ -64,6 +64,9 @@ MISSED = "missed"          # "what did I miss?"
 DRAFT = "draft"            # "draft a reply"
 SEND = "send"              # "send it" after a draft
 ALLOW = "allow"            # "let yourself post to slack"
+SCHEDULE = "schedule"      # "put it in for Thursday at 4"
+TICKET = "ticket"          # "file a ticket: the parser breaks on PDFs"
+MOVE = "move"              # "move PROJ-12 to done"
 PLAN = "plan"              # "plan: do a, then b, then c"
 PLAN_GO = "plango"         # "run the plan"
 PLAN_WHERE = "planwhere"   # "where is the plan?"
@@ -96,6 +99,26 @@ _GOOGLE_CREDS_RE = re.compile(
 # deliberately sparse, so there has to be a way to pull everything at once.
 # A plan is written down before any of it runs, and nothing runs until you say
 # so. "plan: a, then b, then c" or a numbered list.
+# Filing a ticket from a conversation is the moment a Slack thread becomes work,
+# and it is the whole front half of the conductor idea.
+# The other half of "Sam wants a meeting Thursday". Friday could report it and
+# do nothing about it, which is half a sentence.
+_SCHEDULE_RE = re.compile(
+    r"\b(?:put|add|book|schedule|pencil)\s+(?:it|that|a\s+\w+|the\s+\w+|"
+    r"us|me)?\s*(?:in|down|on)?\b.*?"
+    r"(?:for|at|on)\s+(.+?)\s*[.!]?$"
+    r"|\b(?:schedule|book)\s+(?:a\s+)?(?:meeting|call|sync)\b\s*(.*)$",
+    re.I)
+
+_TICKET_RE = re.compile(
+    r"\b(?:file|create|open|raise|make)\s+(?:a\s+|an\s+)?"
+    r"(?:jira\s+|linear\s+)?(?:ticket|issue|bug|task)\b"
+    r"(?:\s+(?:in|on|for)\s+([A-Z][A-Z0-9_]{1,9}))?"
+    r"(?:\s*[:,]\s*(.+))?$", re.I)
+_MOVE_RE = re.compile(
+    r"\b(?:move|set|mark|transition|put)\s+([A-Za-z][A-Za-z0-9]*-\d+)\s+"
+    r"(?:to|as|into)\s+(.+?)\s*[.!]?$", re.I)
+
 _PLAN_RE = re.compile(
     r"^\s*(?:make|write|draft)?\s*a?\s*plan(?:\s+for\s+(\S+))?\s*[:,]\s*(.+)$",
     re.I | re.S)
@@ -369,6 +392,17 @@ def classify(text: str) -> tuple:
     """(intent, payload). Deterministic and ordered: the most specific command
     wins, and only what is left over counts as conversation."""
     t = (text or "").strip()
+    m = _SCHEDULE_RE.search(t)
+    if m and re.search(r"\b(meet|meeting|call|sync|calendar|invite|catch\s?up|"
+                       r"put it in|pencil)\b", t, re.I):
+        return SCHEDULE, {"said": t}
+    m = _MOVE_RE.search(t)
+    if m:
+        return MOVE, {"key": m.group(1).upper(), "to": m.group(2).strip()}
+    m = _TICKET_RE.search(t)
+    if m:
+        return TICKET, {"project": (m.group(1) or "").upper(),
+                        "summary": (m.group(2) or "").strip()}
     if _PLAN_STOP_RE.search(t):
         return PLAN_GO, {"stop": True}
     if _PLAN_WHERE_RE.search(t):
@@ -694,6 +728,12 @@ class Friday:
             return self._propose_open(payload["name"])
         if intent == BRIEF:
             return self._brief()
+        if intent == SCHEDULE:
+            return self._schedule(payload["said"])
+        if intent == TICKET:
+            return self._file_ticket(payload["project"], payload["summary"])
+        if intent == MOVE:
+            return self._move_ticket(payload["key"], payload["to"])
         if intent == PLAN:
             return self._make_plan(payload["target"], payload["body"])
         if intent == PLAN_GO:
@@ -976,6 +1016,82 @@ class Friday:
         if not p:
             return self._say("There's no plan.")
         return self._say(plans.describe(p))
+
+    def _schedule(self, said: str) -> dict:
+        """Put something in the calendar, from what you just said.
+
+        The half of "Sam wants a meeting Thursday" that Friday could never
+        finish. It refuses rather than guesses about the time, because a meeting
+        in the wrong slot is worse than one you had to type yourself."""
+        cal = None
+        try:
+            cal = self.feeds.sources.get("calendar", [None])[0]
+        except Exception:
+            cal = None
+        if cal is None:
+            return self._say("I don't have your calendar.")
+        if not cal.available():
+            return self._say("macOS hasn't allowed me to touch the calendar. "
+                             "Say \"connect calendar\" and allow it.")
+        stamp, reads = when.moment(said)
+        if not stamp:
+            return self._say("When? Tell me a day and a time, like \"Thursday "
+                             "at 4\", and I'll put it in.")
+        # What it is ABOUT: whoever asked, if anybody did.
+        title = "Meeting"
+        try:
+            for _cid, m in reversed(list(self.inbox.last.items())):
+                title = f"{m['who']} ({m['where']})"
+                break
+        except Exception:
+            pass
+        self.pending = {"kind": "event", "title": title, "at": stamp,
+                        "reads": reads}
+        return self._say(f"Put \"{title}\" in for {reads}?", needs_confirm=True)
+
+    def _file_ticket(self, project: str, summary: str) -> dict:
+        """File a ticket, from what you said or from what you were just reading.
+
+        This is the moment a Slack thread becomes work, which is the whole point
+        of reading Slack in the first place. Nothing is filed without you seeing
+        the exact wording, because a ticket is something colleagues read with
+        your name on it."""
+        ji = connectors.get("jira")
+        if not (ji and getattr(ji, "ready", lambda: False)()):
+            return self._say("Jira isn't connected. " + ji.setup_hint()
+                             if ji else "I don't have a Jira connector.")
+        if not summary:
+            # Fall back to what you were just looking at, so "file a ticket"
+            # right after reading a thread does the obvious thing.
+            last = None
+            for _cid, m in reversed(list(self.inbox.last.items())):
+                last = m
+                break
+            if last:
+                summary = f"{last['who']} in {last['where']}: {last['text'][:120]}"
+            else:
+                return self._say("What should the ticket say?")
+        if not connectors.can_write() and not connectors.gh_can_write():
+            return self._say(f"I'd file: \"{summary[:120]}\". I can't create "
+                             f"things yet though. Say \"let yourself post\" "
+                             f"and I'll be able to, still showing you every one "
+                             f"first.")
+        self.pending = {"kind": "ticket", "project": project,
+                        "summary": summary}
+        where = f" in {project}" if project else ""
+        return self._say(f"File this{where}?\n\n{summary[:300]}",
+                         needs_confirm=True)
+
+    def _move_ticket(self, key: str, to: str) -> dict:
+        ji = connectors.get("jira")
+        if not (ji and getattr(ji, "ready", lambda: False)()):
+            return self._say("Jira isn't connected, so I can't move anything.")
+        if not connectors.can_write() and not connectors.gh_can_write():
+            return self._say(f"I can't change tickets yet. Say \"let yourself "
+                             f"post\" if you want me to be able to move "
+                             f"{key}.")
+        self.pending = {"kind": "move", "key": key, "to": to}
+        return self._say(f"Move {key} to {to}?", needs_confirm=True)
 
     def _allow_write(self, on: bool) -> dict:
         """Turn posting on or off. The scope is only requested when you ask.
@@ -2191,6 +2307,36 @@ class Friday:
                                  f"I couldn't bring {label} to the front. It may "
                                  f"not be running in a terminal I can reach.",
                                  action={"kind": "open", "sid": act["sid"]})
+            if act["kind"] == "event":
+                cal = self.feeds.sources.get("calendar", [None])[0]
+                r = cal.add(act["title"], act["at"]) if cal else {}
+                if r.get("ok"):
+                    return self._say(f"In your {r.get('calendar', '')} calendar "
+                                     f"for {act['reads']}.")
+                return self._say(f"It didn't go in: "
+                                 f"{r.get('error', 'the calendar refused it')}. "
+                                 f"Nothing was added.")
+            if act["kind"] == "ticket":
+                ji = connectors.get("jira")
+                r = ji.create(act["summary"], project=act.get("project", ""))
+                if r.get("ok"):
+                    return self._say(f"Filed {r['key']}. {r.get('url', '')}")
+                if r.get("error") == "which_project":
+                    opts = ", ".join(r.get("projects") or []) or "none I can see"
+                    return self._say(f"Which project? {opts}")
+                return self._say(f"It didn't file: {r.get('error', 'Jira said no')}"
+                                 f". Nothing was created.")
+            if act["kind"] == "move":
+                ji = connectors.get("jira")
+                r = ji.move(act["key"], act["to"])
+                if r.get("ok"):
+                    return self._say(f"{act['key']} is now {r['state']}.")
+                if r.get("error") == "which_state":
+                    opts = ", ".join(r.get("states") or [])
+                    return self._say(f"{act['key']} can go to: {opts}.")
+                return self._say(f"It didn't move: "
+                                 f"{r.get('error', 'Jira said no')}. Nothing "
+                                 f"changed.")
             if act["kind"] == "new":
                 ok = actions.new_session(act.get("about", ""))
                 return self._say("Started it in a new window." if ok else
@@ -2264,6 +2410,11 @@ class Friday:
         "post to Slack itself, on purpose",
         "read a channel for a named day (say: what was said in <channel> "
         "yesterday, or on Friday)",
+        "conduct Codex sessions as well as Claude ones, in the same fleet",
+        "file a Jira ticket from what you said or what you just read "
+        "(say: file a ticket: ...)",
+        "move a ticket to another state (say: move PROJ-12 to done)",
+        "put a meeting in your calendar (say: put it in for Thursday at 4)",
         "watch GitHub and tell you about review requests, mentions and broken "
         "builds, unprompted",
         "notice work on this machine that exists nowhere else: uncommitted "
@@ -2283,9 +2434,8 @@ class Friday:
     ]
     CANNOT_YET = [
         "run two plans at once, on purpose: one at a time is the point",
-        "put anything in your calendar, or schedule a meeting",
+        "merge a pull request, or approve a review",
         "search Jira or email",
-        "post, comment, merge or change anything (everything is read-only)",
         "start a brand new session, or write code itself",
         "see INSIDE another person's sessions on this Mac",
     ]
@@ -2309,6 +2459,21 @@ class Friday:
             "and waiting for a yes" if writing else
             "post or send anything in Slack (it drafts, you send). Say "
             "\"let yourself post\" to change that")
+        (can if writing else cannot).append(
+            "file and move Jira tickets, after reading them back to you"
+            if writing else
+            "create or move a ticket. Say \"let yourself post\" to change that")
+        # The calendar is not behind the writing switch: adding an event to
+        # your own diary is not the same risk as writing under your name where
+        # colleagues read it, and it is still confirmed every time.
+        try:
+            cal = self.feeds.sources.get("calendar", [None])[0]
+            can.append("put a meeting in your calendar, after reading the day "
+                       "and time back to you"
+                       if cal and cal.available() else
+                       "warn you before a meeting, once macOS allows it")
+        except Exception:
+            pass
         try:
             live = {n: v["ready"] for n, v in connectors.status().items()}
         except Exception:

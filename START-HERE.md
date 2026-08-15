@@ -53,6 +53,18 @@ stop it
 
 `tell` means do this. `ask` means bring me the answer.
 
+### Tickets and time
+
+```
+file a ticket: the PDF parser dies on page 3
+move PROJ-12 to done
+put it in for Thursday at 4
+```
+
+Each one reads it back and waits for a yes. Filing and moving need `let
+yourself post`; the calendar does not, since your own diary is not the same risk
+as writing under your name where colleagues read it.
+
 ### Talking to all of them
 
 ```
@@ -102,7 +114,8 @@ at, since it already said it on your screen.
 You do not ask for these. Friday brings them, whoever is waiting on you first,
 capped so it never floods, and each thing said once.
 
-- **Your agents.** Every reply, summarised, with the question if it is asking one.
+- **Your agents.** Every reply, summarised, with the question if it is asking
+  one. Claude Code and Codex both, in one fleet.
 - **Slack.** A new message with who sent it, what they want, and what you can do.
 - **GitHub.** Review requests, mentions, broken builds. Already connected, it
   uses your `gh` login.

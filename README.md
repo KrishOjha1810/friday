@@ -130,6 +130,9 @@ you are already signed in to.
 | `stop <name>` | the same Escape you would press |
 | `say more` | that session's exact words, not the summary |
 | `who am I talking to` | where a bare reply would land |
+| `file a ticket: the parser dies on PDFs` | files it, after reading it back |
+| `move PROJ-12 to done` | moves it, matching the states that exist |
+| `put it in for Thursday at 4` | into your calendar, after reading the time back |
 | `plan: run the tests, then fix what fails, then commit` | writes it down; nothing runs yet |
 | `run the plan` | one step at a time, on evidence, stopping if it asks you |
 | `where is the plan` | how far it got, and what is left |
@@ -140,7 +143,9 @@ you are already signed in to.
 
 Friday reports without being asked, sessions waiting on you first:
 
-- **Agents.** Every reply, summarised to a couple of sentences.
+- **Agents.** Every reply, summarised to a couple of sentences. Claude Code and
+  Codex sessions arrive in one fleet; adding the next agent is a file format,
+  not a redesign.
 - **Slack.** A new message with who sent it, what they want, and what you can do.
 - **GitHub.** Review requests, mentions, broken builds. Fifty notifications
   become two lines.
@@ -176,7 +181,7 @@ perform:
   scopes only. Even with it on, nothing goes out without Friday showing you the
   exact words and waiting for a yes, and it sends them verbatim rather than
   regenerating. `turn off posting` revokes it without touching reading.
-- Put anything in your calendar, or schedule a meeting. It reads, and warns.
+- Merge a pull request or approve a review. Those two stay out.
 - Comment on a pull request until you turn writing on, and merge or change
   anything at all, ever. `let yourself post` covers Slack messages and GitHub
   comments, and nothing else.
@@ -205,6 +210,7 @@ friday/
   replies.py            waits for an agent to answer, reads it off the transcript
   fleetcache.py         one warm reading of the fleet, shared by all callers
 
+  agents.py             every coding agent, whoever made it (Claude, Codex)
   connectors.py         Slack, GitHub, Gmail, Jira, and Slack self-setup
   mcp.py                Friday as an MCP client (PKCE, write-gated)
   memory.py             your past sessions and projects, searchable

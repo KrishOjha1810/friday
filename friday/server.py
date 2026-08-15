@@ -169,6 +169,21 @@ class Handler(BaseHTTPRequestHandler):
                 return
             self._send(200, html, "text/html; charset=utf-8")
             return
+        if path in ("/manifest.json", "/icon-192.png", "/icon-512.png",
+                    "/icon-180.png"):
+            # An installable app needs these at the root: a manifest referenced
+            # from a subdirectory scopes the app to that subdirectory, and an
+            # icon that 404s means an installed app with a blank square on your
+            # home screen.
+            try:
+                body = (STATIC / path.lstrip("/")).read_bytes()
+            except Exception:
+                self._send(404, b"not found", "text/plain")
+                return
+            kind = ("application/manifest+json" if path.endswith(".json")
+                    else "image/png")
+            self._send(200, body, kind)
+            return
         if path == "/sw.js":
             # Served from the root, not /static/, because a worker can only
             # control pages at or below its own path. From /static/sw.js it

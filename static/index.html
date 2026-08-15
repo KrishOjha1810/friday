@@ -3,6 +3,13 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<link rel="manifest" href="manifest.json">
+<meta name="theme-color" content="#0b0d12">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Friday">
+<link rel="apple-touch-icon" href="icon-180.png">
+<link rel="icon" href="icon-192.png">
 <meta name="theme-color" content="#0b0d12">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-title" content="Friday">
@@ -876,6 +883,16 @@ window.addEventListener('blur', reportPresence);
 setInterval(reportPresence, 15000);
 
 pushState().then(sub => { pushOn = !!sub; paintBell(); reportPresence(); });
+
+/* Home-screen shortcuts arrive as ?ask=..., so a long-press on the icon can go
+   straight to "who needs me" rather than opening a blank conversation. */
+(function(){
+  const asked = new URLSearchParams(location.search).get('ask');
+  if(!asked) return;
+  history.replaceState(null, '', location.pathname
+    + (KEY ? '?k=' + encodeURIComponent(KEY) : ''));
+  setTimeout(() => say(asked), 400);
+})();
 </script>
 </body>
 </html>
