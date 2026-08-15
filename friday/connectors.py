@@ -1660,6 +1660,20 @@ def get(name: str):
     return all_connectors().get((name or "").lower())
 
 
+def hint(c) -> str:
+    """A setup hint that can follow a sentence.
+
+    Every one of these is written as an instruction ("make a token at...") and
+    every caller pastes it after one ("Sentry isn't connected yet. make a token
+    at..."). Capitalising at each of the twenty call sites is twenty chances to
+    forget, so it happens once, here."""
+    try:
+        t = (c.setup_hint() if c else "").strip()
+    except Exception:
+        return ""
+    return t[:1].upper() + t[1:] if t else ""
+
+
 def when(ts: float) -> str:
     d = max(0, time.time() - (ts or 0))
     if d < 3600:

@@ -31,6 +31,7 @@ running agents, so anyone with that link can drive your machine.
 ### What is going on
 
 ```
+help                           the short list, works before anything is set up
 what should I work on?         one thing to start with, and why
 what's on fire?                unresolved errors in production
 what's running?

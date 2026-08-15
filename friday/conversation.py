@@ -66,6 +66,7 @@ SEND = "send"              # "send it" after a draft
 ALLOW = "allow"            # "let yourself post to slack"
 NEXT = "next"              # "what should I work on?"
 FIRE = "fire"              # "what's on fire?"
+HELP = "help"              # "what can you do?"
 SCHEDULE = "schedule"      # "put it in for Thursday at 4"
 TICKET = "ticket"          # "file a ticket: the parser breaks on PDFs"
 MOVE = "move"              # "move PROJ-12 to done"
@@ -308,6 +309,13 @@ _MAIL_RE = re.compile(r"\b(?:e-?mail|gmail|inbox|mails?)\b\s*(.*)$", re.I)
 _JIRA_RE = re.compile(r"\bjira\b|\btickets?\b", re.I)
 # "errors" alone is too broad, it catches "what errors did the build hit". This
 # wants the production question specifically.
+# The first thing a new user types, and until now it fell through to the model,
+# which on a fresh machine is not loaded, so the answer was "my brain isn't
+# loaded yet". A dead end on the first word.
+_HELP_RE = re.compile(
+    r"^\s*(?:help|\?|what can you do|what do you do|what are you|"
+    r"what can i (?:ask|say|do)|how does this work|commands?|"
+    r"what (?:else )?can you help (?:me )?with)\b|^\s*\?+\s*$", re.I)
 _FIRE_RE = re.compile(
     r"\bsentry\b|\bon fire\b|\banything (?:broken|breaking) in prod"
     r"|\bprod(?:uction)?\s+(?:errors?|issues?|exceptions?|ok|okay|healthy)"
@@ -525,6 +533,8 @@ def classify(text: str) -> tuple:
         srcs = [x for x in srcs if x]
         return READ_CHANNEL, {"channel": srcs[-1] if srcs else "",
                               "said": t}
+    if _HELP_RE.search(t):
+        return HELP, {}
     if _FIRE_RE.search(t) and not _NOT_FIRE_RE.search(t):
         return FIRE, {}
     if _JIRA_RE.search(t):
@@ -778,6 +788,8 @@ class Friday:
             return self._brief()
         if intent == NEXT:
             return self._what_next()
+        if intent == HELP:
+            return self._help()
         if intent == FIRE:
             return self._fire()
         if intent == SCHEDULE:
@@ -1216,7 +1228,7 @@ class Friday:
         if ji is None:
             hint = connectors.get("jira")
             return self._say("No ticket tracker is connected. "
-                             + (hint.setup_hint() if hint else ""))
+                             + (connectors.hint(hint) if hint else ""))
         if not summary:
             # Fall back to what you were just looking at, so "file a ticket"
             # right after reading a thread does the obvious thing.
@@ -1729,7 +1741,7 @@ class Friday:
             builtin = connectors.REGISTRY.get(which)
             c0 = builtin or connectors.get(which)
             if c0:
-                return self._say(c0.setup_hint())
+                return self._say(connectors.hint(c0))
             guess = nearest.suggest(which, list(connectors.all_connectors()))
             if guess:
                 return self._offer(
@@ -1827,7 +1839,7 @@ class Friday:
     def _github(self, query: str) -> dict:
         gh = connectors.get("github")
         if not gh.ready():
-            return self._say("GitHub isn't connected: " + gh.setup_hint())
+            return self._say("GitHub isn't connected: " + connectors.hint(gh))
         if query:
             rows = gh.search(query, limit=4)
             if not rows:
@@ -1863,7 +1875,7 @@ class Friday:
         if not (name or "").strip():
             sl = connectors.get("slack")
             if not sl.ready():
-                return self._say("Slack isn't connected yet. " + sl.setup_hint())
+                return self._say("Slack isn't connected yet. " + connectors.hint(sl))
             names = (sl.channel_names(40) if hasattr(sl, "channel_names") else [])
             if names:
                 return self._offer(
@@ -1881,7 +1893,7 @@ class Friday:
         never have to retype the subject."""
         sl = connectors.get("slack")
         if not sl.ready():
-            return self._say("Slack isn't connected yet. " + sl.setup_hint())
+            return self._say("Slack isn't connected yet. " + connectors.hint(sl))
         err = (lambda: sl.last_error() if hasattr(sl, "last_error") else "")
         ch = sl.find_channel(name)
         if not ch:
@@ -2082,7 +2094,7 @@ class Friday:
     def _issues(self) -> dict:
         gh = connectors.get("github")
         if not gh.ready():
-            return self._say("GitHub isn't connected: " + gh.setup_hint())
+            return self._say("GitHub isn't connected: " + connectors.hint(gh))
         rows = gh.my_issues(8)
         if not rows:
             return self._say("No open issues involving you.")
@@ -2129,7 +2141,7 @@ class Friday:
     def _mail(self, query: str) -> dict:
         gm = connectors.get("gmail")
         if not gm.ready():
-            return self._say("Gmail isn't connected yet. " + gm.setup_hint())
+            return self._say("Gmail isn't connected yet. " + connectors.hint(gm))
         rows = gm.search(query, limit=5)
         if not rows:
             return self._say("Nothing matching in your mail.")
@@ -2146,9 +2158,9 @@ class Friday:
         se = connectors.get("sentry")
         if not se or not hasattr(se, "issues"):
             return self._say("I don't have Sentry connected. " + (
-                se.setup_hint() if se else ""))
+                connectors.hint(se) if se else ""))
         if not se.ready():
-            return self._say("Sentry isn't connected yet. " + se.setup_hint())
+            return self._say("Sentry isn't connected yet. " + connectors.hint(se))
         rows = se.issues(limit=8)
         if rows and rows[0].get("error"):
             return self._say("Sentry answered with an error: " + rows[0]["error"])
@@ -2171,7 +2183,7 @@ class Friday:
     def _jira(self) -> dict:
         ji = connectors.get("jira")
         if not ji.ready():
-            return self._say("Jira isn't connected yet. " + ji.setup_hint())
+            return self._say("Jira isn't connected yet. " + connectors.hint(ji))
         rows = ji.my_issues(8)
         if rows and rows[0].get("error"):
             return self._say("Jira answered with an error: " + rows[0]["error"])
@@ -2184,7 +2196,7 @@ class Friday:
         sl = connectors.get("slack")
         if not sl.ready():
             return self._say("Slack isn't connected yet. To fix that: "
-                             + sl.setup_hint())
+                             + connectors.hint(sl))
         if not query:
             return self._say("What should I look for in Slack?")
         rows = sl.search(query, limit=4)
@@ -2632,6 +2644,42 @@ class Friday:
         "start a brand new session, or write code itself",
         "see INSIDE another person's sessions on this Mac",
     ]
+
+    def _help(self) -> dict:
+        """What Friday can do, answered without the model.
+
+        It used to go to the model, which on a fresh machine is not loaded, so
+        the first word a new user is most likely to type got "my brain isn't
+        loaded yet". That is the worst possible first answer: it reads as broken
+        rather than as unconfigured.
+
+        Six things, not thirty. The full list is real but nobody reads thirty
+        bullet points, and the ones chosen here are the ones that work with
+        nothing connected, so every suggestion made below actually does
+        something on a machine that has just been set up."""
+        can, cannot = self._abilities()
+        lines = [
+            "what should I work on?  one thing to start with, and why",
+            "who needs me?           agents waiting on an answer from you",
+            "brief me                everything, in one answer",
+            "what's running?         your fleet, and what each is doing",
+            "what's connected?       what I can see, and how to fix what I can't",
+            "tell <session> <what>   say something to an agent, in its terminal",
+        ]
+        # Naming the gap is more useful than hiding it: the answer to "what can
+        # you do" is incomplete without "and here is what would need connecting".
+        # Trimmed to the first clause, because these entries carry their own
+        # follow-up sentence and three of those joined by semicolons is a wall.
+        short = []
+        for c in cannot[:3]:
+            first = re.split(r"[.(]", c)[0].strip()
+            if first:
+                short.append(first)
+        tail = ('\n\nNot yet: ' + "; ".join(short)
+                + '. Say "what\'s connected" to see why.') if short else ""
+        return self._say("Ask me things like:\n  " + "\n  ".join(lines)
+                         + tail + "\n\nThere is more, and README.md lists all "
+                         "of it.")
 
     def _abilities(self) -> tuple:
         """What Friday can do RIGHT NOW, given what is actually connected.
