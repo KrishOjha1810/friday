@@ -185,6 +185,11 @@ body[data-push="off"] .btn.bell { opacity: .72; }
    answer right here. A bottom sheet on a phone, a panel on a desktop. */
 .peek { position: fixed; inset: 0; z-index: 40; background: rgba(0,0,0,.45);
         display: flex; align-items: flex-end; justify-content: center; }
+/* An author `display` beats the browser's own `[hidden] { display: none }`, so
+   without this the overlay is laid out even while hidden: an invisible sheet
+   over the whole page, swallowing every click on the app underneath. Nothing
+   in the UI was usable and it looked completely normal. */
+.peek[hidden] { display: none; }
 .peek .sheet { width: min(560px, 100%); background: var(--panel, #12151d);
                border: 1px solid rgba(255,255,255,.09); border-radius: 16px 16px 0 0;
                padding: 16px 16px calc(16px + env(safe-area-inset-bottom));
