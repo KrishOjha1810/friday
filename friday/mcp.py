@@ -83,29 +83,63 @@ def remove_server(name: str) -> bool:
 
 
 # ------------------------------------------------------------ the protocol --
+# The protocol Friday speaks, and the one it falls back to.
+#
+# 2026-07-28 made MCP stateless. There is no `initialize` handshake and no
+# session header any more: every request carries its own protocol version,
+# capabilities and identity in `_meta`, and servers advertise themselves through
+# `server/discover`. Plenty of deployed servers are still on the older revision,
+# so this speaks the new protocol and falls back once, on evidence, rather than
+# guessing which one it is talking to.
+PROTOCOL = "2026-07-28"
+LEGACY_PROTOCOL = "2025-06-18"
+META_VERSION = "io.modelcontextprotocol/protocolVersion"
+META_CAPS = "io.modelcontextprotocol/clientCapabilities"
+META_INFO = "io.modelcontextprotocol/clientInfo"
+CLIENT_INFO = {"name": "friday", "version": "0.2"}
+# -32022 is UnsupportedProtocolVersion after the error codes were renumbered
+# out of the implementation-defined range.
+ERR_BAD_VERSION = -32022
+
+
 class Client:
     """One MCP server, over streamable HTTP.
 
-    Only the three calls Friday needs: initialize (handshake), tools/list
-    (what can this do), tools/call (do it). Notifications, prompts and
-    resources are deliberately not implemented; they are not needed to make a
-    tool usable, and every line here is a line that can break."""
+    Only what Friday needs: discover who this is, list what it can do, and do
+    one. Prompts, resources and subscriptions are deliberately absent; they are
+    not needed to make a tool usable, and every line here is a line that can
+    break."""
 
     def __init__(self, name: str, url: str, token: str = "", writable=False):
         self.name, self.url, self.token = name, url, token
         self.writable = writable
-        self.session_id = ""
+        self.session_id = ""      # only ever set by a pre-2026 server
+        self.protocol = PROTOCOL
+        self.server_info = {}
         self._id = 0
+        self._tools_cache = None  # (rows, expires_at), per the ttlMs hint
 
     def _rpc(self, method: str, params: dict = None, timeout: float = TIMEOUT):
         self._id += 1
+        params = dict(params or {})
+        # Stateless: identity and version travel with every single request
+        # rather than being established once and remembered.
+        meta = dict(params.get("_meta") or {})
+        meta.setdefault(META_VERSION, self.protocol)
+        meta.setdefault(META_CAPS, {})
+        meta.setdefault(META_INFO, CLIENT_INFO)
+        params["_meta"] = meta
         body = json.dumps({"jsonrpc": "2.0", "id": self._id,
-                           "method": method, "params": params or {}}).encode()
+                           "method": method, "params": params}).encode()
         headers = {"Content-Type": "application/json",
-                   "Accept": "application/json, text/event-stream"}
+                   "Accept": "application/json, text/event-stream",
+                   # Required on POST since 2026-07-28, so a proxy can route
+                   # without parsing the body.
+                   "Mcp-Method": method,
+                   "Mcp-Name": CLIENT_INFO["name"]}
         if self.token:
             headers["Authorization"] = "Bearer " + self.token
-        if self.session_id:
+        if self.session_id:      # a legacy server asked us to carry one
             headers["Mcp-Session-Id"] = self.session_id
         req = urllib.request.Request(self.url, data=body, headers=headers)
         try:
@@ -120,22 +154,51 @@ class Client:
             return {"error": {"code": e.code, "message": str(e)[:150]}}
         except Exception as e:
             return {"error": {"code": -1, "message": str(e)[:150]}}
-        return _parse_body(raw)
+        d = _parse_body(raw)
+        # A server on the old revision rejects the new version. Drop back once
+        # and retry, rather than reporting a protocol argument as a failure.
+        err = d.get("error") or {}
+        if (err.get("code") == ERR_BAD_VERSION
+                and self.protocol != LEGACY_PROTOCOL):
+            self.protocol = LEGACY_PROTOCOL
+            return self._rpc(method, params, timeout)
+        res = d.get("result")
+        if isinstance(res, dict):
+            self.server_info = (res.get("_meta") or {}).get(
+                "io.modelcontextprotocol/serverInfo") or self.server_info
+        return d
 
     def connect(self) -> dict:
-        """Handshake. Returns {} on success, or {'error': …} to be shown."""
-        d = self._rpc("initialize", {
-            "protocolVersion": "2025-06-18",
-            "capabilities": {},
-            "clientInfo": {"name": "friday", "version": "0.1"}})
-        if d.get("error"):
-            return d
-        # the spec wants this notification after initialize
-        try:
-            self._notify("notifications/initialized")
-        except Exception:
-            pass
-        return {}
+        """Find out who this is. Returns {} on success, or {'error': …}.
+
+        There is no handshake to perform any more, so this is a probe rather
+        than a ceremony: ask `server/discover`, and if the server does not know
+        that method it is on the old revision, where `initialize` IS required
+        before anything else works."""
+        d = self._rpc("server/discover")
+        if not d.get("error"):
+            res = d.get("result") or {}
+            self.server_info = res.get("serverInfo") or self.server_info
+            versions = res.get("protocolVersions") or []
+            if versions and PROTOCOL not in versions:
+                # Speak whatever it actually supports rather than insisting.
+                self.protocol = versions[-1]
+            return {}
+        code = (d.get("error") or {}).get("code")
+        if code in (-32601, -32600):          # method not found: pre-2026
+            self.protocol = LEGACY_PROTOCOL
+            legacy = self._rpc("initialize", {
+                "protocolVersion": LEGACY_PROTOCOL,
+                "capabilities": {},
+                "clientInfo": CLIENT_INFO})
+            if legacy.get("error"):
+                return legacy
+            try:
+                self._notify("notifications/initialized")
+            except Exception:
+                pass
+            return {}
+        return d
 
     def _notify(self, method: str):
         body = json.dumps({"jsonrpc": "2.0", "method": method}).encode()
@@ -152,10 +215,26 @@ class Client:
             pass
 
     def tools(self) -> list:
-        d = self._rpc("tools/list")
-        if d.get("error"):
-            return []
-        rows = (d.get("result") or {}).get("tools") or []
+        """What this server can do, cached for as long as it says to.
+
+        Lists no longer vary per connection and carry a `ttlMs` freshness hint,
+        so re-asking on every question is pure waste. A server that gives no
+        hint gets a short default rather than being cached forever."""
+        now = time.time()
+        if self._tools_cache and now < self._tools_cache[1]:
+            rows = self._tools_cache[0]
+        else:
+            d = self._rpc("tools/list")
+            if d.get("error"):
+                return []
+            res = d.get("result") or {}
+            rows = res.get("tools") or []
+            ttl = res.get("ttlMs")
+            try:
+                secs = float(ttl) / 1000.0 if ttl else 60.0
+            except (TypeError, ValueError):
+                secs = 60.0
+            self._tools_cache = (rows, now + max(5.0, min(secs, 3600.0)))
         if self.writable:
             return rows
         return [t for t in rows if not _is_write(t.get("name", ""))]
@@ -168,7 +247,20 @@ class Client:
                       timeout=45)
         if d.get("error"):
             return {"error": d["error"].get("message", "call failed")}
-        return {"result": _flatten(d.get("result") or {})}
+        res = d.get("result") or {}
+        # Every result now says whether it is finished. A server can come back
+        # asking for something before it can answer (a permission, a choice),
+        # and treating that interim result as the answer would report an empty
+        # success for work that never happened. Older servers omit the field,
+        # and the spec says treat that as complete.
+        if res.get("resultType") == "input_required":
+            wanted = res.get("inputRequests") or []
+            kinds = ", ".join(
+                str((w or {}).get("method") or (w or {}).get("type") or "input")
+                for w in wanted[:3]) or "more information"
+            return {"error": f"{self.name} needs something before it can answer "
+                             f"({kinds}), and I can't supply that yet."}
+        return {"result": _flatten(res)}
 
 
 def _is_write(name: str) -> bool:
@@ -238,10 +330,25 @@ def _discover(url: str) -> dict:
 
 class _Catcher(BaseHTTPRequestHandler):
     code = None
+    state = ""        # what we sent; anything else is not our redirect
+    issuer = ""       # what the authorization server claims to be
 
     def do_GET(self):
         q = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
-        _Catcher.code = (q.get("code") or [""])[0]
+        # Check `state` before touching the code. Without this the callback
+        # accepts a code from anybody who can get your browser to open the
+        # loopback URL, which is the textbook CSRF against an OAuth client and
+        # was wide open here.
+        got_state = (q.get("state") or [""])[0]
+        if _Catcher.state and got_state != _Catcher.state:
+            _Catcher.code = None
+        else:
+            _Catcher.code = (q.get("code") or [""])[0]
+            # RFC 9207: when the server tells us who it is, it must be who we
+            # started with. This is the defence against a mix-up attack, where
+            # a malicious server sends you to a real one and collects the code
+            # meant for it.
+            _Catcher.issuer = (q.get("iss") or [""])[0]
         self.send_response(200)
         self.send_header("Content-Type", "text/html")
         self.end_headers()
@@ -294,7 +401,7 @@ def authorize(name: str, url: str, timeout: float = 180) -> dict:
     if meta.get("scopes_supported"):
         params["scope"] = " ".join(meta["scopes_supported"][:8])
 
-    _Catcher.code = None
+    _Catcher.code, _Catcher.state, _Catcher.issuer = None, state, ""
     srv = HTTPServer(("127.0.0.1", CALLBACK_PORT), _Catcher)
     threading.Thread(target=srv.serve_forever, daemon=True).start()
     webbrowser.open(meta["authorization_endpoint"] + "?" +
@@ -305,7 +412,16 @@ def authorize(name: str, url: str, timeout: float = 180) -> dict:
         time.sleep(0.4)
     srv.shutdown()
     if not _Catcher.code:
-        return {"error": "no approval came back in time"}
+        return {"error": "no approval came back in time, or the reply did not "
+                         "match the request I sent"}
+    # Validate the issuer BEFORE redeeming, which is the whole point: after the
+    # code is spent it is too late to discover it went to the wrong place.
+    claimed = _Catcher.issuer
+    expected = meta.get("issuer") or ""
+    if claimed and expected and claimed.rstrip("/") != expected.rstrip("/"):
+        return {"error": f"that approval came back claiming to be {claimed}, "
+                         f"but I started with {expected}, so I have not used "
+                         f"it."}
 
     tok = _exchange(meta, client_id, _Catcher.code, verifier, redirect)
     if not tok:
@@ -326,6 +442,11 @@ def _register(meta: dict, redirect: str) -> str:
                        "redirect_uris": [redirect],
                        "grant_types": ["authorization_code"],
                        "response_types": ["code"],
+                       # Required since 2026-07-28. Without it an OpenID
+                       # provider assumes a web client and rejects a loopback
+                       # redirect, which fails with a message about redirect
+                       # URIs that never mentions the real cause.
+                       "application_type": "native",
                        "token_endpoint_auth_method": "none"}).encode()
     try:
         req = urllib.request.Request(ep, data=body, headers={
