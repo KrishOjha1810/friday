@@ -189,6 +189,10 @@ class Handler(BaseHTTPRequestHandler):
             self._json({"fleet": _fleet_rows(), "engine": engine.status(),
                         "quiet": (engine.attention.is_quiet()
                                   if engine.AVAILABLE else False),
+                        # Who a bare message would reach. The page had no way
+                        # to show this, so routing was invisible and you found
+                        # out where your words went by watching them arrive.
+                        "target": getattr(_friday, "target", ""),
                         "history": _friday.history[-60:]})
             return
         if path == "/events":

@@ -178,6 +178,59 @@
 body[data-push="on"] .btn.bell { color: var(--accent, #5eead4); border-color: currentColor; }
 body[data-push="on"] .btn.bell .slash { opacity: 0; }
 body[data-push="off"] .btn.bell { opacity: .72; }
+
+/* ---- the peek panel ------------------------------------------------------
+   Tapping a session used to type "what does api need?" into the chat and wait.
+   The question is already known, so the useful thing is to show it and take the
+   answer right here. A bottom sheet on a phone, a panel on a desktop. */
+.peek { position: fixed; inset: 0; z-index: 40; background: rgba(0,0,0,.45);
+        display: flex; align-items: flex-end; justify-content: center; }
+.peek .sheet { width: min(560px, 100%); background: var(--panel, #12151d);
+               border: 1px solid rgba(255,255,255,.09); border-radius: 16px 16px 0 0;
+               padding: 16px 16px calc(16px + env(safe-area-inset-bottom));
+               display: flex; flex-direction: column; gap: 10px;
+               animation: rise .16s ease-out; }
+@keyframes rise { from { transform: translateY(14px); opacity: .6; } }
+@media (min-width: 700px) {
+  .peek { align-items: center; }
+  .peek .sheet { border-radius: 16px; }
+}
+@media (prefers-reduced-motion: reduce) { .peek .sheet { animation: none; } }
+.peek .phead { display: flex; align-items: center; gap: 8px; }
+.peek .phead b { font-size: 15px; }
+.peek .pstate { font-size: 12px; opacity: .6; }
+.peek .grow { flex: 1; }
+.peek .x { background: none; border: 0; color: inherit; font-size: 22px;
+           opacity: .6; cursor: pointer; line-height: 1; }
+.peek .pask { margin: 0; font-size: 15px; line-height: 1.45; }
+.peek .psuggest { display: flex; flex-wrap: wrap; gap: 6px; }
+.peek .psuggest button { border: 1px solid rgba(255,255,255,.16); background: none;
+    color: inherit; border-radius: 999px; padding: 6px 12px; font: inherit;
+    font-size: 13px; cursor: pointer; }
+.peek .psuggest button:hover { border-color: var(--accent, #5eead4); }
+.peek .prow { display: flex; gap: 8px; }
+.peek .prow input { flex: 1; background: rgba(255,255,255,.05); color: inherit;
+    border: 1px solid rgba(255,255,255,.12); border-radius: 10px; padding: 10px 12px;
+    font: inherit; }
+.peek .prow.acts { justify-content: flex-start; }
+.peek .btn.go { background: var(--accent, #5eead4); color: #07131a; border: 0; }
+.peek button:focus-visible, .target:focus-visible { outline: 2px solid var(--accent, #5eead4); outline-offset: 2px; }
+
+/* Who a bare message reaches. Routing was inferred and invisible: you found out
+   where your words went by watching them arrive somewhere. */
+.target { margin: 0 12px 6px; font-size: 12px; opacity: .75;
+          display: flex; align-items: center; gap: 6px; }
+.target b { font-weight: 600; opacity: .95; }
+.target button { background: none; border: 0; color: inherit; opacity: .6;
+                 cursor: pointer; font: inherit; text-decoration: underline; }
+
+/* On a phone the strip is a summary, not a list: one line you can tap. */
+@media (max-width: 560px) {
+  header .fleet { flex-wrap: nowrap; overflow-x: auto; scrollbar-width: none; }
+  header .fleet::-webkit-scrollbar { display: none; }
+  header .fleet .sess { flex: 0 0 auto; }
+  body[data-calm="1"] header .fleet .sess:not(.needs) { display: none; }
+}
 </style>
 </head>
 <body data-call="off" data-mode="idle">
@@ -207,8 +260,31 @@ body[data-push="off"] .btn.bell { opacity: .72; }
   <div class="fleet" id="fleet"></div>
 </header>
 
+<div class="peek" id="peek" hidden>
+  <div class="sheet">
+    <div class="phead">
+      <span class="d" id="peekDot"></span>
+      <b id="peekName">session</b>
+      <span class="pstate" id="peekState"></span>
+      <span class="grow"></span>
+      <button class="x" id="peekClose" aria-label="Close">&times;</button>
+    </div>
+    <p class="pask" id="peekAsk"></p>
+    <div class="psuggest" id="peekSuggest"></div>
+    <div class="prow">
+      <input id="peekReply" placeholder="Answer it" autocomplete="off">
+      <button class="btn go" id="peekSend">Send</button>
+    </div>
+    <div class="prow acts">
+      <button class="btn" id="peekOpen">Open window</button>
+      <button class="btn" id="peekStop">Stop it</button>
+    </div>
+  </div>
+</div>
+
 <main id="thread"></main>
 <button class="jump" id="jump" hidden></button>
+<div class="target" id="target" hidden></div>
 
 <div class="callbar">
   <span class="what" id="callWhat">listening</span>
@@ -555,10 +631,98 @@ function renderFleet(rows){
     /* the generated name means nothing to a human ("krishojha-7f"), so the
        real subject rides along as the tooltip */
     b.title = r.needs || r.about || r.status;
-    b.onclick = () => say(r.status === 'needs' ? ('what does ' + r.label + ' need?')
-                                               : ('open ' + r.label));
+    /* Show what it wants and take the answer here. Typing "what does api
+       need?" into the chat and waiting for a round trip, to be told a thing
+       Friday already knew, is the panel this replaces. */
+    b.onclick = () => openPeek(r);
     el.appendChild(b);
   });
+}
+
+/* ---- the peek panel ---------------------------------------------------- */
+let peeking = null;
+
+function suggestionsFor(q){
+  /* Deterministic, from the question itself. A model could write better ones
+     and would sometimes invent an option the agent never offered, which is
+     worse than none: you would tap it. */
+  const text = (q || '').toLowerCase();
+  const out = [];
+  /* An agent that offered options gets those options back, split at the next
+     marker rather than swallowed into one. Lazy, with a lookahead, because a
+     greedy match turns "1) rebase 2) merge" into a single button reading
+     "rebase 2) merge" that nobody could mean to press. */
+  const marks = /(?:^|\s)(?:\d[\).]|[a-c]\))\s*([^\n]{2,40}?)(?=\s+\d[\).]|\s+[a-c]\)|[?.]|$)/g;
+  const listed = [...(q || '').matchAll(marks)].map(m => m[1].trim());
+  if(listed.length > 1) return listed.slice(0, 4);
+  if(/\b(should|shall|do you want|ok to|can i|may i|is it ok)\b/.test(text)
+     || /\?\s*$/.test(text)){
+    out.push('Yes', 'No');
+  }
+  if(/\b(which|what)\b/.test(text)) out.push('Tell me the options');
+  return out.slice(0, 4);
+}
+
+function openPeek(row){
+  peeking = row;
+  $('peekName').textContent = row.label || 'session';
+  $('peekState').textContent = row.status === 'needs' ? 'waiting on you'
+                             : row.status === 'working' ? 'working' : 'idle';
+  $('peekDot').className = 'd ' + (row.status || 'idle');
+  const ask = row.needs || row.about || '';
+  $('peekAsk').textContent = ask || 'Nothing pending. Anything you send goes '
+                                  + 'straight to it.';
+  const box = $('peekSuggest'); box.textContent = '';
+  suggestionsFor(row.needs).forEach(label => {
+    const b = document.createElement('button');
+    b.textContent = label;
+    b.onclick = () => sendPeek(label);
+    box.appendChild(b);
+  });
+  $('peekReply').value = '';
+  $('peek').hidden = false;
+  setTimeout(() => $('peekReply').focus(), 30);
+}
+
+function closePeek(){ $('peek').hidden = true; peeking = null; }
+
+function sendPeek(text){
+  const row = peeking;
+  const msg = (text !== undefined ? text : $('peekReply').value).trim();
+  if(!row || !msg) return;
+  closePeek();
+  /* One line, not a re-run of the whole question: an ask that has been answered
+     should collapse to what you decided. */
+  say('tell ' + (row.label || '') + ' ' + msg);
+}
+
+$('peekClose').onclick = closePeek;
+$('peekSend').onclick = () => sendPeek();
+$('peekReply').addEventListener('keydown', e => {
+  if(e.key === 'Enter'){ e.preventDefault(); sendPeek(); }
+  if(e.key === 'Escape') closePeek();
+});
+$('peekOpen').onclick = () => { const r = peeking; closePeek();
+                                if(r) say('open ' + r.label); };
+$('peekStop').onclick = () => { const r = peeking; closePeek();
+                                if(r) say('stop ' + r.label); };
+$('peek').addEventListener('click', e => { if(e.target === $('peek')) closePeek(); });
+document.addEventListener('keydown', e => {
+  if(e.key === 'Escape' && !$('peek').hidden) closePeek();
+});
+
+/* ---- who a bare message reaches ---------------------------------------- */
+function paintTarget(name){
+  const el = $('target');
+  if(!name){ el.hidden = true; return; }
+  el.hidden = false;
+  el.textContent = '';
+  el.append(document.createTextNode('replying to '));
+  const b = document.createElement('b'); b.textContent = name;
+  const clear = document.createElement('button');
+  clear.textContent = 'clear';
+  clear.onclick = () => { paintTarget(''); say('who am I talking to'); };
+  el.append(b, document.createTextNode(' '), clear);
 }
 
 /* ---- live -------------------------------------------------------------- */
@@ -568,7 +732,13 @@ function connect(){
   es.onerror = () => { $('state').textContent = 'reconnecting'; };
   es.onmessage = e => {
     let d; try{ d = JSON.parse(e.data); }catch(x){ return; }
-    if(d.kind === 'fleet') renderFleet(d.rows);
+    if(d.kind === 'fleet'){
+      renderFleet(d.rows);
+      /* The target moves whenever Friday reports on a session, so the chip has
+         to follow rather than be set once at load. */
+      fetch(U('/state')).then(r => r.json())
+        .then(st => paintTarget(st.target || '')).catch(() => {});
+    }
     if(d.kind === 'message' && d.message){
       turn('friday', d.message.text, {first: d.message.kind === 'proactive'});
       if(inCall || speakBack) speak(d.message.text, false);
@@ -589,6 +759,7 @@ document.addEventListener('click', function once(){
   try{
     const s = await (await fetch(U('/state'))).json();
     renderFleet(s.fleet);
+    paintTarget(s.target || '');
     (s.history || []).forEach(m => turn(m.role === 'user' ? 'you' : 'friday',
                                         m.text, {first: m.kind === 'proactive'}));
     if(!s.engine.voicebridge)

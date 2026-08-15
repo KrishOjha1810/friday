@@ -175,7 +175,7 @@ friday/
   nearest.py            matching what you said to the names that exist
   when.py               "yesterday", "on Friday" -> a real range of time
 static/index.html       the page
-tests/                  11 suites, all runnable with plain python3
+tests/                  16 suites, all runnable with plain python3
 ```
 
 ### The three watchers, and why they are separate
@@ -309,15 +309,11 @@ one.
 
 Kept honest rather than tidy.
 
-- The fleet strip is glanceable but not an action surface: no peek panel to read
-  a question and answer it inline.
-- Asks have no lifecycle: they do not collapse into a one-line resolution, and
-  several at once would stack rather than queue.
-- No suggested replies on an ask (the design calls for two to four tappable).
-- No target chip in the composer, so routing is inferred rather than visible.
-- No presence gating: Friday does not know whether you are at the page, at the
-  machine, or away, so everything is routed the same way.
-- The phone uses the same page with no phone-specific layout.
+- Several asks at once stack in the thread rather than queueing behind a
+  "+2 waiting" affordance.
+- Presence is known but coarse: Friday knows whether you are looking at the
+  page, not whether you are at the machine but elsewhere.
+- The phone layout collapses the fleet strip but is otherwise the desktop page.
 - Calendar is read-only: Friday warns you about a meeting and cannot move one.
 
 ---
