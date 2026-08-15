@@ -238,3 +238,51 @@ def test_a_step_is_not_finished_by_the_agent_clearing_its_throat():
         time.sleep(0.6)
         assert sent == ["one"], f"moved on while it was still talking: {sent}"
         r.stop()
+
+
+def test_a_held_plan_does_not_go_silent_forever():
+    """It announced the hold once and the thread exited. Go to lunch and the
+    plan ceased to exist as far as you were concerned, while the work behind it
+    stayed stopped."""
+    pid = plans.create("nudged", "api", ["one", "two"], sid="s")
+    said = []
+    r = plans.Runner(announce=lambda t, items=None: said.append(t),
+                     send=lambda sid, t: True,
+                     look=lambda sid: {"status": "idle", "question": "",
+                                       "path": ""})
+    r.POLL, r.NUDGE_AFTER, r.NUDGE_LIMIT = 0.05, 0.15, 2
+    plans.set_plan(pid, plans.HELD)
+    r._nudge(pid, "api", "Should I force-push?")
+    time.sleep(0.9)
+    assert any("Still waiting on api" in s for s in said), said
+    r.stop()
+
+
+def test_the_reminder_stops_once_you_answer():
+    pid = plans.create("answered", "api", ["one"], sid="s")
+    said = []
+    r = plans.Runner(announce=lambda t, items=None: said.append(t),
+                     send=lambda sid, t: True, look=lambda sid: {})
+    r.POLL, r.NUDGE_AFTER, r.NUDGE_LIMIT = 0.05, 0.15, 5
+    plans.set_plan(pid, plans.HELD)
+    r._nudge(pid, "api", "Should I?")
+    time.sleep(0.25)
+    plans.set_plan(pid, plans.RUNNING)          # you answered
+    before = len(said)
+    time.sleep(0.6)
+    assert len(said) == before, f"kept nagging after it was answered: {said}"
+    r.stop()
+
+
+def test_a_plan_left_running_by_a_restart_is_reported():
+    """"Survives a restart" was true of the data and not of the execution. A
+    plan left running sat running forever and nobody was ever told."""
+    pid = plans.create("interrupted", "api", ["one", "two"], sid="s")
+    p = plans.get(pid)
+    plans.set_plan(pid, plans.RUNNING)
+    plans.set_step(p["steps"][0]["id"], plans.RUNNING)
+    said = []
+    plans.sweep_on_start(lambda t, items=None: said.append(t))
+    assert said, "said nothing about an abandoned plan"
+    assert "don't know whether it finished" in said[0], said
+    assert plans.get(pid)["state"] == plans.HELD, plans.get(pid)["state"]

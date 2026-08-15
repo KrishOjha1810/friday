@@ -87,15 +87,35 @@ def test_a_flood_is_capped_and_what_was_held_back_is_admitted():
     assert "needing you" in said[-1], said[-1]
 
 
-def test_there_is_a_ceiling_per_hour():
-    f, said = _feeds()
-    f.add("s", _Src(), period=0)
-    f.spoken = [time.time()] * feeds.PER_HOUR
-    f.sources["s"][0].items = [_item("x", 0)]
-    f.sources["s"][2] = 0
+def test_the_ceiling_is_shared_and_what_it_stops_is_kept():
+    """The ceiling lives in one budget now, shared with the watchtower and the
+    inbox. And an item it stops is HELD: the note it prints says "say what did
+    I miss for the list", and that list has to exist."""
+    from friday import budget as budgets
+    b = budgets.Budget(per_hour=1, burst=1)
+    said = []
+    f = feeds.Feeds(lambda text, items=None: said.append(text), budget=b)
+    f.add("s", _Src([_item("first", 1), _item("second", 1),
+                     _item("third", 1)]), period=0)
     f._collect()
-    assert not [s for s in said if s.startswith("x")], said
-    assert said and "haven't read out" in said[-1], said
+    assert sum(1 for s in said if not s.startswith("And")) == 1, said
+    assert any("haven't read out" in s for s in said), said
+    held = [row[1] for row in b.held()]
+    assert len(held) == 2, f"suppressed items were destroyed: {held}"
+
+
+def test_quiet_holds_rather_than_deletes():
+    """Quiet used to be a delete key: everything arriving during it was gone
+    for good, while the product offered to list it."""
+    from friday import budget as budgets
+    b = budgets.Budget()
+    said = []
+    f = feeds.Feeds(lambda text, items=None: said.append(text),
+                    hushed=lambda: True, budget=b)
+    f.add("s", _Src([_item("while you were away", 0)]), period=0)
+    f._collect()
+    assert said == [], said
+    assert [r[1] for r in b.held()] == ["while you were away"], b.held()
 
 
 def test_quiet_covers_every_source():

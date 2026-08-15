@@ -35,8 +35,9 @@ QUIET_FIRST_RUN = True   # the backlog on startup is not news
 
 
 class Inbox:
-    def __init__(self, announce, log=None, hushed=None):
+    def __init__(self, announce, log=None, hushed=None, budget=None):
         self.announce = announce
+        self.budget = budget
         self._log = log or (lambda *_: None)
         self._own_hush = hushed or (lambda: False)
         self.seen = {}            # channel id -> newest ts reported
@@ -157,6 +158,9 @@ class Inbox:
                                        "channel": ch.get("id", "")}
         gist = text if len(text) <= 200 else text[:200].rsplit(" ", 1)[0] + "…"
         offer = ", ".join(self._offers(text, where))
+        if self.budget and not self.budget.allow(1):
+            self.budget.hold(f"{who} in {where}: {gist}", where)
+            return
         self.announce(f"{who} in {where}: {gist}\n{offer}",
                       items=[{"sid": "", "label": where, "kind": "slack"}])
 

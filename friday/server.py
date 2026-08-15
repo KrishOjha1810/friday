@@ -380,6 +380,14 @@ def run(port: int = PORT, expose: bool = False):
     # recognition mangled every one.
     from . import vocab as _vocab
     _vocab.keep_fresh()
+    # Say what was left unfinished. "Survives a restart" was true of the data
+    # and not of the execution: a plan left running sat running forever and
+    # nobody was ever told.
+    try:
+        from . import plan as _plan
+        _plan.sweep_on_start(_friday.watch.announce)
+    except Exception as e:
+        engine.log(f"friday plan sweep: {e}")
     srv = ThreadingHTTPServer((host, port), Handler)
     if expose:
         print(f"Friday is listening on http://{host}:{port}?k={SECRET}")

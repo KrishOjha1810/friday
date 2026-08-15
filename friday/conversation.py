@@ -29,9 +29,9 @@ import re
 import time
 from pathlib import Path
 
-from . import (actions, connectors, engine, feeds, fleetcache, inbox,
-               memory, nearest, plan as plans, push, replies,
-               watchtower, when)
+from . import (actions, budget as budgets, connectors, engine, feeds,
+               fleetcache, inbox, memory, nearest, plan as plans,
+               push, replies, watchtower, when)
 
 # What kind of thing the user just said.
 ASK_FLEET = "fleet"        # "what's running", "who needs me"
@@ -568,10 +568,14 @@ class Friday:
             log=engine.log)
         # One place watches every session and reports what it said, so nothing
         # is announced twice and nothing is missed.
+        # One allowance shared by everything that speaks unprompted, so a busy
+        # minute produces one held list rather than three separate ones.
+        self.budget = budgets.Budget()
         self.watch = watchtower.Watchtower(
             self.announce,
             log=engine.log,
-            hushed=lambda: self.quiet)
+            hushed=lambda: self.quiet,
+            budget=self.budget)
         # The same idea for people rather than agents: a Slack message brought
         # to you with something you can do about it.
         # Everything that is not an agent and not Slack: GitHub, your repos,
@@ -580,14 +584,16 @@ class Friday:
         self.feeds = feeds.Feeds(
             self.announce,
             log=engine.log,
-            hushed=lambda: self.quiet)
+            hushed=lambda: self.quiet,
+            budget=self.budget)
         self.feeds.add("github", feeds.GitHubFeed(), period=180)
         self.feeds.add("git", feeds.GitFeed(), period=900)
         self.feeds.add("calendar", feeds.CalendarFeed(), period=120)
         self.inbox = inbox.Inbox(
             self.announce,
             log=engine.log,
-            hushed=lambda: self.quiet)
+            hushed=lambda: self.quiet,
+            budget=self.budget)
         self.history = []          # [{role, text, ts, kind}]
         self.focus = (engine.routing.new_focus()
                       if engine.AVAILABLE else {"mentioned": [], "ts": 0})
@@ -1095,6 +1101,17 @@ class Friday:
                 break
         news = [h for h in self.history
                 if h.get("kind") == "proactive" and h.get("ts", 0) > since]
+        # Everything held back because Friday was over budget or you had asked
+        # for quiet. Without this the offer above ("say what did I miss") points
+        # at a list that was already thrown away, which is a promise the code
+        # could not keep.
+        held = []
+        try:
+            held = [text for _when, text, _src in self.budget.held(since=since)]
+        except Exception:
+            held = []
+        if held:
+            news = news + [{"text": t} for t in held]
         if not news:
             waiting = self._waiting()
             if waiting:

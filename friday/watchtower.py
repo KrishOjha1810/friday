@@ -36,8 +36,11 @@ MAX_REPORT = 600      # characters of raw reply kept for "say more"
 
 
 class Watchtower:
-    def __init__(self, announce, log=None, hushed=None):
+    def __init__(self, announce, log=None, hushed=None, budget=None):
         self.announce = announce
+        # This is the highest-volume source of the three and had no cap
+        # whatsoever, while the other two rationed themselves carefully.
+        self.budget = budget
         # Asked separately from voicebridge's attention engine, so "quiet" works
         # even when that engine is unreachable.
         self._own_hush = hushed or (lambda: False)
@@ -167,6 +170,10 @@ class Watchtower:
         q = (row.get("question") or "").strip()
         if q and q[:40] not in short:
             short = short.rstrip(".") + f". It's asking: {q}"
+        urgency = 0 if q else 1
+        if self.budget and not self.budget.allow(urgency):
+            self.budget.hold(f"{lead}: {short}", label)
+            return
         self.announce(f"{lead}: {short}",
                       items=[{"sid": row["sid"], "label": label,
                               "kind": "blocked" if q else "spoke"}])

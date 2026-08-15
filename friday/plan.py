@@ -192,6 +192,48 @@ def describe(plan: dict) -> str:
     return head + ":\n" + "\n".join(lines)
 
 
+def held_plans() -> list:
+    """Plans stopped waiting for you. Something has to remember them."""
+    con = _db()
+    try:
+        rows = con.execute("SELECT id FROM plans WHERE state=? "
+                           "ORDER BY updated", (HELD,)).fetchall()
+    finally:
+        con.close()
+    return [get(r[0]) for r in rows]
+
+
+def running_plans() -> list:
+    """Plans left mid-flight, which after a restart means abandoned."""
+    con = _db()
+    try:
+        rows = con.execute("SELECT id FROM plans WHERE state=? "
+                           "ORDER BY updated", (RUNNING,)).fetchall()
+    finally:
+        con.close()
+    return [get(r[0]) for r in rows]
+
+
+def sweep_on_start(announce) -> None:
+    """Say what was left unfinished when Friday last stopped.
+
+    "It survives a restart" was true of the DATA and not of the execution: a
+    plan left running sat running forever, and nobody was ever told. You would
+    close the tab mid-plan and it would simply cease to exist as far as you were
+    concerned."""
+    for plan in running_plans():
+        stuck = unfinished(plan)
+        set_plan(plan["id"], HELD)
+        if stuck:
+            which = ", ".join(str(s["seq"] + 1) for s in stuck)
+            announce(f"The plan on {plan['target']} stopped while step {which} "
+                     f"was in flight, so I don't know whether it finished. "
+                     f"Say \"where is the plan\" to see it.")
+        else:
+            announce(f"The plan on {plan['target']} was interrupted. Say "
+                     f"\"run the plan\" to carry on.")
+
+
 class Runner:
     """Walks one plan, one step at a time, on evidence.
 
@@ -261,6 +303,32 @@ class Runner:
             set_plan(plan_id, FAILED)
             self.announce(f"The plan stopped: {e}")
 
+    NUDGE_AFTER = 900         # 15 minutes, then remind, and keep reminding
+    NUDGE_LIMIT = 4           # after an hour of silence, stop nagging
+
+    def _nudge(self, plan_id: int, target: str, question: str) -> None:
+        """Bring a held plan back up, until it is answered or you give up on it.
+
+        A repeating reminder rather than one shot, because the whole cost of a
+        held plan is that the work behind it is stopped. It stops on its own
+        after an hour: a reminder that never ends is just noise with a timer."""
+        def _wait():
+            for _ in range(self.NUDGE_LIMIT):
+                for _tick in range(int(self.NUDGE_AFTER / max(self.POLL, 0.05))):
+                    if self._stop.is_set():
+                        return
+                    time.sleep(self.POLL)
+                    plan = get(plan_id)
+                    if not plan or plan["state"] != HELD:
+                        return           # answered, or you stopped it
+                self.announce(f"Still waiting on {target} before the plan can "
+                              f"go on: {question[:120]}",
+                              items=[{"sid": "", "label": target,
+                                      "kind": "blocked"}])
+            self.announce(f"I'll stop reminding you about the plan on {target}. "
+                          f"Say \"where is the plan\" when you want it.")
+        threading.Thread(target=_wait, daemon=True).start()
+
     def _do(self, plan: dict, step: dict) -> bool:
         """One step. True to keep going, False to stop the plan here."""
         from . import replies
@@ -293,6 +361,10 @@ class Runner:
                               f"{asked}",
                               items=[{"sid": sid, "label": plan["target"],
                                       "kind": "blocked"}])
+                # Say it once, then keep it alive. Announcing a hold and then
+                # never mentioning it again means you go to lunch and the plan
+                # quietly ceases to exist as far as you are concerned.
+                self._nudge(plan["id"], plan["target"], asked)
                 return False
             if path:
                 said = replies.last_said(path)

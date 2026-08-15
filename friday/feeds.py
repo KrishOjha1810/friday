@@ -29,20 +29,24 @@ import time
 
 from . import engine
 
-PER_ROUND = 3         # most items announced in one pass
-PER_HOUR = 15         # a ceiling on how much Friday may say unprompted
+PER_ROUND = 3         # most items announced in one pass. The hourly ceiling
+                      # lives in budget.Budget now, shared with the watchtower
+                      # and the inbox, because three private counters produced
+                      # three separate "and N more" notes in one second.
 TIMEOUT = 12          # seconds any one source gets to answer
 
 
 class Feeds:
-    def __init__(self, announce, log=None, hushed=None):
+    def __init__(self, announce, log=None, hushed=None, budget=None):
         self.announce = announce
+        # Shared with the watchtower and the inbox. Three separate counters
+        # produced three separate "and N more" notes in the same second.
+        self.budget = budget
         self._log = log or (lambda *_: None)
         self._own_hush = hushed or (lambda: False)
         self.sources = {}         # name -> (source, period, last_polled)
         self.seen = set()         # keys already announced
         self.muted = set()        # source names you asked to be spared
-        self.spoken = []          # timestamps, for the hourly ceiling
         self.held = 0             # items not announced, so it can say so
         self._stop = threading.Event()
         self._started = False
@@ -113,27 +117,35 @@ class Feeds:
             return
         if not fresh or self._hushed():
             for it in fresh:
-                self.seen.add(it["key"])     # heard about, chose not to say
+                self.seen.add(it["key"])
+                # Quiet is a silence, not a delete key. Alertmanager's rule:
+                # a silence suppresses the notification, never the alert.
+                if self.budget:
+                    self.budget.hold(it.get("text", ""), it.get("source", ""))
             return
         fresh.sort(key=lambda it: (it.get("urgency", 1), it.get("key")))
-        room = min(PER_ROUND, max(0, PER_HOUR - self._said_this_hour()))
-        for it in fresh[:room]:
+        said, rest = 0, []
+        for it in fresh:
             self.seen.add(it["key"])
-            self._say(it)
-        rest = fresh[room:]
+            urgency = it.get("urgency", 1)
+            spendable = (self.budget.allow(urgency) if self.budget
+                         else said < PER_ROUND)
+            if said < PER_ROUND and spendable:
+                self._say(it)
+                said += 1
+            else:
+                rest.append(it)
         for it in rest:
-            self.seen.add(it["key"])
+            # HELD, not dropped. The line below promises a list; it has to
+            # exist.
+            if self.budget:
+                self.budget.hold(it.get("text", ""), it.get("source", ""))
         if rest:
             urgent = [it for it in rest if it.get("urgency", 1) == 0]
             note = (f"And {len(rest)} more I haven't read out"
                     + (f", {len(urgent)} of them needing you" if urgent else "")
                     + '. Say "what did I miss" for the list.')
             self.announce(note)
-
-    def _said_this_hour(self) -> int:
-        cut = time.time() - 3600
-        self.spoken = [t for t in self.spoken if t > cut]
-        return len(self.spoken)
 
     def _hushed(self) -> bool:
         try:
@@ -147,7 +159,6 @@ class Feeds:
             return False
 
     def _say(self, item: dict) -> None:
-        self.spoken.append(time.time())
         text = item.get("text", "")
         offers = item.get("offers") or []
         if offers:
