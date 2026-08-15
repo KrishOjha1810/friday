@@ -165,6 +165,61 @@ await check('it offers the verbs that turn a message into work', async () => {
   await page.waitForSelector('#peek', { state: 'hidden', timeout: 3000 });
 });
 
+await check('a production error offers what you do about a production error',
+  async () => {
+  // A panel that answers a Sentry alert with "brief me" is a panel you stop
+  // opening. Each kind gets the verbs that fit it.
+  await page.waitForFunction(
+    () => [...document.querySelectorAll('.bub')].some(
+      b => /Sentry/.test(b.textContent) && b.querySelector('.act')),
+    { timeout: 20000 });
+  const bub = await page.$('.bub:has(.act)');
+  const acts = await page.$$('.bub .act');
+  for (const a of acts) {
+    const holder = await a.evaluateHandle(e => e.closest('.bub'));
+    const text = await holder.evaluate(e => e.textContent);
+    if (!/Sentry/.test(text)) continue;
+    await a.click();
+    await page.waitForSelector('#peek:not([hidden])', { timeout: 5000 });
+    const verbs = await page.$$eval('#peekSuggest button', els =>
+      els.map(e => e.textContent));
+    assert(verbs.some(v => /File a ticket/.test(v)),
+           `sentry verbs were ${verbs}`);
+    assert(verbs.some(v => /Open in Sentry/.test(v)),
+           `no way through to the issue: ${verbs}`);
+    const state = await page.textContent('#peekState');
+    assert(/production/.test(state), `panel said "${state}"`);
+    await page.keyboard.press('Escape');
+    await page.waitForSelector('#peek', { state: 'hidden', timeout: 3000 });
+    return;
+  }
+  assert(false, 'no actionable Sentry announcement arrived');
+});
+
+await check('a plan can be approved from the panel that shows it', async () => {
+  await page.waitForFunction(
+    () => [...document.querySelectorAll('.bub')].some(
+      b => /Nothing has run yet/.test(b.textContent) && b.querySelector('.act')),
+    { timeout: 20000 });
+  const acts = await page.$$('.bub .act');
+  for (const a of acts) {
+    const holder = await a.evaluateHandle(e => e.closest('.bub'));
+    const text = await holder.evaluate(e => e.textContent);
+    if (!/Nothing has run yet/.test(text)) continue;
+    await a.click();
+    await page.waitForSelector('#peek:not([hidden])', { timeout: 5000 });
+    const verbs = await page.$$eval('#peekSuggest button', els =>
+      els.map(e => e.textContent));
+    assert(verbs.some(v => /Run the plan/.test(v)), `plan verbs were ${verbs}`);
+    assert(verbs.some(v => /Not now/.test(v)),
+           `no way to decline: ${verbs}`);
+    await page.keyboard.press('Escape');
+    await page.waitForSelector('#peek', { state: 'hidden', timeout: 3000 });
+    return;
+  }
+  assert(false, 'no approvable plan arrived');
+});
+
 await check('the alerts bell shows on or off distinctly', async () => {
   const before = await page.getAttribute('body', 'data-push');
   assert(before === 'off' || before === 'on',

@@ -438,6 +438,10 @@ class SentryFeed:
                 "urgency": 0 if n < self.EXEMPT else 1,
                 "text": s.describe(r),
                 "url": r.get("url", ""),
+                # So the panel can offer the two things you actually do about a
+                # production error: file it, or put an agent on it.
+                "items": [{"sid": "", "label": r.get("project") or "production",
+                           "kind": "sentry", "url": r.get("url", "")}],
             })
         return out
 

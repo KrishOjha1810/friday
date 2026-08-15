@@ -109,6 +109,29 @@ def _install():
     C.actions.interrupt_session = lambda sid: True
 
 
+def _announce_the_other_kinds(friday):
+    """One production error and one plan waiting for approval.
+
+    Both reach the page through the same announcement path as a Slack message
+    and both need DIFFERENT verbs, which is precisely the thing a unit test
+    cannot see and a stray CSS rule can silently break."""
+    import threading as _t
+
+    def later():
+        time.sleep(3.5)
+        friday.watch.announce(
+            "Sentry in web: TypeError: undefined is not a function "
+            "(412 times, 38 people hit).",
+            items=[{"sid": "", "label": "web", "kind": "sentry",
+                    "url": "https://sentry.io/organizations/x/issues/1/"}])
+        time.sleep(1.0)
+        friday.watch.announce(
+            "api's plan for adding OAuth. Nothing has run yet:\n"
+            "1. Add the oauth module\n2. Wire the callback route",
+            items=[{"sid": "s1", "label": "api", "kind": "plan"}])
+    _t.Thread(target=later, daemon=True).start()
+
+
 def _announce_a_slack_message(friday):
     """One message from a person, so the browser can exercise the panel that
     turns a message into work."""
@@ -133,6 +156,7 @@ def main():
     threading.Thread(target=lambda: server.run(port), daemon=True).start()
     time.sleep(1.5)
     _announce_a_slack_message(server._friday)
+    _announce_the_other_kinds(server._friday)
     print(f"READY http://127.0.0.1:{port}/?k={server.SECRET}", flush=True)
     while True:
         time.sleep(1)

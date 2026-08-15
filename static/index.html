@@ -744,15 +744,29 @@ function openAbout(about, text){
   }
   peeking = null;
   $('peekName').textContent = about.label || 'this';
-  $('peekState').textContent = kind === 'slack' ? 'from a person' : '';
-  $('peekDot').className = 'd ' + (kind === 'blocked' ? 'needs' : 'idle');
+  $('peekState').textContent = kind === 'slack' ? 'from a person'
+                             : kind === 'sentry' ? 'in production'
+                             : kind === 'plan' ? 'waiting for your approval' : '';
+  $('peekDot').className = 'd ' + ((kind === 'blocked' || kind === 'sentry')
+                                   ? 'needs' : kind === 'plan' ? 'working' : 'idle');
   $('peekAsk').textContent = text.split('\n')[0].slice(0, 240);
   const box = $('peekSuggest'); box.textContent = '';
+  /* The verbs are per kind, because a panel that offers "brief me" about a
+     production error is a panel you stop opening. Each list is the two or three
+     things a person actually does next about that kind of thing. */
   const verbs = kind === 'slack'
     ? [['Draft a reply', 'draft a reply'],
        ['File a ticket', 'file a ticket'],
        ['Put it in the calendar', 'schedule a meeting'],
        ['Ask a session about it', null]]
+    : kind === 'sentry'
+    ? [['File a ticket', 'file a ticket'],
+       ['Put a session on it', null],
+       ['Open in Sentry', about.url ? {open: about.url} : null]]
+    : kind === 'plan'
+    ? [['Run the plan', 'run the plan'],
+       ['Show me the steps', 'where is the plan'],
+       ['Not now', null]]
     : [['What did I miss', 'what did I miss'],
        ['Brief me', 'brief me']];
   verbs.forEach(([label, cmd]) => {
@@ -760,13 +774,18 @@ function openAbout(about, text){
     b.textContent = label;
     b.onclick = () => {
       closePeek();
-      if(cmd) say(cmd);
+      if(cmd && cmd.open) window.open(cmd.open, '_blank', 'noopener');
+      else if(cmd) say(cmd);
+      else if(label === 'Not now') { /* closing IS the answer */ }
       else { input.value = 'ask '; input.focus(); }
     };
     box.appendChild(b);
   });
   $('peekReply').placeholder = kind === 'slack'
-    ? 'Say what the reply should say' : 'Say something about this';
+    ? 'Say what the reply should say'
+    : kind === 'sentry' ? 'Say which session should look at it'
+    : kind === 'plan' ? 'Say what to change about the plan'
+    : 'Say something about this';
   $('peekReply').value = '';
   aboutMode = about;
   $('peek').hidden = false;
