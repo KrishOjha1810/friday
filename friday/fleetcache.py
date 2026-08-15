@@ -50,7 +50,10 @@ def snapshot(max_age: float = None) -> dict:
                 threading.Thread(target=_refresh_once, daemon=True).start()
             return _rows
     try:
-        rows = engine.fleet.snapshot() if engine.AVAILABLE else {}
+        # Every vendor, not just Claude. Friday conducted one agent on a machine
+        # that had two, and the plan always said vendor-neutral.
+        from . import agents
+        rows = agents.sessions()
         err = ""
     except Exception as e:
         rows, err = None, f"{type(e).__name__}: {e}"

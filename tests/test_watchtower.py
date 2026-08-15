@@ -71,6 +71,10 @@ def _session(d, sid, label, text, question=""):
 def _tower():
     watchtower.engine = _Engine
     fleetcache.engine = _Engine
+    # agents.py resolves the vendor for every row, so it needs the same fake
+    # engine: rebinding the name in one module does not reach the others.
+    from friday import agents
+    agents.engine = _Engine
     said = []
     w = watchtower.Watchtower(lambda text, items=None: said.append((text, items)))
     return w, said

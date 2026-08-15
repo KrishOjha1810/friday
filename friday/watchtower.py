@@ -124,9 +124,11 @@ class Watchtower:
             if not path:
                 continue
             try:
-                # The agent's own words only. Reading the last message of any
-                # role reported Friday's own injected prompt as the answer.
-                text = replies.last_said(path)
+                # The agent's own words only, parsed by whoever made it: a
+                # Codex rollout and a Claude transcript are different files
+                # saying the same thing.
+                from . import agents
+                text = agents.last_said(r)
             except Exception:
                 continue
             if not text or text == self.seen.get(sid):

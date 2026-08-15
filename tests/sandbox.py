@@ -39,4 +39,11 @@ def use_temp_config() -> Path:
     memory.PROJECTS = tmp / "projects"
     memory.PROJECTS.mkdir(parents=True, exist_ok=True)
 
+    # Other vendors' transcripts are your history too. A test that reads real
+    # Codex sessions both leaks them into results and makes those results
+    # depend on what you happened to run last week.
+    from friday import agents
+    agents.Codex.ROOT = tmp / "codex-sessions"
+    agents.Codex.ROOT.mkdir(parents=True, exist_ok=True)
+
     return tmp

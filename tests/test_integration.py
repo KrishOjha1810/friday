@@ -259,7 +259,17 @@ def test_a_session_vanishing_mid_conversation_is_handled():
     gone = STATE.pop("s1")
     fleetcache.bust()
     try:
-        reply = say("tell api to run the tests")
+        # The cache serves one stale reading and refreshes behind it, which is
+        # what makes /state instant. Give the refresher a moment rather than
+        # demanding the product block.
+        reply = ""
+        for _ in range(20):
+            reply = say("tell api to run the tests")
+            if "api" not in reply or "don't have" in reply.lower() \
+                    or "isn't running" in reply.lower() \
+                    or "reopen" in reply.lower():
+                break
+            time.sleep(0.5)
         assert "api" not in reply or "don't have" in reply.lower() \
             or "isn't running" in reply.lower() or "reopen" in reply.lower(), reply
     finally:
