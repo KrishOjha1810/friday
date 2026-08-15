@@ -141,7 +141,37 @@ def test_a_misnamed_state_still_lands():
     assert jira.moved == [("PROJ-4", "In Progress")], jira.moved
 
 
-def test_jira_not_connected_says_so_rather_than_failing_oddly():
+def test_a_ticket_goes_wherever_you_actually_track_things():
+    """Jira and Linear answer the same questions, so nothing above the
+    connector should know which one it got. Plenty of teams replaced Jira with
+    Linear entirely."""
+    connectors.allow_write(True)
+    real = connectors.get
+    linear = _Jira()          # same shape, different product
+
+    def only_linear(n):
+        if n == "linear":
+            return linear
+        if n == "jira":
+            class Off(_Jira):
+                def ready(self):
+                    return False
+            return Off()
+        return real(n)
+
+    connectors.get = only_linear
+    try:
+        f = Friday()
+        f.announce = lambda *a, **k: None
+        f.handle("file a ticket: the parser dies")
+        f.handle("yes")
+        assert linear.created, "it never reached the tracker that was connected"
+    finally:
+        connectors.get = real
+        connectors.allow_write(False)
+
+
+def test_no_tracker_connected_says_so_rather_than_failing_oddly():
     connectors.allow_write(True)
     real = connectors.get
 
@@ -154,7 +184,7 @@ def test_jira_not_connected_says_so_rather_than_failing_oddly():
         f = Friday()
         f.announce = lambda *a, **k: None
         r = f.handle("file a ticket: something")
-        assert "isn't connected" in r["reply"].lower(), r["reply"]
+        assert "no ticket tracker is connected" in r["reply"].lower(), r["reply"]
     finally:
         connectors.get = real
         connectors.allow_write(False)

@@ -320,7 +320,7 @@ _CONNECT_RE = re.compile(r"\bconnect\s+(?:to\s+)?(\w+)(?:\s+([\w.\-]{8,}))?", re
 # that can never work. Slack issues xoxe.xoxp- when token rotation is on.
 _TOKEN_RE = re.compile(
     r"(xoxe\.xoxp-[\w.\-]{10,}|xoxe-[\w.\-]{10,}|xoxp-[\w-]{10,}"
-    r"|xoxb-[\w-]{10,}|ya29\.[\w.\-]{20,})")
+    r"|xoxb-[\w-]{10,}|ya29\.[\w.\-]{20,}|lin_api_[\w-]{20,})")
 _CONNS_RE = re.compile(
     r"\b(?:what(?:'?s| is)? connected|connections?|integrations?|"
     r"what (?:tools|apps) (?:do you have|are connected))\b", re.I)
@@ -433,7 +433,8 @@ def classify(text: str) -> tuple:
         # xoxe.xoxp- and xoxe- are Slack too (rotation-enabled tokens). Missing
         # them here meant a pasted token silently became "what's connected?".
         which = ("slack" if tok.startswith(("xoxp-", "xoxb-", "xoxe.", "xoxe-"))
-                 else "gmail" if tok.startswith("ya29.") else "")
+                 else "gmail" if tok.startswith("ya29.")
+                 else "linear" if tok.startswith("lin_api_") else "")
         return CONNECT, {"which": which, "token": tok}
     m = _GOOGLE_CREDS_RE.search(t)
     if m:
@@ -1049,6 +1050,18 @@ class Friday:
                         "reads": reads}
         return self._say(f"Put \"{title}\" in for {reads}?", needs_confirm=True)
 
+    def _tracker(self):
+        """Whichever tracker you actually use. Jira and Linear answer the same
+        questions, so nothing above here needs to know which one it got."""
+        for name in ("jira", "linear"):
+            c = connectors.get(name)
+            try:
+                if c and c.ready():
+                    return c
+            except Exception:
+                continue
+        return None
+
     def _file_ticket(self, project: str, summary: str) -> dict:
         """File a ticket, from what you said or from what you were just reading.
 
@@ -1056,10 +1069,11 @@ class Friday:
         of reading Slack in the first place. Nothing is filed without you seeing
         the exact wording, because a ticket is something colleagues read with
         your name on it."""
-        ji = connectors.get("jira")
-        if not (ji and getattr(ji, "ready", lambda: False)()):
-            return self._say("Jira isn't connected. " + ji.setup_hint()
-                             if ji else "I don't have a Jira connector.")
+        ji = self._tracker()
+        if ji is None:
+            hint = connectors.get("jira")
+            return self._say("No ticket tracker is connected. "
+                             + (hint.setup_hint() if hint else ""))
         if not summary:
             # Fall back to what you were just looking at, so "file a ticket"
             # right after reading a thread does the obvious thing.
@@ -1083,9 +1097,13 @@ class Friday:
                          needs_confirm=True)
 
     def _move_ticket(self, key: str, to: str) -> dict:
-        ji = connectors.get("jira")
-        if not (ji and getattr(ji, "ready", lambda: False)()):
-            return self._say("Jira isn't connected, so I can't move anything.")
+        ji = self._tracker()
+        if ji is None:
+            return self._say("No ticket tracker is connected, so I can't move "
+                             "anything.")
+        if not hasattr(ji, "move"):
+            return self._say(f"I can file into {ji.name} but not move things "
+                             f"there yet.")
         if not connectors.can_write() and not connectors.gh_can_write():
             return self._say(f"I can't change tickets yet. Say \"let yourself "
                              f"post\" if you want me to be able to move "
@@ -2317,7 +2335,7 @@ class Friday:
                                  f"{r.get('error', 'the calendar refused it')}. "
                                  f"Nothing was added.")
             if act["kind"] == "ticket":
-                ji = connectors.get("jira")
+                ji = self._tracker() or connectors.get("jira")
                 r = ji.create(act["summary"], project=act.get("project", ""))
                 if r.get("ok"):
                     return self._say(f"Filed {r['key']}. {r.get('url', '')}")
@@ -2327,7 +2345,7 @@ class Friday:
                 return self._say(f"It didn't file: {r.get('error', 'Jira said no')}"
                                  f". Nothing was created.")
             if act["kind"] == "move":
-                ji = connectors.get("jira")
+                ji = self._tracker() or connectors.get("jira")
                 r = ji.move(act["key"], act["to"])
                 if r.get("ok"):
                     return self._say(f"{act['key']} is now {r['state']}.")

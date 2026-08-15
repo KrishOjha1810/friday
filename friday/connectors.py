@@ -1301,7 +1301,105 @@ def mcp_servers() -> dict:
 
 
 # -------------------------------------------------------------- registry ----
-REGISTRY = {c.name: c() for c in (GitHub, Slack, Gmail, Jira)}
+# ---------------------------------------------------------------- Linear ----
+class Linear:
+    """Linear, which for a lot of teams replaced Jira entirely.
+
+    One GraphQL endpoint and one personal API key, which is a far shorter setup
+    than Jira's three-part site, email and token. Same verbs, same gate: reading
+    is free, writing is off until you say otherwise, and nothing is created
+    without you seeing the words."""
+
+    name = "linear"
+    URL = "https://api.linear.app/graphql"
+
+    def token(self) -> str:
+        return os.environ.get("LINEAR_TOKEN") or _secret("linear_token")
+
+    _checked = {}
+
+    def ready(self) -> bool:
+        tok = self.token()
+        if not tok:
+            return False
+        hit = self._checked.get(tok)
+        if hit and time.time() - hit[1] < 300:
+            return hit[0]
+        ok = bool(self._q("{ viewer { id name } }").get("viewer"))
+        self._checked[tok] = (ok, time.time())
+        return ok
+
+    def setup_hint(self) -> str:
+        return ("make a personal API key at linear.app/settings/api, then paste "
+                "it to me on its own. It starts with lin_api_.")
+
+    def _q(self, query: str, variables: dict = None) -> dict:
+        tok = self.token()
+        if not tok:
+            return {}
+        body = json.dumps({"query": query,
+                           "variables": variables or {}}).encode()
+        try:
+            req = urllib.request.Request(self.URL, data=body, headers={
+                "Authorization": tok, "Content-Type": "application/json"})
+            with urllib.request.urlopen(req, timeout=TIMEOUT) as r:
+                d = json.loads(r.read())
+        except Exception as e:
+            return {"error": str(e)[:160]}
+        if d.get("errors"):
+            return {"error": str(d["errors"][0].get("message", ""))[:160]}
+        return d.get("data") or {}
+
+    def my_issues(self, limit: int = 8) -> list:
+        d = self._q("""
+            { viewer { assignedIssues(first: %d, filter:
+                {state: {type: {nin: ["completed", "canceled"]}}}) {
+                nodes { identifier title state { name } url } } } }""" % limit)
+        if d.get("error"):
+            return [{"error": d["error"]}]
+        nodes = (((d.get("viewer") or {}).get("assignedIssues") or {})
+                 .get("nodes") or [])
+        return [{"key": n.get("identifier", ""), "summary": n.get("title", ""),
+                 "status": (n.get("state") or {}).get("name", ""),
+                 "url": n.get("url", "")} for n in nodes]
+
+    def teams(self) -> list:
+        d = self._q("{ teams(first: 20) { nodes { id key name } } }")
+        return ((d.get("teams") or {}).get("nodes") or []) if not d.get("error") \
+            else []
+
+    def create(self, summary: str, project: str = "", body: str = "",
+               kind: str = "") -> dict:
+        if not (can_write() or gh_can_write()):
+            return {"error": "writing_not_enabled"}
+        if not summary.strip():
+            return {"error": "nothing_to_file"}
+        teams = self.teams()
+        if not teams:
+            return {"error": "no team I can file against"}
+        want = project.strip().upper()
+        team = next((t for t in teams if t.get("key", "").upper() == want), None)
+        if team is None:
+            if len(teams) != 1:
+                return {"error": "which_project",
+                        "projects": [t.get("key", "") for t in teams[:8]]}
+            team = teams[0]
+        d = self._q("""
+            mutation($t: String!, $s: String!, $d: String) {
+              issueCreate(input: {teamId: $t, title: $s, description: $d}) {
+                success issue { identifier url } } }""",
+                    {"t": team["id"], "s": summary.strip()[:250],
+                     "d": body.strip()[:3000] or None})
+        if d.get("error"):
+            return d
+        made = (d.get("issueCreate") or {}).get("issue") or {}
+        if not made:
+            return {"error": "Linear refused it"}
+        return {"ok": True, "key": made.get("identifier", ""),
+                "url": made.get("url", "")}
+
+
+REGISTRY = {c.name: c() for c in (GitHub, Slack, Gmail, Jira, Linear)}
 
 
 def _works(c) -> bool:

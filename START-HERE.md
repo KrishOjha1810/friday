@@ -157,6 +157,9 @@ say `let yourself post`, so by default Friday physically cannot post as you.
 through EventKit, so it covers whichever accounts are already in Calendar, and
 if the package is missing it tells you the one line to run.
 
+**Linear**: paste a personal API key from linear.app/settings/api on its own
+line. It starts with `lin_api_`, and Friday works out what it is.
+
 **Gmail**: say `connect gmail`. Google needs an OAuth client created once, which
 Friday cannot do for you, so it gives you the four exact steps; paste the client
 ID and secret back and it handles the rest forever, refreshing the token itself.
