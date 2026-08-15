@@ -49,6 +49,24 @@ page.on('pageerror', e => consoleErrors.push('pageerror: ' + e.message));
 
 await page.goto(URL, { waitUntil: 'networkidle' });
 
+await check('a new conversation shows you what to try, and tapping one asks it',
+  async () => {
+  // A blank box does not tell you any of this exists, and a product with
+  // thirty-six commands and no visible starting point is one people type
+  // "hello" into and close.
+  await page.waitForSelector('.firstrun button', { timeout: 8000 });
+  const options = await page.$$eval('.firstrun button', els =>
+    els.map(e => e.textContent));
+  assert(options.length >= 3, `only ${options.length} suggestions`);
+  assert(options.join(' ').includes('brief me'), options);
+  const before = await page.$$eval('.turn', els => els.length);
+  await page.click('.firstrun button');
+  await page.waitForFunction(
+    n => document.querySelectorAll('.turn').length > n, before,
+    { timeout: 20000 });
+  assert(!(await page.$('.firstrun')), 'the card stayed after being used');
+});
+
 await check('the page loads and names itself', async () => {
   const name = await page.textContent('.name');
   assert(name && name.trim() === 'Friday', `header said ${JSON.stringify(name)}`);

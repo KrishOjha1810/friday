@@ -243,6 +243,23 @@ body[data-push="off"] .btn.bell { opacity: .72; }
   header .fleet .sess { flex: 0 0 auto; }
   body[data-calm="1"] header .fleet .sess:not(.needs) { display: none; }
 }
+
+/* The opening card. A blank box does not tell you that any of this exists, and
+   a product with thirty-six commands and no visible starting point is a product
+   people type "hello" into and close. */
+.firstrun { margin: 18px 12px; padding: 14px; border-radius: 14px;
+            border: 1px solid rgba(255,255,255,.08);
+            background: rgba(255,255,255,.02); }
+.firstrun b { display: block; font-size: 13px; opacity: .65; font-weight: 600;
+              margin-bottom: 10px; letter-spacing: .02em; }
+.firstrun .rows { display: flex; flex-direction: column; gap: 6px; }
+.firstrun button { display: flex; flex-direction: column; align-items: flex-start;
+    gap: 2px; width: 100%; text-align: left; font: inherit; cursor: pointer;
+    color: inherit; background: none; border: 1px solid transparent;
+    border-radius: 10px; padding: 8px 10px; }
+.firstrun button:hover { border-color: rgba(255,255,255,.14);
+                         background: rgba(255,255,255,.03); }
+.firstrun em { font-style: normal; font-size: 12px; opacity: .55; }
 </style>
 </head>
 <body data-call="off" data-mode="idle">
@@ -295,6 +312,18 @@ body[data-push="off"] .btn.bell { opacity: .72; }
 </div>
 
 <main id="thread"></main>
+<template id="firstrun">
+  <div class="firstrun">
+    <b>Try one of these</b>
+    <div class="rows">
+      <button data-ask="brief me">brief me<em>everything, in one answer</em></button>
+      <button data-ask="who needs me">who needs me<em>only the agents that are stuck</em></button>
+      <button data-ask="ask everyone what they are working on">ask everyone what they're working on<em>one question, every session</em></button>
+      <button data-ask="what did I miss">what did I miss<em>anything held back while you were away</em></button>
+      <button data-ask="what's connected">what's connected<em>and how to connect the rest</em></button>
+    </div>
+  </div>
+</template>
 <button class="jump" id="jump" hidden></button>
 <div class="target" id="target" hidden></div>
 
@@ -328,7 +357,7 @@ body[data-push="off"] .btn.bell { opacity: .72; }
       </svg>
     </button>
   </div>
-  <div class="tip" id="tip">what's running · what does &lt;name&gt; need · open &lt;name&gt; · tell &lt;name&gt; to …</div>
+  <div class="tip" id="tip">brief me · ask everyone what they're working on · file a ticket: … · what did I miss</div>
 </footer>
 
 <script>
@@ -772,6 +801,7 @@ document.addEventListener('click', function once(){
     const s = await (await fetch(U('/state'))).json();
     renderFleet(s.fleet);
     paintTarget(s.target || '');
+    setTimeout(maybeFirstRun, 60);
     (s.history || []).forEach(m => turn(m.role === 'user' ? 'you' : 'friday',
                                         m.text, {first: m.kind === 'proactive'}));
     if(!s.engine.voicebridge)
@@ -881,6 +911,26 @@ document.addEventListener('visibilitychange', reportPresence);
 window.addEventListener('focus', reportPresence);
 window.addEventListener('blur', reportPresence);
 setInterval(reportPresence, 15000);
+
+/* Shown once, on an empty conversation, and it removes itself the moment you
+   say anything. */
+let firstRunUsed = false;
+function maybeFirstRun(){
+  if(firstRunUsed) return;
+  // A startup notice ("my brain is still loading") is not a conversation, so
+  // it must not count as one: checking for any turn at all meant the card never
+  // appeared on exactly the machines that needed it most.
+  if(thread.querySelector('.turn.you') || thread.querySelector('.firstrun')) return;
+  const card = $('firstrun').content.cloneNode(true);
+  card.querySelectorAll('button').forEach(b => {
+    b.onclick = () => { const q = b.dataset.ask;
+                        firstRunUsed = true;
+                        const el = thread.querySelector('.firstrun');
+                        if(el) el.remove();
+                        say(q); };
+  });
+  thread.appendChild(card);
+}
 
 pushState().then(sub => { pushOn = !!sub; paintBell(); reportPresence(); });
 

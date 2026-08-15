@@ -68,7 +68,31 @@ class Codex:
 
     name = "codex"
     ROOT = Path.home() / ".codex" / "sessions"
+    INDEX = Path.home() / ".codex" / "session_index.jsonl"
     WORKING_FOR = 90        # seen in the last minute and a half means live
+
+    def _names(self) -> dict:
+        """What Codex calls its own threads.
+
+        It keeps a proper name for each ("Apply to Bitpanda role") while the
+        working directory gives you things like
+        "2026-05-31-senior-software-engineer-react-broker-web", which is not a
+        name anybody would say out loud, and Friday is a thing you talk to."""
+        out = {}
+        try:
+            for line in self.INDEX.read_text(errors="ignore").splitlines():
+                line = line.strip()
+                if not line.startswith("{"):
+                    continue
+                try:
+                    d = json.loads(line)
+                except Exception:
+                    continue
+                if d.get("id") and d.get("thread_name"):
+                    out[d["id"]] = str(d["thread_name"]).strip()
+        except Exception:
+            return {}
+        return out
 
     def _files(self, limit: int = 40) -> list:
         try:
@@ -121,6 +145,7 @@ class Codex:
 
     def sessions(self) -> list:
         rows = []
+        named = self._names()
         for path in self._files():
             try:
                 mtime = path.stat().st_mtime
@@ -134,9 +159,14 @@ class Codex:
             working = (got["event"] == "task_started"
                        and time.time() - mtime < self.WORKING_FOR)
             cwd = meta.get("cwd") or ""
-            label = Path(cwd).name if cwd else (meta.get("id") or "")[:8]
+            sid = meta.get("id") or path.stem
+            # Its own name first, then the folder, then the id: in that order
+            # because that is the order of how likely you are to recognise it.
+            label = named.get(sid) or (Path(cwd).name if cwd else sid[:8])
+            if len(label) > 34:
+                label = label[:34].rstrip(" -_") + "…"
             rows.append({
-                "sid": meta.get("id") or path.stem,
+                "sid": sid,
                 "label": label or "codex",
                 "status": "working" if working else "idle",
                 "path": str(path),
