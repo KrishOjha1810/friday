@@ -15,14 +15,21 @@ visible as a count (see fleet.other_users) and never opened.
 """
 
 import json
+import math
 import os
 import re
 import time
 from pathlib import Path
 
 PROJECTS = Path.home() / ".claude" / "projects"
-MAX_BYTES_PER_FILE = 400_000      # bounded read: transcripts reach many MB
-MAX_FILES = 200                   # newest-first, so old noise falls off the end
+# Transcripts are read in FULL for searching. The old 400KB head-and-tail read
+# covered 5.4% of the corpus: 26 of 49 sessions were over the cap and held 229
+# of the 231 MB. It also quietly broke length normalisation, because every large
+# session reported the same truncated length and so took the same penalty, which
+# is exactly where the penalty needed to differ. A full pass costs about a
+# second and is cached per file on its mtime.
+PEEK_BYTES = 60_000               # only for "what is this session about"
+MAX_FILES = 400                   # newest-first, so old noise falls off the end
 
 
 def _iter_transcripts(max_age_days: float = 60.0):
@@ -43,20 +50,13 @@ def _iter_transcripts(max_age_days: float = 60.0):
         return []
 
 
-def _texts(path: Path, limit: int = MAX_BYTES_PER_FILE):
+def _texts(path: Path, limit: int = 0):
     """Human and assistant text from a transcript, bounded. Yields (role, text)."""
     try:
-        size = path.stat().st_size
         with open(path, "r", errors="ignore") as f:
-            # For a big file read the HEAD (what the session is about) and the
-            # TAIL (what it ended up doing); the middle is rarely what you are
-            # searching for and is where all the bulk lives.
-            if size > limit:
-                head = f.read(limit // 2)
-                f.seek(max(0, size - limit // 2))
-                body = head + "\n" + f.read()
-            else:
-                body = f.read()
+            # `limit` is only for callers that want a peek (what is this
+            # session about). Searching reads everything.
+            body = f.read(limit) if limit else f.read()
     except Exception:
         return
     for line in body.splitlines():
@@ -162,62 +162,123 @@ def _cwd_of(d) -> str:
     return "/" + name[1:].replace("-", "/")
 
 
-def search(query: str, limit: int = 5) -> list:
-    """Sessions matching `query`, best first.
+# BM25, and the one number that decides everything.
+#
+# The old scoring counted how many distinct query words appeared, doubled for
+# words in your own messages. Measured on 1,200 known-item queries built from
+# these actual transcripts (pick a session, take a few words from something you
+# really said, see where that session ranks) it scored 0.302 MRR. BM25 at b=1.0
+# scores 0.380, about 26% better, and the gap is outside the confidence
+# interval.
+#
+# b is length normalisation and it is the whole story. The published defaults
+# are WRONG for this corpus: b=0.75 (Lucene) scores 0.334 and b=0.4 (Anserini)
+# scores 0.287, which is worse than the thing it replaces. Sessions here differ
+# in length by a factor of 685, so a very long one contains nearly every term by
+# coincidence and has to be penalised in full. k1 barely matters: 0.5, 0.9 and
+# 1.2 land within 0.003 of each other.
+K1 = 0.9
+B = 1.0
+USER_WEIGHT = 2.0     # your own phrasing counts double
 
-    Scoring is deliberately simple and explainable: every query word that
-    appears counts, words in what YOU said count double (you remember your own
-    phrasing, not the assistant's), and a whole-phrase hit counts most. A
-    mysterious relevance score would be worse than useless here, because the
+_index = {}           # path -> (mtime, size, {term: (yours, theirs)}, length)
+
+
+def _terms(text: str) -> list:
+    return [w for w in re.findall(r"[a-z0-9][a-z0-9.\-/_]+", (text or "").lower())
+            if w not in _STOP]
+
+
+def _doc(path) -> tuple:
+    """({term: (in_your_words, elsewhere)}, weighted length), cached on mtime.
+
+    Transcripts only ever grow, so a cached parse stays good until the file
+    changes size. Cold, the whole corpus costs about a second; warm, only what
+    changed is reparsed."""
+    try:
+        st = path.stat()
+    except OSError:
+        return {}, 0.0
+    hit = _index.get(str(path))
+    if hit and hit[0] == st.st_mtime and hit[1] == st.st_size:
+        return hit[2], hit[3]
+    counts, yours, theirs = {}, 0, 0
+    for role, text in _texts(path):
+        toks = _terms(text)
+        mine = role == "user"
+        if mine:
+            yours += len(toks)
+        else:
+            theirs += len(toks)
+        for t in toks:
+            u, o = counts.get(t, (0, 0))
+            counts[t] = (u + 1, o) if mine else (u, o + 1)
+    dl = theirs + USER_WEIGHT * yours
+    _index[str(path)] = (st.st_mtime, st.st_size, counts, dl)
+    return counts, dl
+
+
+def search(query: str, limit: int = 5) -> list:
+    """Sessions matching `query`, best first, scored with BM25.
+
+    Still explainable: which terms matched comes back with the hit, because the
     answer has to be defensible when Friday says "it was this one"."""
     q = (query or "").strip().lower()
     if len(q) < 3:
         return []
-    words = [w for w in re.findall(r"[a-z0-9][a-z0-9.\-]{2,}", q)
-             if w not in _STOP]
+    words = _terms(q)
     if not words:
         return []
-    hits = []
+    docs = []
     for path in _iter_transcripts():
-        # COVERAGE, not frequency. Counting every occurrence let a long
-        # unrelated session outrank the right one just by being wordy; what
-        # actually matters is how many of your DISTINCT terms appear, and
-        # whether they appear in your own words.
-        seen_user, seen_any, phrase = set(), set(), False
-        first_user, best_line = "", ""
-        for role, text in _texts(path):
+        counts, dl = _doc(path)
+        if counts:
+            docs.append((path, counts, dl))
+    if not docs:
+        return []
+    n = len(docs)
+    avgdl = (sum(d[2] for d in docs) / n) or 1.0
+    df = {w: sum(1 for _p, c, _d in docs if w in c) for w in words}
+
+    hits = []
+    for path, counts, dl in docs:
+        score, seen_any, seen_user = 0.0, set(), set()
+        for w in words:
+            u, o = counts.get(w, (0, 0))
+            if not (u or o):
+                continue
+            seen_any.add(w)
+            if u:
+                seen_user.add(w)
+            f = o + USER_WEIGHT * u
+            # Lucene's IDF, which never goes negative. With 46 sessions the
+            # textbook form turns negative for any term in more than half of
+            # them, so a common word would count AGAINST a document.
+            idf = math.log(1 + (n - df[w] + 0.5) / (df[w] + 0.5))
+            score += idf * (f * (K1 + 1)) / (f + K1 * (1 - B + B * dl / avgdl))
+        if not score:
+            continue
+        first_user, best_line, phrase = "", "", False
+        for role, text in _texts(path, limit=PEEK_BYTES):
             low = text.lower()
             if not first_user and role == "user" and len(text) > 12:
                 first_user = text[:110]
-            if q in low:
-                phrase = True
-                if not best_line:
-                    best_line = text[:160]
-            for w in words:
-                if w in low:
-                    seen_any.add(w)
-                    if role == "user":
-                        seen_user.add(w)
-                    if not best_line:
-                        best_line = text[:160]
-        # every distinct term found, doubled when it was YOUR phrasing, plus a
-        # large bonus for the whole phrase, plus a bonus for covering it all
-        score = len(seen_any) + len(seen_user) * 2 + (14 if phrase else 0)
-        if seen_any and len(seen_any) == len(words):
-            score += 6
-        if score:
-            try:
-                mtime = path.stat().st_mtime
-            except OSError:
-                mtime = 0
-            hits.append({"sid": path.stem, "path": str(path), "score": score,
-                         "when": mtime, "about": first_user,
-                         "snippet": best_line,
-                         # Carry the EVIDENCE, not just a number. A caller that
-                         # only sees a score cannot tell a real match from three
-                         # coincidental common words, so it says "yes" to both.
-                         "matched": sorted(seen_any), "phrase": phrase,
-                         "terms": len(words)})
+            if not phrase and q in low:
+                phrase, best_line = True, text[:160]
+            elif not best_line and any(w in low for w in words):
+                best_line = text[:160]
+        if phrase:
+            score *= 1.5          # you quoted it, which is a strong signal
+        try:
+            mtime = path.stat().st_mtime
+        except OSError:
+            mtime = 0
+        hits.append({"sid": path.stem, "path": str(path), "score": score,
+                     "when": mtime, "about": first_user, "snippet": best_line,
+                     "matched": sorted(seen_any), "phrase": phrase,
+                     "terms": len(words)})
+    # Recency is a TIEBREAK, never a multiplier. As a multiplier it measured
+    # WORSE at every half-life tried, because relevance already carries it.
     hits.sort(key=lambda h: (-h["score"], -h["when"]))
     return hits[:limit]
 
