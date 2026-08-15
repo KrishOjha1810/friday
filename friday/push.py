@@ -222,18 +222,26 @@ def send_one(sub: dict, payload: dict, urgency: str = "high") -> int:
         return 0
 
 
-def send(title: str, body: str, url: str = "/", tag: str = "") -> int:
-    """Notify every subscribed browser. Returns how many were reached."""
+def send(title: str, body: str, url: str = "/", tag: str = "",
+         urgency: int = 0) -> int:
+    """Notify every subscribed browser. Returns how many were reached.
+
+    `urgency` reaches the push service as its own header, which decides whether
+    a phone may hold the message until it next wakes. Sending everything as
+    high, which is what this used to do, spends the one lever that keeps a
+    locked phone from buzzing over something that could have waited."""
     payload = {"title": title, "body": body[:300], "url": url,
                "tag": tag or "friday"}
+    level = "high" if urgency <= 0 else "normal"
     ok = 0
     for sub in subscriptions():
-        if send_one(sub, payload) in (200, 201, 202):
+        if send_one(sub, payload, urgency=level) in (200, 201, 202):
             ok += 1
     return ok
 
 
-def send_async(title: str, body: str, url: str = "/", tag: str = "") -> None:
+def send_async(title: str, body: str, url: str = "/", tag: str = "",
+               urgency: int = 0) -> None:
     """Never make a conversation wait on Apple's servers."""
-    threading.Thread(target=lambda: send(title, body, url, tag),
+    threading.Thread(target=lambda: send(title, body, url, tag, urgency),
                      daemon=True).start()

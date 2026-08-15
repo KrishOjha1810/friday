@@ -212,10 +212,16 @@ class GitHubFeed:
 
     # What each of GitHub's reasons actually means for your day. Anything not
     # listed is background: being subscribed to a repo is not a summons.
+    #
+    # Only a request aimed at YOU is urgent. A team mention is a message to a
+    # room, and treating it the same as "review this" is how the urgent tier
+    # fills with things nobody is waiting on you for. Since sorting is
+    # urgency-first, a wide urgent tier does not just add noise, it crowds out
+    # the thing that genuinely needed you.
     URGENT = {"review_requested": "wants your review",
               "mention": "mentioned you",
-              "assign": "assigned you",
-              "team_mention": "mentioned your team"}
+              "assign": "assigned you"}
+    WORTH_KNOWING = {"team_mention": "mentioned your team"}
     WORTH = {"ci_activity": "build", "state_change": "changed",
              "comment": "commented", "author": "on your thread"}
 
@@ -249,6 +255,13 @@ class GitHubFeed:
                 # Group per repo and name the workflows.
                 job = title.split(" workflow")[0].strip() or "a workflow"
                 broken.setdefault(repo, set()).add(job)
+            elif reason in self.WORTH_KNOWING:
+                out.append({
+                    "key": f"gh:{n.get('id')}:{n.get('updated_at')}",
+                    "urgency": 1,
+                    "text": f"GitHub: somebody {self.WORTH_KNOWING[reason]} in "
+                            f"{repo}: {title}",
+                    "offers": []})
             else:
                 quiet.setdefault(repo, 0)
                 quiet[repo] += 1
@@ -256,7 +269,11 @@ class GitHubFeed:
             names = ", ".join(sorted(jobs)[:4])
             out.append({
                 "key": f"gh:broken:{repo}:{len(jobs)}:{names}",
-                "urgency": 0,
+                # A broken build is worth knowing, not a summons. Nobody is
+                # blocked on your answer, and it will still be broken in an
+                # hour. Urgency 0 is reserved for something that cannot
+                # continue without you.
+                "urgency": 1,
                 "text": (f"GitHub: {len(jobs)} workflow"
                          f"{'s' if len(jobs) != 1 else ''} failing in {repo} "
                          f"({names})."),

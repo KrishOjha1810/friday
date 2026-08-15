@@ -99,8 +99,8 @@ def test_a_subscription_must_actually_be_one():
 def _friday():
     f = Friday()
     sent = []
-    push.send_async = lambda title, body, url="/", tag="": sent.append(
-        (title, body, tag))
+    push.send_async = lambda title, body, url="/", tag="", urgency=0: (
+        sent.append((title, body, tag, urgency)))
     return f, sent
 
 
@@ -133,6 +133,7 @@ def test_only_things_that_need_you_reach_the_phone():
                items=[{"sid": "s", "label": "api", "kind": "blocked"}])
     assert len(sent) == 1, sent
     assert "api" in sent[0][0].lower(), sent[0]
+    assert sent[0][3] == 0, "an agent blocked on you was sent as low priority"
 
 
 def test_the_same_thing_does_not_buzz_twice():
@@ -160,3 +161,29 @@ if __name__ == "__main__":
         if name.startswith("test_") and callable(fn):
             fn()
     print("ok  push: encrypted end to end, and it stays quiet unless it matters")
+
+
+def test_urgency_reaches_the_push_service():
+    """The header decides whether a locked phone may hold the message until it
+    next wakes. Sending everything as high, which is what this used to do,
+    spends the one lever that keeps a phone from buzzing over something that
+    could have waited."""
+    seen = []
+    real = push.send_one
+    push.send_one = lambda sub, payload, urgency="high": seen.append(urgency) or 201
+    _p, _u, _a, sub = _browser()
+    push.subscribe(sub)
+    try:
+        push.send("api needs you", "blocked", urgency=0)
+        push.send("a slack message", "later", urgency=1)
+    finally:
+        push.send_one = real
+    assert seen == ["high", "normal"], seen
+
+
+def test_a_person_in_slack_is_not_as_urgent_as_a_blocked_agent():
+    f, sent = _friday()
+    f.announce("Sam in #eng: are you free Thursday?",
+               items=[{"sid": "", "label": "#eng", "kind": "slack"}])
+    assert len(sent) == 1, sent
+    assert sent[0][3] == 1, "a chat message was sent at maximum urgency"

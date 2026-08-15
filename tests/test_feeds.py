@@ -161,7 +161,10 @@ def test_a_cron_failing_forever_is_one_line_not_forty():
     items = gh.poll()
     assert len(items) == 1, [i["text"] for i in items]
     assert "nightly" in items[0]["text"], items[0]["text"]
-    assert items[0]["urgency"] == 0
+    # Worth knowing, not a summons: nobody is blocked on your answer and it
+    # will still be broken in an hour. Urgency 0 is reserved for something that
+    # cannot continue without you, and a wide urgent tier crowds that out.
+    assert items[0]["urgency"] == 1, items[0]["urgency"]
 
 
 def test_a_person_asking_for_something_is_never_grouped_away():

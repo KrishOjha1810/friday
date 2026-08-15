@@ -848,7 +848,11 @@ class Friday:
             self._pushed[tag] = now
             title = f"{label} needs you" if label else "Friday"
             body = text.split("\n")[0][:200]
-            push.send_async(title, body, tag=tag)
+            # An agent blocked on you is high; a message from a person can wait
+            # for the phone to wake on its own.
+            blocked = "blocked" in kinds
+            push.send_async(title, body, tag=tag,
+                            urgency=0 if blocked else 1)
         except Exception:
             pass
 
