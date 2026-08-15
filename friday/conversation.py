@@ -2016,7 +2016,7 @@ class Friday:
         fleetcache.bust()
 
         def _deliver():
-            sid, path = "", ""
+            sid = ""
             for _ in range(40):                      # up to ~40 seconds
                 time.sleep(1.0)
                 try:
@@ -2025,7 +2025,7 @@ class Friday:
                     rows = {}
                 row = rows.get(hit["sid"])
                 if row:
-                    sid, path = row.get("sid", ""), row.get("path", "")
+                    sid = row.get("sid", "")
                     break
             if not sid:
                 self.announce(f"{label} opened, but I couldn't see it come up, "

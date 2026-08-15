@@ -959,8 +959,8 @@ def gmail_setup_steps() -> str:
         "2. Enable the Gmail API: "
         "https://console.cloud.google.com/apis/library/gmail.googleapis.com\n"
         "3. Create Credentials, OAuth client ID, type Desktop app.\n"
-        f"4. Paste me the client ID and secret together, like: "
-        f"gmail <client-id> <client-secret>\n"
+        "4. Paste me the client ID and secret together, like: "
+        "gmail <client-id> <client-secret>\n"
         "Then I'll open one page for you to press Allow, and handle the rest "
         "forever: the token refreshes itself.")
 

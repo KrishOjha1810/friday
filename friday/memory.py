@@ -16,7 +16,6 @@ visible as a count (see fleet.other_users) and never opened.
 
 import json
 import math
-import os
 import re
 import time
 from pathlib import Path

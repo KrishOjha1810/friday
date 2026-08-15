@@ -171,7 +171,6 @@ class Feeds:
             text = it.get("text", "")
             offers = it.get("offers") or []
             lines.append(text + ("  " + ", ".join(offers) if offers else ""))
-        top = min(items, key=lambda i: i.get("urgency", 1))
         self.announce(compose(lines),
                       items=[{"sid": i.get("sid", ""),
                               "label": i.get("source", ""),

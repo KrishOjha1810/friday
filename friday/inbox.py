@@ -25,7 +25,6 @@ back to you, and it says each thing once.
 
 import re
 import threading
-import time
 
 from . import connectors, engine
 

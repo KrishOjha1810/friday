@@ -19,7 +19,6 @@ because a heard compound name is split into words at the wrong place, and
 comparing word by word compares the wrong things.
 """
 
-import difflib
 
 # How the scoring works, and why it is not the obvious thing.
 #

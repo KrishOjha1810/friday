@@ -23,7 +23,6 @@ Three rules, each of which is a way this goes wrong:
   runs on an assumption nobody made.
 """
 
-import json
 import sqlite3
 import threading
 import time
