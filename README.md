@@ -133,7 +133,9 @@ perform:
   exact words and waiting for a yes, and it sends them verbatim rather than
   regenerating. `turn off posting` revokes it without touching reading.
 - Put anything in your calendar, or schedule a meeting.
-- Comment, merge or change anything anywhere. Everything is read-only.
+- Comment on a pull request until you turn writing on, and merge or change
+  anything at all, ever. `let yourself post` covers Slack messages and GitHub
+  comments, and nothing else.
 - Write code, or start work by itself.
 - See inside another person's sessions on this Mac. It can see that they exist.
 

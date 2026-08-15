@@ -131,8 +131,8 @@ never touch a scope list. Type the token rather than dictating it: a token canno
 survive being spoken. It is stored owner-only in `~/.friday/`, and Friday refuses
 to use it if the file is readable by anyone else.
 
-Every scope is a read. There is no `chat:write` anywhere, so Friday physically
-cannot post as you.
+Every scope Friday asks for is a read. `chat:write` is not among them unless you
+say `let yourself post`, so by default Friday physically cannot post as you.
 
 **Calendar** needs one macOS permission: System Settings, Privacy & Security,
 Automation, and allow Calendar for your terminal. Until that is granted Friday

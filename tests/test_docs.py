@@ -71,10 +71,14 @@ def test_the_docs_do_not_promise_what_friday_refuses_to_do():
     f = Friday()
     _can, cannot = f._abilities()
     assert cannot, "nothing is listed as impossible, which cannot be right"
-    # the two that matter most, because offering them would be acted on
-    assert "it drafts, you send" in text or "drafts, you send" in text, \
-        "the docs do not say Friday cannot post to Slack"
-    assert "cannot" in text and "calendar" in text, \
+    # The two that matter most, because acting on either would be irreversible.
+    # Posting is a SETTING now, so the docs must say it is off by default and
+    # that you see the words first, not that it can never happen.
+    assert "let yourself post" in text, \
+        "the docs do not say how posting is turned on"
+    assert "until you" in text and "post" in text, \
+        "the docs do not say posting is off by default"
+    assert "calendar" in text and ("cannot" in text or "not connected" in text), \
         "the docs do not mention the calendar limit"
 
 
