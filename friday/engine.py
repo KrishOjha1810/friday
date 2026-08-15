@@ -71,3 +71,17 @@ def status() -> dict:
     except Exception:
         pass
     return out
+
+
+def log(msg: str) -> None:
+    """Write to voicebridge's log if there is one. Never raises.
+
+    Callers reached for `engine.core.log` directly, which quietly assumes that
+    AVAILABLE implies a working core. A partial install breaks that assumption
+    and the whole feature dies on a LOGGING call, which is an absurd way to lose
+    something. Now the worst case is a message nobody records."""
+    try:
+        if core is not None:
+            core.log(msg)
+    except Exception:
+        pass

@@ -228,7 +228,7 @@ def summarise(text: str, label: str = "") -> str:
             # Say the agent's own words instead. Losing brevity is a small cost;
             # reporting a file or an error code that does not exist is not.
             try:
-                engine.core.log(f"friday: dropped an invented summary "
+                engine.log(f"friday: dropped an invented summary "
                                 f"({made_up})")
             except Exception:
                 pass

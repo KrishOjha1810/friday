@@ -56,7 +56,8 @@ live credential, one typed prompts into a terminal someone was working in.
 
 Requires macOS, Python 3.9+, and
 [voicebridge](https://github.com/cc-vb/voicebridge) installed (Friday uses it
-for speech, session sensing and its local model).
+for speech, session sensing and its local model). Friday starts without it and
+says what is missing rather than failing oddly, but most of it will be dark.
 
 Two Python packages, both optional in the sense that Friday runs without them
 and says so rather than failing oddly:

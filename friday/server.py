@@ -112,7 +112,7 @@ def _transcribe(raw: bytes, ctype: str) -> str:
         return engine.core.cleanup_transcript(_stt.transcribe(wav)) or ""
     except Exception as e:
         try:
-            engine.core.log(f"friday stt: {e}")
+            engine.log(f"friday stt: {e}")
         except Exception:
             pass
         return ""
@@ -348,7 +348,7 @@ def supervisor_loop():
                 msg = _friday.announce(text, items=state.get("_last_spoken"))
                 _push({"kind": "message", "message": msg})
         except Exception as e:
-            engine.core.log(f"friday supervisor: {e}")
+            engine.log(f"friday supervisor: {e}")
         time.sleep(3)
 
 

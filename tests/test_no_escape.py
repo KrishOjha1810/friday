@@ -65,3 +65,19 @@ if __name__ == "__main__":
         if name.startswith("test_") and callable(fn):
             fn()
     print("ok  no escape: tests cannot write, type, or open anything real")
+
+
+def test_logging_can_never_take_a_feature_down():
+    """`engine.core.log` assumes AVAILABLE implies a working core. A partial
+    voicebridge breaks that, and the feature then dies on a LOGGING call: this
+    is how a fresh clone on the wrong branch lost the whole conversation layer
+    with an AttributeError."""
+    from friday import engine
+    real_core, real_avail = engine.core, engine.AVAILABLE
+    try:
+        engine.core, engine.AVAILABLE = None, True
+        engine.log("nobody is listening, and that is fine")
+        from friday.conversation import Friday
+        assert Friday(), "Friday would not start with a half-present engine"
+    finally:
+        engine.core, engine.AVAILABLE = real_core, real_avail

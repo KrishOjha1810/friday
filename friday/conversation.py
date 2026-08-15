@@ -565,12 +565,12 @@ class Friday:
             announce=self.announce,
             send=actions.send_to_session,
             look=lambda sid: (fleetcache.snapshot() or {}).get(sid, {}),
-            log=(engine.core.log if engine.AVAILABLE else None))
+            log=engine.log)
         # One place watches every session and reports what it said, so nothing
         # is announced twice and nothing is missed.
         self.watch = watchtower.Watchtower(
             self.announce,
-            log=(engine.core.log if engine.AVAILABLE else None),
+            log=engine.log,
             hushed=lambda: self.quiet)
         # The same idea for people rather than agents: a Slack message brought
         # to you with something you can do about it.
@@ -579,14 +579,14 @@ class Friday:
         # rules instead of inventing its own idea of what is worth saying.
         self.feeds = feeds.Feeds(
             self.announce,
-            log=(engine.core.log if engine.AVAILABLE else None),
+            log=engine.log,
             hushed=lambda: self.quiet)
         self.feeds.add("github", feeds.GitHubFeed(), period=180)
         self.feeds.add("git", feeds.GitFeed(), period=900)
         self.feeds.add("calendar", feeds.CalendarFeed(), period=120)
         self.inbox = inbox.Inbox(
             self.announce,
-            log=(engine.core.log if engine.AVAILABLE else None),
+            log=engine.log,
             hushed=lambda: self.quiet)
         self.history = []          # [{role, text, ts, kind}]
         self.focus = (engine.routing.new_focus()
@@ -768,7 +768,7 @@ class Friday:
             snap = fleetcache.snapshot()
         except Exception as e:
             try:
-                engine.core.log(f"friday fleet: {e}")
+                engine.log(f"friday fleet: {e}")
             except Exception:
                 pass
             return ("I can't read your sessions at the moment, so I don't know "
