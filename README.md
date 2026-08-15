@@ -210,6 +210,7 @@ friday/
   memory.py             your past sessions and projects, searchable
   nearest.py            matching what you said to the names that exist
   when.py               "yesterday", "on Friday" -> a real range of time
+  vocab.py              tells the transcriber the names it is about to hear
   plan.py               a multi-step plan in SQLite, run one step at a time
   push.py               alerts to a locked phone (VAPID + aes128gcm)
 static/index.html       the page

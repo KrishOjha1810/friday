@@ -375,6 +375,11 @@ def run(port: int = PORT, expose: bool = False):
     # step-by-step progress lands in history and never reaches the browser, and
     # you would see it on your next reload rather than as it happened.
     _friday.plans.announce = _friday.watch.announce
+    # Tell the transcriber the names it is about to hear. Friday is the only
+    # process that knows them, and it was keeping them to itself while speech
+    # recognition mangled every one.
+    from . import vocab as _vocab
+    _vocab.keep_fresh()
     srv = ThreadingHTTPServer((host, port), Handler)
     if expose:
         print(f"Friday is listening on http://{host}:{port}?k={SECRET}")
