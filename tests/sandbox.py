@@ -43,6 +43,7 @@ def use_temp_config() -> Path:
     # Codex sessions both leaks them into results and makes those results
     # depend on what you happened to run last week.
     from friday import agents
+    agents.Antigravity.ROOT = tmp / "no-antigravity"
     agents.Codex.ROOT = tmp / "codex-sessions"
     agents.Codex.ROOT.mkdir(parents=True, exist_ok=True)
 

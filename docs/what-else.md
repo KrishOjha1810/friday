@@ -39,6 +39,19 @@ What this buys beyond Codex: the seam is the thing. Cursor, Gemini, Amp,
 opencode and whatever ships next all keep transcripts somewhere, and each
 becomes a file-format problem rather than a redesign.
 
+**Antigravity is the third, and it proved the seam twice over.** Once the
+easy way: it stores conversations as protobuf in SQLite, which is unreadable
+without the schema, but it also writes `implementation_plan.md`, `task.md` and
+`walkthrough.md` per conversation, deliberately, for a human to read. That is a
+BETTER surface than either of the other two, not a worse one, because a
+checklist says how far through it is and a transcript only says what it said.
+
+Once the hard way: Antigravity is an IDE, so it can be read and not typed into,
+which breaks the half of the seam that assumed conducting is the same
+everywhere. Rather than paper over it, `can_conduct()` is now part of the seam
+and Friday says plainly that it cannot reach that one. A confident "sent" for a
+message that went nowhere is the worst failure available here.
+
 ## 2. More verbs
 
 Reading is solved. Acting is one Slack message and one GitHub comment, both

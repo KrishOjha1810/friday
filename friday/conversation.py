@@ -29,7 +29,8 @@ import re
 import time
 from pathlib import Path
 
-from . import (actions, budget as budgets, connectors, engine, feeds,
+from . import (actions, agents, budget as budgets, connectors, engine,
+               feeds,
                fleetcache, inbox, memory, nearest, plan as plans,
                push, replies, watchtower, when)
 
@@ -2487,6 +2488,17 @@ class Friday:
             return self._no_session(
                 name, lambda n: self._propose_tell(n, message, want_answer),
                 message=message)
+        # Some agents can be read and not typed into. Antigravity is an IDE,
+        # not a terminal. Saying so here rather than after you confirm avoids
+        # the worst failure Friday has available to it: a confident "sent" for
+        # something that went nowhere, discovered hours later.
+        if not agents.can_conduct(hit):
+            who = hit.get("label", name)
+            vendor = hit.get("vendor", "that agent")
+            return self._say(
+                f"I can read {who} but I can't type into it: {vendor} runs in "
+                f"its own app rather than a terminal I can reach. Say "
+                f"\"open {who}\" and I'll bring it up for you.")
         self.target = hit.get("label", name)
         act = {"kind": "tell", "sid": hit.get("sid", ""),
                "await": want_answer, "path": hit.get("path", ""),

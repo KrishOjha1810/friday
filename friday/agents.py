@@ -21,6 +21,7 @@ format, not a redesign.
 
 import json
 import os
+import re
 import time
 from pathlib import Path
 
@@ -186,8 +187,188 @@ class Codex:
         return ["codex", "resume", row.get("sid", "")]
 
 
+# ----------------------------------------------------- Google Antigravity ----
+class Antigravity:
+    """Google's Antigravity, read from the markdown it leaves on disk.
+
+    The conversation itself lives in a SQLite file per thread whose payloads are
+    protobuf with no schema shipped alongside, and guessing at protobuf wire
+    format to read somebody's chat is the kind of thing that works until the day
+    it silently does not. But Antigravity also writes three markdown files per
+    conversation, on purpose, for you to read:
+
+        implementation_plan.md   what it intends to do, and what it needs to ask
+        task.md                  a checklist, with [x] as it goes
+        walkthrough.md           what it ended up doing
+
+    That is a better sensing surface than either Claude or Codex offers, not a
+    worse one. A transcript tells you what an agent said; a checklist tells you
+    how far through it is, which is the thing you actually wanted to know when
+    you asked what it was doing. So this vendor can say "4 of 7 done" where the
+    others can only say "still going".
+
+    The plan file also carries `> [!QUESTION]` blocks, which is Antigravity
+    stating plainly that it is blocked on you. That maps straight onto the one
+    category Friday treats as urgent.
+    """
+
+    name = "antigravity"
+    ROOT = Path.home() / ".gemini" / "antigravity" / "brain"
+    WORKING_FOR = 300        # touched in the last five minutes
+    # Antigravity keeps every conversation forever, and Friday's fleet is meant
+    # to be what is live right now. Codex is bounded the same way, by taking the
+    # forty newest rollouts; this is the same bound expressed in days, because
+    # these are directories rather than a sorted list of files.
+    STALE_AFTER = 7 * 86400
+
+    def _title(self, d: Path) -> str:
+        """What the thread is about.
+
+        Its own summary first: the metadata file carries a written one ("Task
+        checklist for Hero section enhancements") while the directory is a
+        UUID, and a UUID is not something you can say out loud to a thing you
+        talk to."""
+        for f in ("task.md", "implementation_plan.md", "walkthrough.md"):
+            try:
+                got = json.loads((d / (f + ".metadata.json")).read_text())
+                if got.get("summary"):
+                    return str(got["summary"]).strip()
+            except Exception:
+                continue
+        try:
+            for line in (d / "implementation_plan.md").read_text(
+                    errors="ignore").splitlines():
+                if line.startswith("# "):
+                    return line[2:].strip()
+        except Exception:
+            pass
+        return ""
+
+    def _progress(self, d: Path) -> tuple:
+        """How far through its own checklist it is: (done, total)."""
+        try:
+            text = (d / "task.md").read_text(errors="ignore")
+        except Exception:
+            return (0, 0)
+        done = len(re.findall(r"`?\[x\]`?", text, re.I))
+        todo = len(re.findall(r"`?\[ \]`?", text))
+        return (done, done + todo)
+
+    def _asking(self, d: Path) -> str:
+        """What it is waiting on you for, if anything.
+
+        Guarded on file order, and that guard is the whole difficulty here.
+        Questions stay in the plan file after you answer them in the app, so
+        reading the file alone would report a question you settled days ago as
+        blocking, forever, at the one urgency level that is exempt from the
+        budget. If the checklist or the walkthrough has been written SINCE the
+        plan, work moved on and the questions went with it."""
+        plan = d / "implementation_plan.md"
+        try:
+            when = plan.stat().st_mtime
+        except OSError:
+            return ""
+        for other in ("task.md", "walkthrough.md"):
+            try:
+                if (d / other).stat().st_mtime > when + 1:
+                    return ""
+            except OSError:
+                continue
+        try:
+            text = plan.read_text(errors="ignore")
+        except Exception:
+            return ""
+        if "[!QUESTION]" not in text and "[!IMPORTANT]" not in text:
+            return ""
+        # The lines after the marker, minus the blockquote furniture.
+        out, taking = [], False
+        for line in text.splitlines():
+            bare = line.lstrip("> ").strip()
+            if "[!QUESTION]" in line or "[!IMPORTANT]" in line:
+                taking = True
+                continue
+            if taking:
+                if not bare or not line.lstrip().startswith(">"):
+                    if out:
+                        break
+                    continue
+                out.append(re.sub(r"^\d+\.\s*", "", bare))
+        return " ".join(out)[:300]
+
+    def sessions(self) -> list:
+        rows = []
+        try:
+            dirs = [d for d in self.ROOT.iterdir() if d.is_dir()]
+        except Exception:
+            return []
+        for d in dirs:
+            files = [f for f in ("implementation_plan.md", "task.md",
+                                 "walkthrough.md") if (d / f).exists()]
+            if not files:
+                continue
+            mtime = max((d / f).stat().st_mtime for f in files)
+            if time.time() - mtime > self.STALE_AFTER:
+                continue
+            asked = self._asking(d)
+            done, total = self._progress(d)
+            label = self._title(d) or d.name[:8]
+            if len(label) > 34:
+                label = label[:34].rstrip(" -_") + "…"
+            topic = label
+            if total:
+                topic = f"{label} ({done} of {total} done)"
+            # Every box ticked means done, whatever the clock says. For the
+            # other two vendors "recently touched" is the only evidence there
+            # is, so a finished agent looks busy for five minutes after it
+            # stops. Antigravity states its own completion, and stated beats
+            # inferred.
+            finished = total > 0 and done == total
+            rows.append({
+                "sid": d.name,
+                "label": label,
+                "status": ("needs" if asked else
+                           "idle" if finished else
+                           "working" if time.time() - mtime < self.WORKING_FOR
+                           else "idle"),
+                "path": str(d / "walkthrough.md"),
+                "question": asked,
+                "topic": topic,
+                "cwd": "",
+                "mtime": mtime,
+                "vendor": self.name,
+            })
+        return rows
+
+    def last_said(self, row: dict) -> str:
+        """The walkthrough, which is Antigravity's own account of what it did,
+        falling back to the plan when it has not finished anything yet."""
+        d = Path(row.get("path", "")).parent
+        for f in ("walkthrough.md", "implementation_plan.md"):
+            try:
+                text = (d / f).read_text(errors="ignore")
+            except Exception:
+                continue
+            # Prose only: the headings, images and admonition markers are
+            # layout, and reading layout aloud is how a summary becomes noise.
+            body = [l.strip() for l in text.splitlines()
+                    if l.strip() and not l.lstrip().startswith(
+                        ("#", "!", ">", "|", "```", "---"))]
+            if body:
+                return " ".join(body)[:1200]
+        return ""
+
+    def resume(self, row: dict) -> list:
+        """Antigravity is an IDE, not a terminal, so there is no session to
+        resume into. Opening the app is the honest best effort, and Friday's
+        conducting verbs check this: a vendor that cannot be typed into is
+        reported as such rather than being sent a prompt that goes nowhere."""
+        return ["open", "-a", "Antigravity"]
+
+    conducts = False        # can be read, cannot be told things
+
+
 # ------------------------------------------------------------- the fleet ----
-VENDORS = [Claude(), Codex()]
+VENDORS = [Claude(), Codex(), Antigravity()]
 
 
 def available() -> list:
@@ -198,6 +379,8 @@ def available() -> list:
             if v.name == "claude" and engine.AVAILABLE:
                 live.append(v)
             elif v.name == "codex" and Codex.ROOT.exists():
+                live.append(v)
+            elif v.name == "antigravity" and Antigravity.ROOT.exists():
                 live.append(v)
         except Exception:
             continue
@@ -238,3 +421,12 @@ def last_said(row: dict) -> str:
 
 def resume_command(row: dict) -> list:
     return vendor_of(row).resume(row)
+
+
+def can_conduct(row: dict) -> bool:
+    """Whether Friday can type into this one, as opposed to only read it.
+
+    Not every agent has a terminal. Antigravity is an IDE, and pretending to
+    send it a message would produce the worst failure Friday has: a confident
+    "sent" for something that went nowhere, discovered hours later."""
+    return bool(getattr(vendor_of(row), "conducts", True))
