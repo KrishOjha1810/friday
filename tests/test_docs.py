@@ -23,7 +23,8 @@ from friday.conversation import classify  # noqa: E402
 DOCS = ("README.md", "START-HERE.md")
 # Lines in a code block that are not commands: shell invocations, transcript
 # labels, and the file tree.
-NOT_A_COMMAND = ("python3", "cd ", "for t in", "friday:", "you:", "$", "|", "*")
+NOT_A_COMMAND = ("python3", "pip3", "pip ", "cd ", "for t in", "friday:",
+                 "you:", "$", "|", "*", "brew ", "git ")
 
 
 def _commands() -> set:
