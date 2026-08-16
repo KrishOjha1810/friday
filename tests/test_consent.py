@@ -42,6 +42,9 @@ def _friday(*labels, asking=""):
                          "path": "", "topic": f"{label} work",
                          "mtime": time.time() - i}
     fleetcache.snapshot = lambda: rows
+    # Kept so a test can change the world between the offer and the yes, which
+    # is where several of these bugs lived.
+    globals()["_ROWS"] = rows
     SENT.clear()
     actions.send_to_session = lambda sid, t: SENT.append((sid, t)) or True
     f = Friday()
@@ -434,6 +437,34 @@ def test_asking_every_session_still_reaches_every_session():
         assert sorted(sid for sid, _t in SENT) == ["s0", "s1"], SENT
     finally:
         drop()
+
+
+def test_a_broadcast_goes_to_the_list_you_were_shown():
+    """A session that starts between the offer and the yes joined a broadcast
+    approved for two others. The confirmation described one thing and a
+    different thing happened, which is the failure confirmations exist to
+    prevent."""
+    f = _friday("api", "web")
+    rows = _ROWS
+    f.handle("ask everyone what they're doing")
+    rows["s2"] = {"sid": "s2", "label": "late", "question": "",
+                  "status": "idle", "path": "", "mtime": time.time()}
+    SENT.clear()
+    f.handle("yes")
+    assert sorted(sid for sid, _t in SENT) == ["s0", "s1"], SENT
+
+
+def test_a_session_that_closed_is_not_reported_as_sent():
+    """It can close between the offer and the yes, and the stored id was used
+    regardless and reported as sent: a claim about work that did not happen."""
+    f = _friday("api", "web")
+    rows = _ROWS
+    f.handle("tell api to deploy and tell web to build")
+    rows.pop("s1")
+    SENT.clear()
+    r = f.handle("yes")
+    assert [sid for sid, _t in SENT] == ["s0"], SENT
+    assert "closed" in r["reply"], r["reply"]
 
 
 if __name__ == "__main__":

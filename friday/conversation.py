@@ -2207,7 +2207,7 @@ class Friday:
         return self._say(f"{self.target}, in full:\n{full}")
 
     def _ask_all(self, tail: str, joiner: str = "",
-                 approved: bool = False) -> dict:
+                 approved: bool = False, only: list = None) -> dict:
         """Put one question to every running session and collect the answers.
 
         Doing this by hand means typing the same thing into five windows and
@@ -2219,6 +2219,13 @@ class Friday:
                     if r.get("sid")]
         except Exception:
             rows = []
+        if only is not None:
+            here = {r["sid"] for r in rows}
+            gone = [sid for sid in only if sid not in here]
+            rows = [r for r in rows if r["sid"] in set(only)]
+            if gone and not rows:
+                return self._say("Those sessions have all closed, so I didn't "
+                                 "send it anywhere.")
         if not rows:
             return self._say("Nothing is running, so there is nobody to ask.")
         question = tail if approved else self._as_question(tail, joiner)
@@ -2230,7 +2237,13 @@ class Friday:
         if not approved:
             names = ", ".join((r.get("label") or r.get("sid", ""))[:20]
                               for r in rows[:8])
-            self.pending = {"kind": "askall", "question": question}
+            # The sids you were shown, not whoever is running when you say
+            # yes. A session that started in between joined a broadcast you
+            # approved for two, which is the confirmation describing one thing
+            # and a different thing happening.
+            self.pending = {"kind": "askall", "question": question,
+                            "sids": [r["sid"] for r in rows],
+                            "names": names}
             return self._say(
                 f"That goes to all {len(rows)}: {names}.\nEach of them gets, "
                 f"exactly:\n\n{question}\n\nSend it?", needs_confirm=True)
@@ -3489,15 +3502,29 @@ class Friday:
                 return self._say("Started it in a new window." if ok else
                                  "I couldn't open a new window.")
             if act["kind"] == "askall":
-                return self._ask_all(act["question"], approved=True)
+                return self._ask_all(act["question"], approved=True,
+                                     only=act.get("sids") or [])
             if act["kind"] == "two":
+                # Checked against the fleet as it is NOW. A session can close
+                # between the offer and the yes, and the stored sid would be
+                # sent to regardless and reported as sent: a claim about work
+                # that did not happen, which is the one thing that must never
+                # be said.
+                try:
+                    live = set(fleetcache.snapshot())
+                except Exception:
+                    live = set()
                 out = []
                 for part in (act["first"], act["second"]):
                     sid = part.get("sid")
                     if not sid:
                         hit, _how = self._find_how(part["name"])
                         sid = hit.get("sid", "") if hit else ""
-                    ok = bool(sid) and actions.send_to_session(sid, part["text"])
+                    if not sid or (live and sid not in live):
+                        out.append(f"{part['name']}: it has closed, so nothing "
+                                   f"went there")
+                        continue
+                    ok = actions.send_to_session(sid, part["text"])
                     out.append(f"{part['name']}: "
                                + ("sent" if ok else "couldn't reach it"))
                 return self._say("; ".join(out) + ".")
