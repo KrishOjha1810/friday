@@ -639,6 +639,59 @@ class Slack:
         d = self._call("chat.postMessage", **args)
         return d
 
+    def find_person(self, said: str) -> dict:
+        """A colleague, by the name you would say out loud.
+
+        Slack has three names per person (handle, display name, real name) and
+        you will use whichever one you think of. Matched loosely for the same
+        reason session names are: this is spoken, and "sam" for "Samantha Ruiz"
+        is not a mistake anybody needs correcting."""
+        want = (said or "").strip().lstrip("@").lower()
+        if not want:
+            return {}
+        d = self._call("users.list", limit=500)
+        if not d.get("ok"):
+            return {}
+        people = []
+        for u in (d.get("members") or []):
+            if u.get("deleted") or u.get("is_bot"):
+                continue
+            prof = u.get("profile") or {}
+            names = [u.get("name", ""), prof.get("display_name", ""),
+                     prof.get("real_name", "")]
+            people.append((u.get("id", ""), [n for n in names if n]))
+        for uid, names in people:
+            if any(n.lower() == want for n in names):
+                return {"id": uid, "name": names[0]}
+        # First name, which is what people actually say.
+        for uid, names in people:
+            if any(n.lower().split()[0] == want for n in names if n.split()):
+                return {"id": uid, "name": names[0]}
+        from . import nearest
+        flat = {n: uid for uid, names in people for n in names}
+        pick = nearest.suggest(want, list(flat))
+        return {"id": flat[pick], "name": pick} if pick else {}
+
+    def dm(self, who: str, text: str) -> dict:
+        """Message a person directly, as you.
+
+        Same switch as every other post, and worth being stricter about rather
+        than looser: a direct message is from you to one named human, and it
+        arrives without the context a channel gives."""
+        if not can_write():
+            return {"ok": False, "error": "writing_not_enabled"}
+        person = self.find_person(who)
+        if not person:
+            return {"ok": False, "error": f"I can't find {who} in Slack"}
+        d = self._call("conversations.open", users=person["id"])
+        chan = ((d.get("channel") or {}).get("id") or "")
+        if not chan:
+            return {"ok": False, "error": d.get("error") or "no DM channel"}
+        got = self._call("chat.postMessage", channel=chan, text=text)
+        if not got.get("ok"):
+            return {"ok": False, "error": got.get("error") or "Slack refused it"}
+        return {"ok": True, "who": person["name"]}
+
     def thread(self, channel: str, ts: str, limit: int = 30) -> list:
         """A whole conversation, so Friday can read it and summarise."""
         d = self._call("conversations.replies", channel=channel, ts=ts, limit=limit)

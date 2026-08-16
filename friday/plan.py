@@ -180,14 +180,42 @@ def _db():
         note TEXT NOT NULL DEFAULT '',
         started REAL NOT NULL DEFAULT 0,
         ended REAL NOT NULL DEFAULT 0)""")
+    # Added after the fact, so existing plans on disk keep working. A step
+    # carries its own target now: the plan-level one is the default for steps
+    # that do not name somebody.
+    for col, decl in (("target", "TEXT NOT NULL DEFAULT ''"),
+                      ("sid", "TEXT NOT NULL DEFAULT ''"),
+                      ("kind", "TEXT NOT NULL DEFAULT 'agent'")):
+        try:
+            con.execute(f"ALTER TABLE steps ADD COLUMN {col} {decl}")
+        except sqlite3.OperationalError:
+            pass          # already there
     con.commit()
     return con
 
 
 # ------------------------------------------------------------- writing ----
 def create(title: str, target: str, steps: list, sid: str = "") -> int:
-    """A new plan, paused. Nothing runs until you approve it."""
-    steps = [s.strip() for s in steps if s and s.strip()]
+    """A new plan, paused. Nothing runs until you approve it.
+
+    A step is a string, or a dict with `text` and optionally `target`, `sid` and
+    `kind`. Strings inherit the plan's target, which is what every plan written
+    before this did, so nothing on disk changes meaning."""
+    rows = []
+    for st in steps:
+        if isinstance(st, dict):
+            text = (st.get("text") or "").strip()
+            if not text:
+                continue
+            rows.append({"text": text,
+                         "target": (st.get("target") or target or "").strip(),
+                         "sid": st.get("sid") or (sid if not st.get("target")
+                                                  else ""),
+                         "kind": st.get("kind") or "agent"})
+        elif str(st).strip():
+            rows.append({"text": str(st).strip(), "target": target,
+                         "sid": sid, "kind": "agent"})
+    steps = rows
     if not (title.strip() and steps):
         return 0
     now = time.time()
@@ -198,9 +226,11 @@ def create(title: str, target: str, steps: list, sid: str = "") -> int:
             "VALUES (?,?,?,?,?,?)",
             (title.strip(), target, sid, PENDING, now, now))
         pid = cur.lastrowid
-        for i, text in enumerate(steps):
-            con.execute("INSERT INTO steps (plan, seq, text) VALUES (?,?,?)",
-                        (pid, i, text))
+        for i, st in enumerate(steps):
+            con.execute("INSERT INTO steps (plan, seq, text, target, sid, kind)"
+                        " VALUES (?,?,?,?,?,?)",
+                        (pid, i, st["text"], st["target"], st["sid"],
+                         st["kind"]))
         con.commit()
         return pid
     finally:
@@ -236,12 +266,15 @@ def get(plan_id: int) -> dict:
                         "FROM plans WHERE id=?", (plan_id,)).fetchone()
         if not p:
             return {}
-        steps = con.execute("SELECT id,seq,text,state,note FROM steps "
-                            "WHERE plan=? ORDER BY seq", (plan_id,)).fetchall()
+        steps = con.execute(
+            "SELECT id,seq,text,state,note,target,sid,kind FROM steps "
+            "WHERE plan=? ORDER BY seq", (plan_id,)).fetchall()
         return {"id": p[0], "title": p[1], "target": p[2], "sid": p[3],
                 "state": p[4], "created": p[5], "updated": p[6],
                 "steps": [{"id": s[0], "seq": s[1], "text": s[2],
-                           "state": s[3], "note": s[4]} for s in steps]}
+                           "state": s[3], "note": s[4],
+                           "target": s[5] or p[2], "sid": s[6] or p[3],
+                           "kind": s[7] or "agent"} for s in steps]}
     finally:
         con.close()
 
@@ -266,6 +299,66 @@ def latest() -> dict:
     finally:
         con.close()
     return get(row[0]) if row else {}
+
+
+def track_of(step: dict) -> str:
+    """Which queue a step belongs to.
+
+    One per person or agent it is aimed at. Everything about running a plan
+    across a fleet comes down to this: steps for the same target are a queue,
+    and steps for different targets have nothing to do with each other."""
+    return (step.get("target") or "").strip().lower() or "_"
+
+
+def runnable(plan: dict) -> list:
+    """Every step that could start right now, one per track.
+
+    This is the mechanic the whole product was pitched on: do this now,
+    meanwhile ask that, hold the rest until a reply comes back. Before this a
+    plan had a single target and ran one step at a time against it, which is a
+    very good intercom with a queue.
+
+    Two rules, and they are the same two as before, applied per track rather
+    than globally:
+
+      One at a time PER AGENT. Firing five prompts at one session interleaves
+      five half-done jobs and Claude Code will accept all five. Firing one
+      prompt at each of five sessions is just five agents working, which is
+      the entire point of having five.
+
+      Stop, do not skip. A held step blocks ITS track and nothing else. Holding
+      the whole plan because one agent asked a question would mean a question
+      about the docs stops the migration, and the person who has to answer it is
+      the one waiting on the migration.
+    """
+    out, blocked = [], set()
+    for st in plan.get("steps", []):
+        track = track_of(st)
+        if track in blocked:
+            continue
+        if st["state"] in (RUNNING, HELD, FAILED):
+            # Whatever this track is doing, it is not free for the next thing.
+            # HELD included: the answer you give belongs to this step, and
+            # running the one after it first would apply your answer to the
+            # wrong work.
+            blocked.add(track)
+            if st["state"] == HELD:
+                out.append(st)      # resumable, and the reason the track stopped
+            continue
+        if st["state"] == PENDING:
+            out.append(st)
+            blocked.add(track)
+    return out
+
+
+def tracks(plan: dict) -> list:
+    """The distinct targets in a plan, in the order they first appear."""
+    seen = []
+    for st in plan.get("steps", []):
+        t = st.get("target") or plan.get("target", "")
+        if t and t not in seen:
+            seen.append(t)
+    return seen
 
 
 def next_step(plan: dict) -> dict:
@@ -365,10 +458,13 @@ class Runner:
     SETTLE = 4.0              # an agent answers in stages; wait for the last one
     STEP_TIMEOUT = 900        # 15 minutes on one step, then hold and say so
 
-    def __init__(self, announce, send, look, log=None):
+    def __init__(self, announce, send, look, log=None, tell_person=None):
         self.announce = announce      # (text, items=None)
         self.send = send              # (sid, text) -> bool
         self.look = look              # (sid) -> {"status", "question", "path"}
+        # (who, text) -> bool. Absent means Friday says so and waits for you,
+        # rather than dropping the step.
+        self.tell_person = tell_person
         self._log = log or (lambda *_: None)
         self._stop = threading.Event()
         self._thread = None
@@ -391,37 +487,81 @@ class Runner:
         return bool(self._thread and self._thread.is_alive())
 
     def _run(self, plan_id: int) -> None:
+        """Keep every free track moving until nothing can move.
+
+        One thread per running step rather than one thread per plan. The plan
+        is finished when no step can start and none is in flight; it is held
+        when the only thing stopping it is somebody who has not answered."""
+        live = {}                       # step id -> thread
         try:
             while not self._stop.is_set():
                 plan = get(plan_id)
-                if not plan or plan["state"] not in (RUNNING,):
-                    return
-                step = next_step(plan)
-                if not step:
-                    stuck = unfinished(plan)
-                    if stuck:
-                        # Something stopped while this was in flight, so nobody
-                        # knows whether it ran. Saying "all done" here is the
-                        # worst available answer: it is a claim about work that
-                        # may not exist.
-                        set_plan(plan_id, HELD)
-                        which = ", ".join(str(s["seq"] + 1) for s in stuck)
-                        self.announce(
-                            f"Plan {plan['title']} stopped with step {which} "
-                            f"already sent, so I don't know whether it "
-                            f"finished. Check that one and say \"run the "
-                            f"plan\" to carry on.")
-                        return
-                    set_plan(plan_id, DONE)
-                    self.announce(f"Plan finished: {plan['title']}. All "
-                                  f"{len(plan['steps'])} steps done.")
-                    return
-                if not self._do(plan, step):
-                    return                     # held or failed; it said why
+                if not plan or plan["state"] != RUNNING:
+                    break
+                for st in runnable(plan):
+                    if st["state"] != PENDING or st["id"] in live:
+                        continue
+                    t = threading.Thread(
+                        target=self._one, args=(plan_id, st["id"]), daemon=True)
+                    live[st["id"]] = t
+                    t.start()
+                    if len(live) >= self.MAX_AT_ONCE:
+                        break
+                for sid_, t in list(live.items()):
+                    if not t.is_alive():
+                        live.pop(sid_, None)
+                if not live:
+                    plan = get(plan_id)
+                    if not plan or plan["state"] != RUNNING:
+                        break
+                    if not [st for st in runnable(plan)
+                            if st["state"] == PENDING]:
+                        self._finish(plan)
+                        break
+                self._stop.wait(self.POLL)
         except Exception as e:
             self._log(f"friday plan: {e}")
             set_plan(plan_id, FAILED)
             self.announce(f"The plan stopped: {e}")
+
+    MAX_AT_ONCE = 6           # more agents than anybody is actually running
+
+    def _one(self, plan_id: int, step_id: int) -> None:
+        """One step, in its own thread, so a slow track blocks only itself."""
+        try:
+            plan = get(plan_id)
+            step = next((s for s in plan.get("steps", [])
+                         if s["id"] == step_id), None)
+            if plan and step:
+                self._do(plan, step)
+        except Exception as e:
+            self._log(f"friday plan step: {e}")
+            set_step(step_id, FAILED, str(e)[:120])
+
+    def _finish(self, plan: dict) -> None:
+        stuck = unfinished(plan)
+        held = [s for s in plan.get("steps", []) if s["state"] == HELD]
+        if stuck:
+            # Something stopped while this was in flight, so nobody knows
+            # whether it ran. Saying "all done" here is the worst available
+            # answer: it is a claim about work that may not exist.
+            set_plan(plan["id"], HELD)
+            which = ", ".join(str(s["seq"] + 1) for s in stuck)
+            self.announce(
+                f"Plan {plan['title']} stopped with step {which} already sent, "
+                f"so I don't know whether it finished. Check that one and say "
+                f"\"run the plan\" to carry on.")
+            return
+        if held:
+            set_plan(plan["id"], HELD)
+            who = ", ".join(sorted({s.get("target") or "a session"
+                                    for s in held}))
+            self.announce(f"Everything I could do on {plan['title']} is done. "
+                          f"The rest is waiting on {who}.")
+            return
+        set_plan(plan["id"], DONE)
+        self.announce(f"Plan finished: {plan['title']}. All "
+                      f"{len(plan['steps'])} steps done.")
 
     NUDGE_AFTER = 900         # 15 minutes, then remind, and keep reminding
     NUDGE_LIMIT = 4           # after an hour of silence, stop nagging
@@ -450,20 +590,30 @@ class Runner:
         threading.Thread(target=_wait, daemon=True).start()
 
     def _do(self, plan: dict, step: dict) -> bool:
-        """One step. True to keep going, False to stop the plan here."""
+        """One step, on its own track. True if the track may carry on.
+
+        Everything here is per step rather than per plan now. A step names the
+        agent it is for, so five of these run at once against five sessions,
+        and one of them stopping stops its own queue and nothing else."""
         from . import replies
-        sid = plan.get("sid", "")
+        if step.get("kind") == "person":
+            return self._ask_person(plan, step)
+        sid = step.get("sid") or plan.get("sid", "")
+        target = step.get("target") or plan.get("target", "")
         info = self.look(sid) or {}
         path = info.get("path", "")
         mark = replies.mark(path) if path else ""
         set_step(step["id"], RUNNING)
-        self.announce(f"Step {step['seq'] + 1} of {len(plan['steps'])}: "
-                      f"{step['text']}")
+        # Named, because with several running at once "step 3" no longer tells
+        # you who is doing it.
+        self.announce(f"{target}, step {step['seq'] + 1} of "
+                      f"{len(plan['steps'])}: {step['text']}")
         if not self.send(sid, step["text"]):
             set_step(step["id"], FAILED, "couldn't reach the session")
-            set_plan(plan["id"], HELD)
-            self.announce(f"I couldn't reach {plan['target']}, so the plan is "
-                          f"paused at step {step['seq'] + 1}.")
+            self._maybe_hold(plan["id"])
+            self.announce(f"I couldn't reach {target}, so its part of the plan "
+                          f"is paused at step {step['seq'] + 1}. The rest "
+                          f"carries on.")
             return False
 
         end = time.time() + self.STEP_TIMEOUT
@@ -476,15 +626,15 @@ class Runner:
                 # A question stops the plan. Running the next step would be
                 # answering it by ignoring it.
                 set_step(step["id"], HELD, asked)
-                set_plan(plan["id"], HELD)
-                self.announce(f"{plan['target']} is asking before I can go on: "
+                self._maybe_hold(plan["id"])
+                self.announce(f"{target} is asking before it can go on: "
                               f"{asked}",
-                              items=[{"sid": sid, "label": plan["target"],
+                              items=[{"sid": sid, "label": target,
                                       "kind": "blocked"}])
                 # Say it once, then keep it alive. Announcing a hold and then
                 # never mentioning it again means you go to lunch and the plan
                 # quietly ceases to exist as far as you are concerned.
-                self._nudge(plan["id"], plan["target"], asked)
+                self._nudge(plan["id"], target, asked)
                 return False
             if path:
                 said = replies.last_said(path)
@@ -502,8 +652,58 @@ class Runner:
         if self._stop.is_set():
             return False
         set_step(step["id"], HELD, "no answer in fifteen minutes")
-        set_plan(plan["id"], HELD)
-        self.announce(f"Step {step['seq'] + 1} has been going fifteen minutes "
-                      f"with no reply, so I've paused rather than piling the "
-                      f"next one on top.")
+        self._maybe_hold(plan["id"])
+        self.announce(f"{target} has been on step {step['seq'] + 1} for fifteen "
+                      f"minutes with no reply, so I've paused that one rather "
+                      f"than piling the next on top.")
         return False
+
+    def _ask_person(self, plan: dict, step: dict) -> bool:
+        """A step aimed at a human being.
+
+        The pitch said "hold the rest until a human reply comes back", and a
+        person is just another track that can block. What makes this different
+        from an agent is honesty about detection: Friday cannot reliably tell
+        which Slack message is an answer to which question, so it does not
+        pretend to. It sends, holds, and says plainly what it is waiting for.
+        The hold is released by that person messaging you, which the inbox
+        already notices, or by you saying so."""
+        who = step.get("target") or "somebody"
+        set_step(step["id"], RUNNING)
+        sent = False
+        if self.tell_person:
+            try:
+                sent = bool(self.tell_person(who, step["text"]))
+            except Exception:
+                sent = False
+        if not sent:
+            set_step(step["id"], HELD, f"ask {who}: {step['text']}")
+            self._maybe_hold(plan["id"])
+            self.announce(
+                f"I can't message {who} myself, so that part of the plan is "
+                f"waiting on you: {step['text']}",
+                items=[{"sid": "", "label": who, "kind": "blocked"}])
+            return False
+        set_step(step["id"], HELD, f"waiting on {who}")
+        self._maybe_hold(plan["id"])
+        self.announce(f"Asked {who}: {step['text']}. That part of the plan "
+                      f"waits for their reply; the rest carries on.",
+                      items=[{"sid": "", "label": who, "kind": "blocked"}])
+        return False
+
+    def _maybe_hold(self, plan_id: int) -> None:
+        """Hold the PLAN only when every track is stuck.
+
+        One agent's question used to stop everything, which meant a question
+        about the docs stopped the migration, and the person who had to answer
+        it was the one waiting on the migration."""
+        plan = get(plan_id)
+        if not plan:
+            return
+        alive = [st for st in plan.get("steps", []) if st["state"] == PENDING]
+        free = [st for st in runnable(plan) if st["state"] == PENDING]
+        if not free and not any(st["state"] == RUNNING
+                                for st in plan.get("steps", [])):
+            set_plan(plan_id, HELD)
+        elif alive:
+            set_plan(plan_id, RUNNING)

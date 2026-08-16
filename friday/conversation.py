@@ -689,6 +689,7 @@ class Friday:
         self.plans = plans.Runner(
             announce=self.announce,
             send=actions.send_to_session,
+            tell_person=self._tell_person,
             look=lambda sid: (fleetcache.snapshot() or {}).get(sid, {}),
             log=engine.log)
         # One place watches every session and reports what it said, so nothing
@@ -1057,6 +1058,25 @@ class Friday:
                          if lines else "Nothing is running and nothing is "
                                        "waiting.")
 
+    def _tell_person(self, who: str, text: str) -> bool:
+        """Send a plan step to a colleague, if Friday is allowed to.
+
+        Deliberately routed through the same posting switch as everything else.
+        A plan that quietly messages your colleagues because a step said so is
+        exactly the thing that makes people turn all of it off, and a plan step
+        is further from your hands than a message you dictated: you approved a
+        list, once, possibly hours earlier."""
+        if not connectors.can_write():
+            return False
+        sl = connectors.get("slack")
+        try:
+            if not (sl and sl.ready() and hasattr(sl, "dm")):
+                return False
+            r = sl.dm(who, text)
+            return bool(r and not r.get("error"))
+        except Exception:
+            return False
+
     def _steps_from(self, body: str) -> list:
         """Turn what you said into ordered steps.
 
@@ -1067,6 +1087,47 @@ class Friday:
         parts = re.split(r"\s*(?:\d+[.)]\s+|;|,\s*then\s+|\s+then\s+|,\s+and\s+"
                          r"|\.\s+(?=[A-Z])|,\s+)", text)
         return [p.strip(" .;,") for p in parts if p and len(p.strip()) > 2]
+
+    # "api: run the migration" - who a step is for, said the way people write
+    # it in a numbered list. Bounded to a short name so an ordinary sentence
+    # with a colon in it ("note: this is fragile") is not read as a target.
+    _FOR_RE = re.compile(r"^\s*(?:ask\s+)?([A-Za-z][\w.\-]{1,28})\s*:\s*(.+)$")
+
+    def _assign(self, steps: list, default: str = "") -> list:
+        """Work out who each step is for.
+
+        The mechanic the product was pitched on is "do this now, meanwhile ask
+        that", and it needs a way to say who. A step beginning with a name and a
+        colon belongs to that name; everything else inherits the step before it,
+        because a list under one heading is one person's list and repeating the
+        name on every line is not how anybody writes.
+
+        A name that is not a running session is treated as a PERSON. That is the
+        honest reading: you would not name something Friday cannot see unless
+        you meant a colleague, and it is better to ask you than to guess it was
+        a typo for a session."""
+        out, current = [], default
+        for text in steps:
+            m = self._FOR_RE.match(text)
+            kind = "agent"
+            if m:
+                name, text = m.group(1), m.group(2).strip()
+                hit, _how = self._find_how(name)
+                if hit:
+                    current = hit.get("label", name)
+                    out.append({"text": text, "target": current,
+                                "sid": hit.get("sid", ""), "kind": "agent"})
+                    continue
+                current, kind = name, "person"
+                out.append({"text": text, "target": name, "sid": "",
+                            "kind": "person"})
+                continue
+            hit, _how = self._find_how(current) if current else (None, "")
+            out.append({"text": text, "target": current,
+                        "sid": hit.get("sid", "") if hit else "",
+                        "kind": "agent" if hit else
+                                ("person" if current and not hit else "agent")})
+        return out
 
     def _ask_for_plan(self, goal: str, target: str = "") -> dict:
         """Have the agent write the plan, then hold it for you to approve.
@@ -1153,7 +1214,15 @@ class Friday:
 
     def _make_plan(self, target: str, body: str) -> dict:
         """Write it down and show it. Nothing runs yet."""
-        steps = self._steps_from(body)
+        raw = self._steps_from(body)
+        steps = self._assign(raw, target or self.target)
+        # A plan naming its own targets does not need one asked for, which is
+        # what makes "api: do this; web: do that" a single sentence rather than
+        # a conversation.
+        named = [st for st in steps if st.get("target")]
+        if len(named) == len(steps) and len({st["target"] for st in steps}) > 1:
+            return self._show_plan(steps, target or "the fleet", "")
+        steps = raw
         if len(steps) < 2:
             return self._say("That's one instruction rather than a plan. Say "
                              "\"tell <session> to ...\" for a single thing, or "
@@ -1170,16 +1239,38 @@ class Friday:
         hit, how = self._find_how(name)
         if not hit:
             return self._no_session(name, lambda n: self._make_plan(n, body))
-        pid = plans.create(f"{len(steps)} steps", hit.get("label", name),
-                           steps, sid=hit.get("sid", ""))
+        return self._show_plan(self._assign(steps, hit.get("label", name)),
+                               hit.get("label", name), hit.get("sid", ""))
+
+    def _show_plan(self, steps: list, target: str, sid: str) -> dict:
+        """Write it down and read it back. Still nothing has run.
+
+        Reading it back BY TRACK rather than as one numbered list, because with
+        several agents the order of the list is not the order things happen, and
+        showing it as one sequence would be describing something that is not
+        going to occur."""
+        pid = plans.create(f"{len(steps)} steps", target, steps, sid=sid)
         if not pid:
             return self._say("I couldn't write that plan down.")
         self._plan_id = pid
-        listed = "\n".join(f"{i + 1}. {s}" for i, s in enumerate(steps))
+        plan = plans.get(pid)
+        by = {}
+        for st in plan["steps"]:
+            by.setdefault(st.get("target") or target, []).append(st)
+        lines = []
+        for who, rows in by.items():
+            kind = rows[0].get("kind", "agent")
+            head = f"{who}" + (" (a person, so I'll ask and wait)"
+                               if kind == "person" else "")
+            lines.append(head + ":")
+            lines += [f"  {i + 1}. {r['text']}" for i, r in enumerate(rows)]
+        how = ("in order, one at a time, stopping if it asks you anything"
+               if len(by) == 1 else
+               f"all {len(by)} at once, one step each, and if one of them stops "
+               f"the others carry on")
         return self._say(
-            f"Here's the plan for {hit.get('label', name)}. Nothing has run "
-            f"yet:\n{listed}\n\nSay \"run the plan\" and I'll do them in "
-            f"order, one at a time, stopping if it asks you anything.")
+            f"Here's the plan. Nothing has run yet:\n" + "\n".join(lines)
+            + f"\n\nSay \"run the plan\" and I'll do them {how}.")
 
     def _run_plan(self, stop: bool = False) -> dict:
         if stop:

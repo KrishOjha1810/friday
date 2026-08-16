@@ -157,6 +157,7 @@ you are already signed in to.
 | `file a linear ticket: ...` | file into a named tracker, or be asked which |
 | `use linear for tickets` | say once where tickets go, and stop being asked |
 | `work out a plan for <goal>` | the agent writes the steps, you approve before any run |
+| `plan: api: migrate; web: rebuild; sam: sign off` | one plan across the fleet, agents in parallel, people as tracks |
 | `help` | the six commands that work before you connect anything |
 | `file a ticket: the parser dies on PDFs` | Jira, Linear, or GitHub issues with no setup at all |
 | `move PROJ-12 to done` | moves it, matching the states that exist |
@@ -376,7 +377,15 @@ sessions.
    authorized. Slack needed its own app because the hosted MCP has no dynamic
    client registration; Atlassian and Google will have the same shape, so the
    app-building trick generalizes.
-4. **Phase 2, the conductor core.** Complete. Friday reads your tickets and has
+4. **Phase 2, the conductor core.** Complete, including the mechanic the whole
+   thing was pitched on: do this now, meanwhile ask that, hold the rest until a
+   reply comes back. A plan spans the fleet. Steps naming the same agent are a
+   queue; steps naming different agents run at the same time; a name that is not
+   a running session is read as a colleague, messaged, and waited on. One step
+   at a time per agent still holds, because five prompts at one session
+   interleaves five half-done jobs. A step that stops holds its own track and
+   nothing else: a question about the docs must not stop the migration, since
+   the person who has to answer it is the one waiting on the migration. Friday reads your tickets and has
    an opinion about what to start with, ranked by who is blocked and stated with
    its reason. It can ask an agent to work out the plan, since that is the part
    that needs to know what is actually in the repository, and brings the steps

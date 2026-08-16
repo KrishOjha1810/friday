@@ -46,6 +46,7 @@ what should I work on?         one thing to start with, and why
 what are my tickets?           across Jira, Linear, GitHub and GitLab at once
 use linear for tickets         say once where new ones go
 work out a plan for <goal>     the agent drafts it, you approve it
+plan: api: migrate; web: build one plan, several agents, all at once
 what's on fire?                unresolved errors in production
 what's running?
 who needs me?
