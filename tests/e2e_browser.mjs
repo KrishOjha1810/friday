@@ -220,6 +220,57 @@ await check('a plan can be approved from the panel that shows it', async () => {
   assert(false, 'no approvable plan arrived');
 });
 
+await check('an open panel follows the session it is about', async () => {
+  // The panel captured its row when you opened it and never looked again, so a
+  // session that changed underneath left you reading the old question with the
+  // old answers, and Yes sent that answer to whatever is being asked NOW.
+  await page.click('.fleet .sess');
+  await page.waitForSelector('#peek:not([hidden])', { timeout: 5000 });
+  const before = await page.textContent('#peekAsk');
+  // The same shape /state sends, with the question changed underneath.
+  await page.evaluate(async () => {
+    const st = await (await fetch(U('/state'))).json();
+    const rows = (st.fleet || []).map(r => ({ ...r }));
+    const one = rows.find(r => r.needs) || rows[0];
+    if (one) { one.needs = 'Should I DELETE the production database?';
+               one.status = 'needs'; }
+    renderFleet(rows);
+  });
+  await page.waitForTimeout(300);
+  const after = await page.textContent('#peekAsk');
+  assert(after !== before, `panel still showed "${before}"`);
+  assert(/DELETE the production/.test(after), `panel showed "${after}"`);
+  await page.keyboard.press('Escape');
+  await page.waitForSelector('#peek', { state: 'hidden', timeout: 3000 });
+});
+
+await check('the chip says where a bare message goes, straight away',
+  async () => {
+  // It was only repainted on a fleet event, so after "tell api ..." it stayed
+  // hidden until a reload: the one element answering "where do my words go"
+  // was wrong in both directions.
+  await page.fill('#input', 'tell api to run the tests');
+  await page.keyboard.press('Enter');
+  await page.waitForFunction(
+    () => { const t = document.getElementById('target');
+            return t && !t.hidden && /api/.test(t.textContent); },
+    { timeout: 8000 });
+  const chip = await page.textContent('#target');
+  assert(/api/.test(chip), `chip said "${chip}"`);
+});
+
+await check('clearing the chip clears it on the server too', async () => {
+  // It repainted itself and asked a question, which changed nothing: the chip
+  // vanished while a bare message still went to that session.
+  await page.click('#target button');
+  await page.waitForFunction(
+    () => { const t = document.getElementById('target'); return t && t.hidden; },
+    { timeout: 8000 });
+  const st = await page.evaluate(async () => {
+    const r = await fetch(U('/state')); return (await r.json()).target; });
+  assert(!st, `server still thinks the target is "${st}"`);
+});
+
 await check('the alerts bell shows on or off distinctly', async () => {
   const before = await page.getAttribute('body', 'data-push');
   assert(before === 'off' || before === 'on',

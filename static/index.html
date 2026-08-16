@@ -492,6 +492,10 @@ async function say(text, opts){
       headers:{'Content-Type':'application/json'}, body:JSON.stringify({text})});
     const j = await r.json();
     working(false);
+    /* Straight from the answer. It was only repainted on a fleet event, so
+       after "tell api ..." the chip stayed hidden until a reload, and the one
+       element that says where your words go was wrong in both directions. */
+    if(j.target !== undefined) paintTarget(j.target || '');
     if(j.reply) turn('friday', j.reply, {spoken: inCall});
     if(j.needs_confirm) askYesNo();
     if(!inCall && speakBack && j.reply) speak(j.reply, false);
@@ -670,6 +674,23 @@ let lastFleet = [];
 
 function renderFleet(rows){
   lastFleet = rows || [];
+  /* The panel captured its row when you opened it and never looked again, so a
+     session that changed underneath left you reading the old question with the
+     old answers. Pressing Yes then sent that answer to whatever the agent is
+     asking NOW. The panel exists so you can answer without reading the window,
+     which makes answering a question you never saw the one thing it must not
+     do. */
+  if(peeking){
+    const now = (rows || []).find(r => r.sid === peeking.sid);
+    if(!now){ closePeek(); turn('friday', 'That session has gone, so I closed the panel.'); }
+    else if((now.needs || '') !== (peeking.needs || '')
+            || (now.label || '') !== (peeking.label || '')){
+      openPeek(now);
+      turn('friday', (now.needs ? 'That changed while the panel was open, so I reloaded it: '
+                                  + (now.label || 'it') + ' is now asking ' + now.needs
+                                : (now.label || 'it') + ' is no longer waiting on you.'));
+    }
+  }
   const el = $('fleet'); el.textContent = '';
   if(!rows || !rows.length){
     const c = document.createElement('span');
@@ -705,6 +726,24 @@ function renderFleet(rows){
 
 /* ---- the peek panel ---------------------------------------------------- */
 let peeking = null;
+/* Which announcements this browser has already spoken. Every open tab spoke
+   every announcement, so with two tabs Friday talked over itself, and during a
+   call the second copy went straight into an open microphone. localStorage is
+   shared across tabs of the same origin, so the first one to claim an
+   announcement is the only one that says it. */
+function claimToSpeak(text){
+  try{
+    const key = 'spoke:' + (text || '').slice(0, 120);
+    const now = Date.now();
+    const seen = JSON.parse(localStorage.getItem('spokenRecently') || '{}');
+    for(const k of Object.keys(seen)){ if(now - seen[k] > 60000) delete seen[k]; }
+    if(seen[key]) { localStorage.setItem('spokenRecently', JSON.stringify(seen));
+                    return false; }
+    seen[key] = now;
+    localStorage.setItem('spokenRecently', JSON.stringify(seen));
+    return true;
+  }catch(e){ return true; }   /* no storage: better twice than never */
+}
 
 function suggestionsFor(q){
   /* Deterministic, from the question itself. A model could write better ones
@@ -860,7 +899,10 @@ function paintTarget(name){
   const b = document.createElement('b'); b.textContent = name;
   const clear = document.createElement('button');
   clear.textContent = 'clear';
-  clear.onclick = () => { paintTarget(''); say('who am I talking to'); };
+  /* It repainted itself and then asked a question, which changed nothing on
+     the server: the chip went away while a bare message still went to that
+     session. Clearing has to actually clear. */
+  clear.onclick = () => { paintTarget(''); say('talk to nobody'); };
   el.append(b, document.createTextNode(' '), clear);
 }
 
@@ -881,7 +923,9 @@ function connect(){
     if(d.kind === 'message' && d.message){
       turn('friday', d.message.text, {first: d.message.kind === 'proactive',
                                       about: d.message.about});
-      if(inCall || speakBack) speak(d.message.text, false);
+      /* One voice. Claimed across tabs, or two of them read it at once. */
+      if((inCall || speakBack) && claimToSpeak(d.message.text))
+        speak(d.message.text, false);
       if(document.hidden) notify(d.message.text);
     }
   };

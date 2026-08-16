@@ -221,6 +221,21 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/health":
             self._send(200, b"friday", "text/plain")
             return
+        # The page links these from <head> with no key on them, so on a phone
+        # they 401: the app cannot install, the icon is blank, and a tapped
+        # notification lands on "unauthorized". They carry no data of yours, so
+        # requiring the key protected nothing and broke the one mode it exists
+        # for. Still same-origin checked, like everything else.
+        if path in ("/manifest.json", "/icon-180.png", "/icon-192.png",
+                    "/icon-512.png"):
+            try:
+                body = (STATIC / path.lstrip("/")).read_bytes()
+            except Exception:
+                self._send(404, b"missing", "text/plain")
+                return
+            self._send(200, body, "application/json" if path.endswith(".json")
+                       else "image/png")
+            return
         if not self._authed():
             self._send(401, b"unauthorized", "text/plain")
             return
@@ -318,6 +333,9 @@ class Handler(BaseHTTPRequestHandler):
                 self._json({"reply": "", "needs_confirm": False})
                 return
             out = _friday.handle(text)
+            # The page cannot know where a bare message would go unless it is
+            # told, and it was only told on a fleet event.
+            out["target"] = getattr(_friday, "target", "")
             broadcast("fleet", {"rows": _fleet_rows()})
             self._json(out)
             return

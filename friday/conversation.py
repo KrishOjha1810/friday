@@ -230,6 +230,13 @@ _MORE_RE = re.compile(
     r"\b(?:say|tell me)\s+more\b|\bthe\s+(?:full|whole|exact)\s+"
     r"(?:thing|version|message|reply)\b|\bwhat\s+exactly\s+did\s+"
     r"(?:it|he|she|they|\S+)\s+say\b|\bin\s+full\b|\bverbatim\b", re.I)
+# Clearing the target. The page had a "clear" button that repainted itself and
+# asked a question, so the chip vanished while a bare message still went to that
+# session: the display and the truth disagreed, in the direction that sends
+# words somewhere you thought you had deselected.
+_NOBODY_RE = re.compile(
+    r"^\s*(?:talk to nobody|clear the target|forget who|"
+    r"stop talking to \w+|nobody)\s*[.!]?\s*$", re.I)
 _WHO_RE = re.compile(
     r"\bwho\s+am\s+i\s+(?:talking|speaking)\s+to\b|"
     r"\bwhich\s+(?:one|session)\s+(?:am\s+i|are\s+we)\b|"
@@ -631,6 +638,8 @@ def classify(text: str) -> tuple:
             # session by that name found the nearest match and muted it.
             return QUIET if m.group(1) else RESUME, {}
         return MUTE, {"name": who, "on": bool(m.group(1))}
+    if _NOBODY_RE.match(t):
+        return WHO, {"clear": True}
     if _WHO_RE.search(t):
         return WHO, {}
     if _MORE_RE.search(t):
@@ -1043,6 +1052,10 @@ class Friday:
         if intent == MUTE:
             return self._mute(payload["name"], payload["on"])
         if intent == WHO:
+            if payload.get("clear"):
+                self.target = ""
+                return self._say("Cleared. Nothing you say goes to a session "
+                                 "until you name one.")
             return self._who()
         if intent == MORE:
             return self._more()
