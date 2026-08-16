@@ -820,7 +820,7 @@ class Friday:
         if intent == MAIL:
             return self._mail(payload.get("query", ""))
         if intent == JIRA:
-            return self._jira()
+            return self._tickets()
         if intent == GITHUB:
             return self._github(payload.get("query", ""))
         if intent == SLACK:
@@ -1269,9 +1269,18 @@ class Friday:
 
         # 5. an actual ticket
         try:
-            tracker = self._tracker()
-            rows = tracker.my_issues(5) if tracker else []
-            rows = [r for r in rows if not r.get("error")]
+            # Every tracker, not `_tracker()`. That one returns None when two
+            # are connected and you have not said which, because a ticket has
+            # to be FILED somewhere; suggesting what to work on has no such
+            # constraint, and using it here meant connecting a second tracker
+            # silently stopped Friday ever proposing a ticket.
+            rows = []
+            for c in trackers.available():
+                try:
+                    rows += [r for r in (c.my_issues(5) or [])
+                             if not r.get("error")]
+                except Exception:
+                    continue
             if rows:
                 top = rows[0]
                 title = (top.get("summary") or top.get("title") or "").strip()
@@ -2364,7 +2373,7 @@ class Friday:
             head = f"{worst['users']} people are hitting the top one"
         return self._say(head + ":\n- " + "\n- ".join(lines))
 
-    def _jira(self) -> dict:
+    def _tickets(self) -> dict:
         """Everything assigned to you, everywhere it is written down.
 
         Reading is the one place Friday should NOT make you choose a tracker.

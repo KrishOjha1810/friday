@@ -1468,11 +1468,21 @@ class Linear:
 
 
     def _issue_id(self, key: str) -> str:
-        """Linear's mutations want the internal id, not the PROJ-12 you say."""
+        """Linear's mutations want the internal id, not the PROJ-12 you say.
+
+        The number goes in as a variable rather than through the query string.
+        It was interpolated, and although the only caller passes something the
+        intent parser has already constrained to digits, "a value that reaches a
+        query language unescaped because of what some other layer promises" is
+        the shape of the bug, not the absence of one."""
+        try:
+            num = int(key.rsplit("-", 1)[-1])
+        except (ValueError, AttributeError):
+            return ""
         d = self._q("""
-            query($k: String!) { issueSearch(filter: {number:
-                {eq: %s}}, first: 1) { nodes { id identifier } } }"""
-                    % (key.rsplit("-", 1)[-1] or "0"), {"k": key})
+            query($n: Float!) { issueSearch(filter: {number:
+                {eq: $n}}, first: 1) { nodes { id identifier } } }""",
+                    {"n": num})
         nodes = ((d.get("issueSearch") or {}).get("nodes") or [])
         for n in nodes:
             if (n.get("identifier") or "").upper() == key.upper():

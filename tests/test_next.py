@@ -52,7 +52,12 @@ def _friday(waiting=(), broken=False, unpushed=False, tickets=()):
         def my_issues(self, n=5):
             return [{"key": k, "summary": t} for k, t in tickets]
 
-    f._tracker = lambda: _Tracker() if tickets else None
+    # Patched at the seam, not on Friday: suggesting what to work on reads
+    # EVERY tracker now, because `_tracker()` deliberately returns nothing when
+    # two are connected and you have not said where things get filed.
+    from friday import trackers
+    trackers.available = lambda: ([_Tracker()] if tickets else [])
+    f._tracker = lambda want="": _Tracker() if tickets else None
     from friday import connectors
     real = connectors.get
     connectors.get = lambda n: (type("X", (), {"ready": lambda s: broken})()
@@ -110,6 +115,29 @@ def test_an_item_that_cannot_be_named_is_not_offered():
     r = f.handle("what should I work on?")
     assert "start ." not in r["reply"], r["reply"]
     assert r["reply"].strip(), "said nothing at all"
+
+
+def test_a_second_tracker_does_not_silence_the_suggestion():
+    """`_tracker()` returns nothing when two are connected and you have not
+    said where tickets get FILED. Reading has no such constraint, and using
+    that here meant connecting a second tracker quietly stopped Friday ever
+    proposing work."""
+    from friday import trackers
+
+    class _T:
+        name = "jira"
+
+        def ready(self):
+            return True
+
+        def my_issues(self, n=5):
+            return [{"key": "PROJ-3", "summary": "the thing"}]
+
+    f = _friday()
+    trackers.available = lambda: [_T(), _T()]
+    f._tracker = lambda want="": None       # genuinely ambiguous
+    r = f.handle("what should I work on?")
+    assert "PROJ-3" in r["reply"], r["reply"]
 
 
 def test_an_empty_day_is_not_reported_as_a_broken_one():
