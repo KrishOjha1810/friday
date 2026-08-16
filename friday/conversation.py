@@ -272,10 +272,17 @@ _WHO_NEEDS_RE = re.compile(
 # captured, so "open a new tab" gave the name "a", which prefix-matched the
 # first session starting with that letter and focused it. _FILLER exists for
 # exactly this and was never consulted on this path.
+# Anchored at the END as well. "open source is good" was read as the command
+# "open" with the name "source" and pulled a session to the front, because the
+# pattern stopped at the name and ignored the rest of the sentence. A real open
+# command finishes there.
+# Anchored at the START as well as the end. "let me open the docs" is a person
+# thinking out loud, and it opened a session called docs-site.
 _OPEN_RE = re.compile(
-    r"\b(open|switch to|go to|jump to|resume|show me)\s+"
+    r"^\s*(?:please\s+|can you\s+|could you\s+)?"
+    r"(open|switch to|go to|jump to|resume|show me)\s+"
     r"(?:(?:the|a|an|my|that)\s+)?"
-    r"(?:session\s+)?([\w.\-]+)", re.I)
+    r"(?:session\s+)?([\w.\-]+)(?:\s+session)?\s*[.!?]?$", re.I)
 # "open it", "open that" name nothing. Treating a pronoun as a session name is
 # how "can you open it through Claude?" became "I couldn't bring Reply with
 # exactly ALPHA to the front": it matched a session labelled by its own first
@@ -707,6 +714,10 @@ def classify(text: str) -> tuple:
             return TELL, {"name": name, "message": msg, "await": want,
                           "said": t}
     m = _TELL_RE.search(t)
+    # "we should probably tell the team" captured the name "the". An article is
+    # never a session, and this path types into a running agent.
+    if m and (m.group(1) or "").lower() in _FILLER:
+        m = None
     if m:
         name, msg = m.group(1), m.group(2).strip()
         # "tell voicebridge him that X" / "tell it that X": drop the pronoun
@@ -3130,8 +3141,13 @@ class Friday:
 
     # ---- actions, always proposed first -----------------------------------
     def _propose_open(self, name: str) -> dict:
-        """TIER 0. Bringing a window to the front is instantly reversible (you
-        just look away), so asking permission is pure friction."""
+        """Bring a window to the front.
+
+        Reversible in itself, which is why an EXACT name goes straight through.
+        A guessed one does not, and the reason is not the window: opening a
+        session makes it the target, and the target is where your next bare
+        message goes. "Show me the money" opened a session called moneyman, and
+        the sentence after it would have been typed into moneyman."""
         if not name:
             names = self._session_names()
             return self._say("Which one? " + (", ".join(names) if names
@@ -3139,7 +3155,7 @@ class Friday:
         hit, how = self._find_how(name)
         if not hit:
             return self._no_session(name, self._propose_open)
-        if how == "maybe":
+        if how in ("maybe", "fuzzy", "ambiguous"):
             # Close enough to mention, not close enough to act on unasked.
             return self._offer(
                 f"Did you mean {hit.get('label', name)}?",

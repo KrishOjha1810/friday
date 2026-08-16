@@ -181,6 +181,57 @@ def test_a_long_sentence_is_not_treated_as_a_bare_reference():
         "last time we tried it") is None
 
 
+# ---- sentences that merely mention a verb ----------------------------------
+def test_an_ordinary_sentence_does_not_become_a_command():
+    """Swept forty plausible developer sentences that should do nothing. Three
+    of them reached an ACTING intent, and every acting intent is a chance to do
+    the wrong thing to a running agent."""
+    from friday.conversation import classify as _c
+    acting = {"tell", "stop", "mute", "allow", "send", "ticket", "move",
+              "plan", "plango", "askall", "open", "new", "schedule",
+              "plan_ask", "tracker_pref", "quiet"}
+    for said in ("we should probably tell the team", "open source is good",
+                 "open a new terminal", "i muted myself on the call",
+                 "allow me to explain", "send my regards to the team",
+                 "stop and think about this", "the plan changed",
+                 "i cancelled my subscription", "let me open the docs"):
+        assert _c(said)[0] not in acting, (said, _c(said))
+
+
+def test_the_real_commands_still_are_commands():
+    """The guard above is only worth having if it does not cost the feature."""
+    from friday.conversation import classify as _c
+    for said, want in (("tell api to deploy", "tell"), ("open api", "open"),
+                       ("stop api", "stop"), ("mute api", "mute"),
+                       ("run the plan", "plango"), ("send it", "send"),
+                       ("let yourself post", "allow"), ("quiet", "quiet"),
+                       ("file a ticket: x", "ticket")):
+        assert _c(said)[0] == want, (said, _c(said))
+
+
+def test_a_guessed_session_name_is_not_opened_unasked():
+    """Opening is reversible, which is why an exact name goes straight through.
+    A guess is not, and not because of the window: opening makes it the target,
+    and the target is where your next bare message goes. "Show me the money"
+    opened a session called moneyman, and the next sentence would have gone
+    there."""
+    f = _friday("moneyman", "docs-site")
+    opened = []
+    actions.focus_session = lambda sid: opened.append(sid) or True
+    r = f.handle("show me the money")
+    assert not opened, opened
+    assert "moneyman" in r["reply"], r["reply"]
+    assert f.target == "", f.target
+
+
+def test_an_exact_name_is_still_opened_at_once():
+    f = _friday("moneyman", "docs-site")
+    opened = []
+    actions.focus_session = lambda sid: opened.append(sid) or True
+    f.handle("open moneyman")
+    assert opened == ["s0"], opened
+
+
 # ---- nothing at all --------------------------------------------------------
 def test_saying_nothing_does_nothing():
     f = _friday("api")
