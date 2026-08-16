@@ -226,7 +226,53 @@ def test_a_person_step_is_never_sent_without_the_posting_switch():
     connectors.allow_write(False)
     f = Friday()
     f.announce = lambda *a, **k: None
-    assert f._tell_person("sam", "hello") is False
+    # It returns (sent, why) now, because "I could not message them" and the
+    # REASON are different things to be told: posting switched off, Slack not
+    # connected, and "the closest name is somebody else" all need different
+    # actions from you.
+    sent, why = f._tell_person("sam", "hello")
+    assert sent is False, why
+    assert "switched off" in why, why
+
+
+def test_a_person_step_never_guesses_which_colleague():
+    """A direct message goes out under your name to one named human. "sam"
+    scores 0.72 against "sanjana", which is close enough for a suggestion and
+    nowhere near close enough to message somebody."""
+    from friday import connectors
+    connectors.allow_write(True)
+
+    class _Slack:
+        name = "slack"
+
+        def ready(self):
+            return True
+
+        def setup_hint(self):
+            return ""
+
+        def _call(self, method, **kw):
+            if method == "users.list":
+                return {"ok": True, "members": [
+                    {"id": "U1", "name": "sanjana",
+                     "profile": {"real_name": "Sanjana Rao",
+                                 "display_name": "sanjana"}}]}
+            raise AssertionError("must not reach postMessage")
+
+        find_person = connectors.Slack.find_person
+        dm = connectors.Slack.dm
+
+    real = connectors.get
+    connectors.get = lambda n: _Slack() if n == "slack" else real(n)
+    f = Friday()
+    f.announce = lambda *a, **k: None
+    try:
+        sent, why = f._tell_person("sam", "sign off on the copy")
+    finally:
+        connectors.get = real
+        connectors.allow_write(False)
+    assert sent is False, why
+    assert "sanjana" in why, why
 
 
 # ---- it actually runs them at the same time --------------------------------

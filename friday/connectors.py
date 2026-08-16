@@ -684,15 +684,25 @@ class Slack:
             people.append((u.get("id", ""), [n for n in names if n]))
         for uid, names in people:
             if any(n.lower() == want for n in names):
-                return {"id": uid, "name": names[0]}
+                return {"id": uid, "name": names[0], "how": "exact"}
         # First name, which is what people actually say.
-        for uid, names in people:
-            if any(n.lower().split()[0] == want for n in names if n.split()):
-                return {"id": uid, "name": names[0]}
+        hits = [(uid, names) for uid, names in people
+                if any(n.lower().split()[0] == want for n in names if n.split())]
+        if len(hits) == 1:
+            return {"id": hits[0][0], "name": hits[0][1][0], "how": "exact"}
+        if len(hits) > 1:
+            # Two people called Sam. Guessing which colleague receives a message
+            # under your name is not a guess anybody should make.
+            return {"how": "several",
+                    "names": [n[1][0] for n in hits[:5]]}
+        # A sounds-like match. Reported as such and never acted on: "sam"
+        # scores 0.72 against "sanjana", which is close enough for a suggestion
+        # and nowhere near close enough to message somebody.
         from . import nearest
         flat = {n: uid for uid, names in people for n in names}
         pick = nearest.suggest(want, list(flat))
-        return {"id": flat[pick], "name": pick} if pick else {}
+        return ({"id": flat[pick], "name": pick, "how": "maybe"} if pick
+                else {"how": "none"})
 
     def dm(self, who: str, text: str) -> dict:
         """Message a person directly, as you.
@@ -703,7 +713,16 @@ class Slack:
         if not can_write():
             return {"ok": False, "error": "writing_not_enabled"}
         person = self.find_person(who)
-        if not person:
+        how = person.get("how", "none")
+        if how == "several":
+            return {"ok": False, "error": "which_person",
+                    "people": person.get("names", [])}
+        if how == "maybe":
+            # Close, but a direct message goes out under your name to one named
+            # human. "Close" is not a standard for that.
+            return {"ok": False, "error": "not_sure",
+                    "guess": person.get("name", "")}
+        if how != "exact" or not person.get("id"):
             return {"ok": False, "error": f"I can't find {who} in Slack"}
         d = self._call("conversations.open", users=person["id"])
         chan = ((d.get("channel") or {}).get("id") or "")

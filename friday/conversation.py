@@ -1294,15 +1294,27 @@ class Friday:
         is further from your hands than a message you dictated: you approved a
         list, once, possibly hours earlier."""
         if not connectors.can_write():
-            return False
+            return False, "posting is switched off"
         sl = connectors.get("slack")
         try:
             if not (sl and sl.ready() and hasattr(sl, "dm")):
-                return False
+                return False, "Slack isn't connected"
             r = sl.dm(who, text)
-            return bool(r and not r.get("error"))
-        except Exception:
-            return False
+        except Exception as e:
+            return False, str(e)[:60]
+        if r.get("ok"):
+            return True, r.get("who", who)
+        err = r.get("error", "")
+        if err == "not_sure":
+            # Never quietly. A message under your name to a colleague you did
+            # not name is the one thing here you cannot take back.
+            return False, (f"the closest name in Slack is "
+                           f"{r.get('guess', 'somebody else')}, which is not "
+                           f"close enough to message")
+        if err == "which_person":
+            return False, ("there are several: "
+                           + ", ".join(r.get("people", [])[:4]))
+        return False, err or "Slack refused it"
 
     def _steps_from(self, body: str) -> list:
         """Turn what you said into ordered steps.

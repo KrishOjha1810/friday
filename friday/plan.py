@@ -685,18 +685,24 @@ class Runner:
         already notices, or by you saying so."""
         who = step.get("target") or "somebody"
         set_step(step["id"], RUNNING)
-        sent = False
+        sent, why = False, ""
         if self.tell_person:
             try:
-                sent = bool(self.tell_person(who, step["text"]))
+                got = self.tell_person(who, step["text"])
+                if isinstance(got, tuple):
+                    sent, why = got
+                else:
+                    sent = bool(got)
             except Exception:
                 sent = False
         if not sent:
             set_step(step["id"], HELD, f"ask {who}: {step['text']}")
             self._maybe_hold(plan["id"])
             self.announce(
-                f"I can't message {who} myself, so that part of the plan is "
-                f"waiting on you: {step['text']}",
+                (f"I can't message {who} myself ({why}), so that part of the "
+                 f"plan is waiting on you: {step['text']}") if why else
+                (f"I can't message {who} myself, so that part of the plan is "
+                 f"waiting on you: {step['text']}"),
                 items=[{"sid": "", "label": who, "kind": "blocked"}])
             return False
         set_step(step["id"], HELD, f"waiting on {who}")
