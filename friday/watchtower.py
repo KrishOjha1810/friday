@@ -33,6 +33,16 @@ from . import engine, fleetcache, replies
 POLL = 3.0            # seconds between looks at the fleet
 SETTLE = 4.0          # an agent must be quiet this long before it is reported
 MAX_REPORT = 600      # characters of raw reply kept for "say more"
+# How long a session that has left the fleet is still remembered, and how many
+# are kept at the very most. Everything below is keyed by session id and every
+# value is TEXT, so without this the watchtower holds the last words of every
+# agent you have ever run. A soak measured it growing linearly and never once
+# going down: a day of work makes dozens of ids, a month makes thousands.
+#
+# Not dropped the instant a session vanishes, because a snapshot can miss one
+# for a tick and forgetting its mark means re-reporting what it already said.
+FORGET_AFTER = 1800   # half an hour gone is gone
+MAX_TRACKED = 200
 
 
 class Watchtower:
@@ -50,6 +60,7 @@ class Watchtower:
         self.expecting = set()    # sids Friday asked something, so it can say so
         self.last = {}            # sid -> full text, for "say more"
         self.muted = set()        # sids you have asked not to hear about
+        self._gone = {}           # sid -> when it left the fleet
         self._stop = threading.Event()
         self._started = False
 
@@ -118,6 +129,7 @@ class Watchtower:
             return
         rows = {r["sid"]: r for r in self._fleet()}
         now = time.time()
+        self._forget(rows, now)
 
         for sid, r in rows.items():
             path = r.get("path", "")
@@ -173,6 +185,43 @@ class Watchtower:
             return bool(engine.attention.is_quiet())
         except Exception:
             return False
+
+    def _forget(self, rows: dict, now: float) -> None:
+        """Let go of sessions that are over.
+
+        Everything here is keyed by session id and holds text, and session ids
+        are created all day. Without this the watchtower is a log of every
+        agent you have ever run, kept in memory, scanned on every tick.
+
+        A hard cap on top of the timer, because a timer only helps if time
+        passes: something that churns sessions faster than they expire would
+        still climb, and a cap that is never reached costs nothing."""
+        for sid in list(self._gone):
+            if sid in rows:
+                self._gone.pop(sid, None)
+        # Every dict, not just `seen`. Deriving the departed set from one of
+        # them left entries stranded in the others: a session evicted from
+        # `seen` was never looked for in `pending`, so `pending` went on
+        # growing after the fix that was supposed to stop exactly this.
+        tracked = set(self.seen) | set(self.last) | set(self.pending)
+        for sid in tracked:
+            if sid not in rows:
+                self._gone.setdefault(sid, now)
+        dead = [sid for sid, when in self._gone.items()
+                if now - when > FORGET_AFTER]
+        # Over the cap, the longest-gone go first. Only ones that have actually
+        # left: a live session is never dropped, however many there are.
+        if len(tracked) > MAX_TRACKED:
+            extra = sorted(self._gone.items(), key=lambda kv: kv[1])
+            want = len(tracked) - MAX_TRACKED
+            dead += [sid for sid, _ in extra[:want] if sid not in dead]
+        for sid in dead:
+            self.seen.pop(sid, None)
+            self.last.pop(sid, None)
+            self.pending.pop(sid, None)
+            self._gone.pop(sid, None)
+            self.expecting.discard(sid)
+            self.muted.discard(sid)
 
     # ---- saying it -------------------------------------------------------
     def _report(self, row: dict, text: str) -> None:

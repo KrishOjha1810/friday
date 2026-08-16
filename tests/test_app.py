@@ -126,6 +126,53 @@ def test_it_can_start_one_when_there_is_none():
         time.sleep(0.5)
 
 
+def test_it_restarts_a_server_it_started_and_lost():
+    """A menu bar item that has been sitting there all day and quietly stopped
+    working is worse than none, because you go on believing it."""
+    server = app.Server()
+    server.ensure()
+    assert app._up(1.0)
+    try:
+        first = server.proc.pid
+        import os
+        import signal
+        os.killpg(os.getpgid(first), signal.SIGKILL)
+        for _ in range(40):
+            if not app._up(0.3):
+                break
+            time.sleep(0.2)
+        assert not app._up(0.4), "it did not actually die"
+        server.watch()
+        assert app._up(1.0), "never came back"
+        assert server.proc.pid != first
+    finally:
+        server.stop()
+        time.sleep(0.5)
+
+
+def test_it_does_not_restart_somebody_elses_server():
+    """If you started it in a terminal and it died, that is yours to see. An
+    app that silently replaces your process is an app that hides the failure
+    you needed to know about."""
+    s = _Serve()
+    server = app.Server()
+    server.ensure()
+    assert server.proc is None
+    s.stop()
+    server.watch()
+    assert server.proc is None, "adopted, then took over"
+
+
+def test_it_gives_up_rather_than_flailing():
+    """Restarting a thing that will not stay up, forever, every few seconds, is
+    a worse failure than being down."""
+    server = app.Server()
+    server.restarts = 99
+    server.proc = type("Dead", (), {"poll": lambda self: 1})()
+    server.watch()
+    assert server.proc is not None, "kept trying past the limit"
+
+
 # ---- what the menu bar says -----------------------------------------------
 def test_the_count_is_only_things_waiting_on_you():
     """A busy fleet is not news; a blocked one is. A menu bar is glanced at,

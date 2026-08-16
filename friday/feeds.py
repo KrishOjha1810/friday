@@ -36,6 +36,38 @@ PER_ROUND = 3         # most items announced in one pass. The hourly ceiling
 TIMEOUT = 12          # seconds any one source gets to answer
 
 
+class _Seen:
+    """The keys already announced, oldest dropped first past a cap.
+
+    Deliberately large: the cost of forgetting a key is announcing something
+    twice, which is annoying, and the cost of a small cap is doing that
+    regularly. Ten thousand keys is a few hundred kilobytes and more than any
+    real day produces."""
+
+    MAX = 10_000
+
+    def __init__(self):
+        self._d = {}
+
+    def add(self, key):
+        self._d[key] = None
+        if len(self._d) > self.MAX:
+            for k in list(self._d)[:len(self._d) - self.MAX]:
+                self._d.pop(k, None)
+
+    def discard(self, key):
+        self._d.pop(key, None)
+
+    def __contains__(self, key):
+        return key in self._d
+
+    def __len__(self):
+        return len(self._d)
+
+    def __iter__(self):
+        return iter(self._d)
+
+
 class Feeds:
     def __init__(self, announce, log=None, hushed=None, budget=None):
         self.announce = announce
@@ -45,7 +77,12 @@ class Feeds:
         self._log = log or (lambda *_: None)
         self._own_hush = hushed or (lambda: False)
         self.sources = {}         # name -> (source, period, last_polled)
-        self.seen = set()         # keys already announced
+        # Keys already announced, newest last. A set, until a soak showed it
+        # only ever growing: every calendar event, every Sentry issue and every
+        # broken workflow adds a key and nothing ever removes one. A dict keeps
+        # insertion order, so trimming drops the oldest rather than whichever
+        # the hash happened to put first.
+        self.seen = _Seen()
         self.muted = set()        # source names you asked to be spared
         self.held = 0             # items not announced, so it can say so
         self._stop = threading.Event()

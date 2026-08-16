@@ -117,6 +117,31 @@ class Server:
                 return
             time.sleep(0.25)
 
+    def watch(self) -> None:
+        """Start it again if the one WE started has died.
+
+        A menu bar item that has been sitting there all day and quietly stopped
+        working is worse than no menu bar item, because you believe it. The
+        restart is deliberately narrow: only a server this app launched, and
+        only when it is actually gone rather than merely slow to answer.
+
+        Nothing is done about a server somebody else started. If you ran it in
+        a terminal and it died, that is yours to see."""
+        if self.proc is None:
+            return
+        if self.proc.poll() is None and _up(1.0):
+            return
+        if self.proc.poll() is None:
+            # Alive but not answering. Left alone: a wedged process that gets
+            # killed and restarted every few seconds is a worse failure than
+            # one that is simply wedged, and it destroys the evidence.
+            return
+        self.restarts = getattr(self, "restarts", 0) + 1
+        if self.restarts > 5:
+            return          # something is properly wrong; flailing will not fix it
+        self.proc = None
+        self.ensure()
+
     def stop(self) -> None:
         # Only what this app started. Killing a server somebody is using from a
         # terminal because they quit the menu bar item would be rude and
@@ -192,7 +217,10 @@ class App(NSObject):
         except Exception:
             n = 0
         if not st:
-            title = "F?"                # the server is not answering
+            # Not silently: a menu bar that looks normal while Friday is dead is
+            # the worst state available, because you go on trusting it.
+            title = "F?"
+            threading.Thread(target=self.server.watch, daemon=True).start()
         elif n:
             title = f"F {n}"
         else:
