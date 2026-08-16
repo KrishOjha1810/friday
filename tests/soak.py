@@ -129,10 +129,12 @@ def sizes(f):
         "watch.seen": len(f.watch.seen),
         "watch.last": len(f.watch.last),
         "watch.pending": len(f.watch.pending),
+        "watch.asked": len(f.watch.asked),
         # The one that actually costs something: every per-session dict here
         # holds TEXT, so the count understates it by three orders of magnitude.
         "watch.bytes": (sum(len(v) for v in f.watch.seen.values())
                         + sum(len(str(v)) for v in f.watch.last.values())
+                        + sum(len(str(v)) for v in f.watch.asked.values())
                         + sum(len(str(v)) for v in f.watch.pending.values())),
         "watch.muted": len(f.watch.muted),
         "watch.expecting": len(f.watch.expecting),
@@ -151,6 +153,7 @@ CAPS = {
     "watch.seen": 260,          # watchtower.MAX_TRACKED, plus a live fleet
     "watch.last": 260,
     "watch.pending": 260,
+    "watch.asked": 260,
     "watch.expecting": 260,
     "threads": 12,
     "fds": 64,
