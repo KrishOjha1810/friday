@@ -132,6 +132,9 @@ you are already signed in to.
 | `who am I talking to` | where a bare reply would land |
 | `what should I work on?` | an opinion, ranked by who is blocked, with the reason |
 | `what's on fire?` | unresolved errors in production, worst by people affected |
+| `what are my tickets?` | everything assigned to you, across every tracker at once |
+| `file a linear ticket: ...` | file into a named tracker, or be asked which |
+| `use linear for tickets` | say once where tickets go, and stop being asked |
 | `work out a plan for <goal>` | the agent writes the steps, you approve before any run |
 | `help` | the six commands that work before you connect anything |
 | `file a ticket: the parser dies on PDFs` | Jira, Linear, or GitHub issues with no setup at all |

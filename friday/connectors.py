@@ -108,14 +108,28 @@ class GitHub:
             return []
 
     def my_issues(self, limit: int = 8) -> list:
-        """Open issues assigned to you or that you opened, across repos."""
+        """Open issues assigned to you or that you opened, across repos.
+
+        Returned in the shape every tracker uses (see `trackers.py`), not in
+        `gh`'s. This handed back raw gh JSON while the rest of Friday read
+        `key`, `summary` and `status`, so the tickets came out as a list of
+        empty brackets: present, counted, and unreadable."""
         out = _run(["gh", "search", "issues", "--involves", "@me",
                     "--state", "open", "--limit", str(limit), "--json",
-                    "title,repository,url,updatedAt,author"], 20)
+                    "title,repository,url,updatedAt,number,state"], 20)
         try:
-            return json.loads(out) if out else []
+            rows = json.loads(out) if out else []
         except Exception:
             return []
+        made = []
+        for r in rows:
+            repo = (r.get("repository") or {}).get("nameWithOwner", "")
+            num = r.get("number") or (r.get("url", "").rsplit("/", 1)[-1])
+            made.append({"key": f"{repo}#{num}" if repo else f"#{num}",
+                         "summary": r.get("title", ""),
+                         "status": (r.get("state") or "open").lower(),
+                         "url": r.get("url", "")})
+        return made
 
     def repo_issues(self, repo: str, limit: int = 8) -> list:
         out = _run(["gh", "issue", "list", "--repo", repo, "--state", "open",
@@ -242,6 +256,42 @@ class GitHub:
         url = (r.stdout or "").strip().splitlines()[-1] if r.stdout else ""
         return {"ok": True, "key": url.rsplit("/", 1)[-1] if url else "",
                 "url": url}
+
+
+    # GitHub has two states and Jira has a workflow, so "move" here is smaller
+    # than it looks. Saying so honestly beats inventing labels-as-states, which
+    # is a convention some teams use and plenty do not, and guessing wrong
+    # writes a label onto somebody's issue tracker.
+    STATES = ("open", "closed")
+
+    def transitions(self, key: str) -> list:
+        return [{"id": s, "name": s} for s in self.STATES]
+
+    def move(self, key: str, to: str) -> dict:
+        if not gh_can_write():
+            return {"error": "writing_not_enabled"}
+        from . import nearest
+        # "done", "finished", "resolved" all mean closed to a human, and none
+        # of them is the word gh wants.
+        said = (to or "").strip().lower()
+        if said in ("done", "closed", "close", "finished", "resolved",
+                    "complete", "completed", "shipped"):
+            want = "closed"
+        elif said in ("open", "reopen", "reopened", "todo", "back"):
+            want = "open"
+        else:
+            want = nearest.pick(said, list(self.STATES))
+        if not want:
+            return {"error": "which_state", "states": list(self.STATES)}
+        verb = "close" if want == "closed" else "reopen"
+        try:
+            r = subprocess.run(["gh", "issue", verb, key],
+                               capture_output=True, text=True, timeout=30)
+        except Exception as e:
+            return {"error": str(e)[:160]}
+        if r.returncode != 0:
+            return {"error": (r.stderr or "").strip()[:200]}
+        return {"ok": True, "state": want}
 
     def comment(self, target: str, body: str) -> dict:
         """Comment on an issue or pull request, as you.
@@ -1405,10 +1455,77 @@ class Linear:
                  "status": (n.get("state") or {}).get("name", ""),
                  "url": n.get("url", "")} for n in nodes]
 
+    def projects(self) -> list:
+        """The same question every other tracker answers, in the same shape.
+        Linear calls them teams; nothing above the seam should have to know."""
+        return [{"key": t.get("key", ""), "name": t.get("name", "")}
+                for t in self.teams()]
+
     def teams(self) -> list:
         d = self._q("{ teams(first: 20) { nodes { id key name } } }")
         return ((d.get("teams") or {}).get("nodes") or []) if not d.get("error") \
             else []
+
+
+    def _issue_id(self, key: str) -> str:
+        """Linear's mutations want the internal id, not the PROJ-12 you say."""
+        d = self._q("""
+            query($k: String!) { issueSearch(filter: {number:
+                {eq: %s}}, first: 1) { nodes { id identifier } } }"""
+                    % (key.rsplit("-", 1)[-1] or "0"), {"k": key})
+        nodes = ((d.get("issueSearch") or {}).get("nodes") or [])
+        for n in nodes:
+            if (n.get("identifier") or "").upper() == key.upper():
+                return n.get("id", "")
+        return nodes[0].get("id", "") if nodes else ""
+
+    def comment(self, target: str, body: str) -> dict:
+        if not (can_write() or gh_can_write()):
+            return {"ok": False, "error": "writing_not_enabled"}
+        iid = self._issue_id(target)
+        if not iid:
+            return {"ok": False, "error": f"I can't find {target} in Linear"}
+        d = self._q("""
+            mutation($i: String!, $b: String!) {
+              commentCreate(input: {issueId: $i, body: $b}) {
+                success comment { url } } }""", {"i": iid, "b": body[:4000]})
+        if d.get("error"):
+            return {"ok": False, "error": d["error"]}
+        made = (d.get("commentCreate") or {}).get("comment") or {}
+        return {"ok": True, "url": made.get("url", "")}
+
+    def transitions(self, key: str) -> list:
+        """Linear states are per team, same as Jira states are per project, so
+        the list has to come from the ticket rather than from a constant."""
+        iid = self._issue_id(key)
+        if not iid:
+            return []
+        d = self._q("""
+            query($i: String!) { issue(id: $i) { team { states(first: 20) {
+                nodes { id name } } } } }""", {"i": iid})
+        team = ((d.get("issue") or {}).get("team") or {})
+        return [{"id": n.get("id", ""), "name": n.get("name", "")}
+                for n in ((team.get("states") or {}).get("nodes") or [])]
+
+    def move(self, key: str, to: str) -> dict:
+        if not (can_write() or gh_can_write()):
+            return {"error": "writing_not_enabled"}
+        options = self.transitions(key)
+        if not options:
+            return {"error": "no_transitions"}
+        from . import nearest
+        want = nearest.pick(to, [o["name"] for o in options])
+        if not want:
+            return {"error": "which_state", "states": [o["name"] for o in options]}
+        sid = next(o["id"] for o in options if o["name"] == want)
+        iid = self._issue_id(key)
+        d = self._q("""
+            mutation($i: String!, $s: String!) {
+              issueUpdate(id: $i, input: {stateId: $s}) { success } }""",
+                    {"i": iid, "s": sid})
+        if d.get("error"):
+            return d
+        return {"ok": True, "state": want}
 
     def create(self, summary: str, project: str = "", body: str = "",
                kind: str = "") -> dict:
@@ -1633,7 +1750,166 @@ class Sentry:
                 f" ({', '.join(bits)}).")
 
 
-REGISTRY = {c.name: c() for c in (GitHub, Slack, Gmail, Jira, Linear, Sentry)}
+class GitLab:
+    """GitLab issues, which for a lot of teams is the whole toolchain.
+
+    Included because it is the fourth tracker rather than despite it: three
+    trackers can share a seam by coincidence, and the fourth is what proves the
+    seam is real. This one was written against `trackers.py` and touched nothing
+    else, which was the point.
+
+    Self-hosted is the common case here, more so than with any other connector,
+    so the base URL is configurable and defaults to gitlab.com."""
+
+    name = "gitlab"
+
+    def token(self) -> str:
+        return os.environ.get("GITLAB_TOKEN") or _secret("gitlab_token")
+
+    def base(self) -> str:
+        got = (os.environ.get("GITLAB_URL") or _secret("gitlab_url") or "").strip()
+        return (got.rstrip("/") if got else "https://gitlab.com") + "/api/v4"
+
+    _checked = {}
+
+    def ready(self) -> bool:
+        tok = self.token()
+        if not tok:
+            return False
+        hit = self._checked.get(tok)
+        if hit and time.time() - hit[1] < 300:
+            return hit[0]
+        ok = bool((self._get("/user") or {}).get("username"))
+        self._checked[tok] = (ok, time.time())
+        return ok
+
+    def whoami(self) -> str:
+        return (self._get("/user") or {}).get("username", "")
+
+    def setup_hint(self) -> str:
+        return ("make a personal access token at gitlab.com/-/user_settings/"
+                "personal_access_tokens with the `api` scope, then paste it to "
+                "me on its own. It starts with glpat-.")
+
+    def _call(self, method: str, path: str, params: dict = None,
+              body: dict = None):
+        tok = self.token()
+        if not tok:
+            return {"error": "no_token"}
+        url = self.base() + path
+        if params:
+            url += "?" + urllib.parse.urlencode(params)
+        data = json.dumps(body).encode() if body is not None else None
+        try:
+            req = urllib.request.Request(
+                url, data=data, method=method,
+                headers={"PRIVATE-TOKEN": tok,
+                         "Content-Type": "application/json"})
+            with urllib.request.urlopen(req, timeout=TIMEOUT) as r:
+                return json.loads(r.read() or b"{}")
+        except urllib.error.HTTPError as e:
+            if e.code in (401, 403):
+                return {"error": "the token is missing the api scope"}
+            return {"error": f"gitlab {e.code}"}
+        except Exception as e:
+            return {"error": str(e)[:160]}
+
+    def _get(self, path: str, params: dict = None):
+        return self._call("GET", path, params=params)
+
+    def my_issues(self, limit: int = 8) -> list:
+        got = self._get("/issues", {"scope": "assigned_to_me", "state": "opened",
+                                    "per_page": min(50, limit)})
+        if isinstance(got, dict):
+            return [got] if got.get("error") else []
+        return [{"key": f"{(i.get('references') or {}).get('full') or i.get('iid')}",
+                 "summary": i.get("title", ""),
+                 "status": i.get("state", ""),
+                 "url": i.get("web_url", "")} for i in got]
+
+    def projects(self) -> list:
+        got = self._get("/projects", {"membership": "true", "per_page": 30,
+                                      "order_by": "last_activity_at"})
+        if isinstance(got, dict):
+            return []
+        return [{"key": p.get("path_with_namespace", ""),
+                 "name": p.get("name", "")} for p in got]
+
+    def _project_id(self, project: str) -> str:
+        want = (project or "").strip()
+        if not want:
+            rows = self.projects()
+            return rows[0]["key"] if len(rows) == 1 else ""
+        return want
+
+    def create(self, summary: str, project: str = "", body: str = "",
+               kind: str = "") -> dict:
+        if not (can_write() or gh_can_write()):
+            return {"error": "writing_not_enabled"}
+        if not summary.strip():
+            return {"error": "nothing_to_file"}
+        pid = self._project_id(project)
+        if not pid:
+            rows = self.projects()
+            return {"error": "which_project",
+                    "projects": [p["key"] for p in rows[:8]]}
+        enc = urllib.parse.quote(pid, safe="")
+        d = self._call("POST", f"/projects/{enc}/issues",
+                       body={"title": summary.strip()[:250],
+                             "description": body.strip()[:4000]})
+        if d.get("error"):
+            return d
+        return {"ok": True, "key": f"{pid}#{d.get('iid', '')}",
+                "url": d.get("web_url", "")}
+
+    def _split(self, target: str) -> tuple:
+        """"group/repo#12" into the two halves GitLab's URLs want."""
+        path, _, num = (target or "").rpartition("#")
+        if not path:
+            rows = self.projects()
+            path = rows[0]["key"] if len(rows) == 1 else ""
+        return urllib.parse.quote(path, safe=""), num.strip()
+
+    def comment(self, target: str, body: str) -> dict:
+        if not (can_write() or gh_can_write()):
+            return {"ok": False, "error": "writing_not_enabled"}
+        enc, num = self._split(target)
+        if not (enc and num):
+            return {"ok": False, "error": f"I can't tell which issue {target} is"}
+        d = self._call("POST", f"/projects/{enc}/issues/{num}/notes",
+                       body={"body": body[:4000]})
+        if d.get("error"):
+            return {"ok": False, "error": d["error"]}
+        return {"ok": True, "url": ""}
+
+    STATES = ("opened", "closed")
+
+    def transitions(self, key: str) -> list:
+        return [{"id": s, "name": s} for s in self.STATES]
+
+    def move(self, key: str, to: str) -> dict:
+        if not (can_write() or gh_can_write()):
+            return {"error": "writing_not_enabled"}
+        said = (to or "").strip().lower()
+        if said in ("done", "closed", "close", "finished", "resolved",
+                    "complete", "completed", "shipped"):
+            want = "close"
+        elif said in ("open", "opened", "reopen", "reopened", "todo", "back"):
+            want = "reopen"
+        else:
+            return {"error": "which_state", "states": list(self.STATES)}
+        enc, num = self._split(key)
+        if not (enc and num):
+            return {"error": f"I can't tell which issue {key} is"}
+        d = self._call("PUT", f"/projects/{enc}/issues/{num}",
+                       body={"state_event": want})
+        if d.get("error"):
+            return d
+        return {"ok": True, "state": "closed" if want == "close" else "opened"}
+
+
+REGISTRY = {c.name: c() for c in (GitHub, Slack, Gmail, Jira, Linear,
+                                  Sentry, GitLab)}
 
 
 def _works(c) -> bool:

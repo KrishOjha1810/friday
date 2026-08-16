@@ -32,7 +32,7 @@ from pathlib import Path
 from . import (actions, agents, budget as budgets, connectors, engine,
                feeds,
                fleetcache, inbox, memory, nearest, plan as plans,
-               push, replies, watchtower, when)
+               push, replies, trackers, watchtower, when)
 
 # What kind of thing the user just said.
 ASK_FLEET = "fleet"        # "what's running", "who needs me"
@@ -69,6 +69,7 @@ NEXT = "next"              # "what should I work on?"
 FIRE = "fire"              # "what's on fire?"
 HELP = "help"              # "what can you do?"
 PLAN_ASK = "plan_ask"      # "work out a plan for adding OAuth"
+TRACKER_PREF = "tracker_pref"   # "use linear for tickets"
 SCHEDULE = "schedule"      # "put it in for Thursday at 4"
 TICKET = "ticket"          # "file a ticket: the parser breaks on PDFs"
 MOVE = "move"              # "move PROJ-12 to done"
@@ -122,13 +123,26 @@ _SCHEDULE_RE = re.compile(
     r"|\b(?:schedule|book)\s+(?:a\s+)?(?:meeting|call|sync)\b\s*(.*)$",
     re.I)
 
+# The tracker can be named two ways round, "file a linear ticket" and "file a
+# ticket in linear", and both were previously parsed and then thrown away, so
+# saying where to put it had no effect on where it went.
+_TRACKERS = "jira|linear|github|gitlab"
 _TICKET_RE = re.compile(
     r"\b(?:file|create|open|raise|make)\s+(?:a\s+|an\s+)?"
-    r"(?:jira\s+|linear\s+)?(?:ticket|issue|bug|task)\b"
+    r"(?:(" + _TRACKERS + r")\s+)?(?:ticket|issue|bug|task)\b"
+    r"(?:\s+(?:in|on)\s+(" + _TRACKERS + r"))?"
     r"(?:\s+(?:in|on|for)\s+([A-Z][A-Z0-9_]{1,9}))?"
     r"(?:\s*[:,]\s*(.+))?$", re.I)
+# "use linear for tickets", "file tickets in jira from now on"
+_TRACKER_PREF_RE = re.compile(
+    r"\b(?:use\s+(" + _TRACKERS + r")\s+for\s+(?:tickets?|issues?)"
+    r"|(?:file|put)\s+(?:my\s+)?(?:tickets?|issues?)\s+(?:in|on)\s+"
+    r"(" + _TRACKERS + r"))\b", re.I)
 _MOVE_RE = re.compile(
-    r"\b(?:move|set|mark|transition|put)\s+([A-Za-z][A-Za-z0-9]*-\d+)\s+"
+    # A key is PROJ-12 (Jira, Linear) or owner/repo#12 (GitHub, GitLab). It was
+    # only the first, so no GitHub issue could be moved by name.
+    r"\b(?:move|set|mark|transition|put|close)\s+"
+    r"((?:[A-Za-z][A-Za-z0-9]*-\d+)|(?:[\w.\-]+/[\w.\-]+#\d+)|(?:#\d+))\s+"
     r"(?:to|as|into)\s+(.+?)\s*[.!]?$", re.I)
 
 _PLAN_RE = re.compile(
@@ -455,11 +469,21 @@ def classify(text: str) -> tuple:
         return SCHEDULE, {"said": t}
     m = _MOVE_RE.search(t)
     if m:
-        return MOVE, {"key": m.group(1).upper(), "to": m.group(2).strip()}
+        # PROJ-12 is uppercased because that is how Jira and Linear write it
+        # and speech recognition does not capitalise. owner/repo#12 is left
+        # alone, because GitHub and GitLab paths are case sensitive and
+        # CC-VB/VOICEBRIDGE#20 is a 404.
+        key = m.group(1)
+        return MOVE, {"key": key if "/" in key or key.startswith("#")
+                      else key.upper(), "to": m.group(2).strip()}
+    m = _TRACKER_PREF_RE.search(t)
+    if m:
+        return TRACKER_PREF, {"which": (m.group(1) or m.group(2)).lower()}
     m = _TICKET_RE.search(t)
     if m:
-        return TICKET, {"project": (m.group(1) or "").upper(),
-                        "summary": (m.group(2) or "").strip()}
+        return TICKET, {"where": (m.group(1) or m.group(2) or "").lower(),
+                        "project": (m.group(3) or "").upper(),
+                        "summary": (m.group(4) or "").strip()}
     if _PLAN_STOP_RE.search(t):
         return PLAN_GO, {"stop": True}
     if _PLAN_WHERE_RE.search(t):
@@ -815,8 +839,11 @@ class Friday:
             return self._fire()
         if intent == SCHEDULE:
             return self._schedule(payload["said"])
+        if intent == TRACKER_PREF:
+            return self._set_tracker(payload["which"])
         if intent == TICKET:
-            return self._file_ticket(payload["project"], payload["summary"])
+            return self._file_ticket(payload["project"], payload["summary"],
+                                     payload.get("where", ""))
         if intent == MOVE:
             return self._move_ticket(payload["key"], payload["to"])
         if intent == PLAN:
@@ -1308,30 +1335,73 @@ class Friday:
                         "reads": reads}
         return self._say(f"Put \"{title}\" in for {reads}?", needs_confirm=True)
 
-    def _tracker(self):
-        """Whichever tracker you actually use. Jira and Linear answer the same
-        questions, so nothing above here needs to know which one it got."""
-        # GitHub last, because it is the fallback that always works rather
-        # than the tracker a team runs on. If you have Jira or Linear
-        # connected, that is where your colleagues will look.
-        for name in ("jira", "linear", "github"):
-            c = connectors.get(name)
-            try:
-                if c and c.ready():
-                    return c
-            except Exception:
-                continue
-        return None
+    def _tracker(self, want: str = ""):
+        """Whichever tracker YOU use, which is not for Friday to decide.
 
-    def _file_ticket(self, project: str, summary: str) -> dict:
+        This used to be a hard-coded order, jira then linear then github, which
+        quietly chose for everybody: with a work Jira and a side-project Linear
+        connected, the side-project ticket went to work. See `trackers.py`; the
+        rule now is that Friday uses the one you named, or the one you saved, or
+        the only one there is, and otherwise asks."""
+        return trackers.get(want)
+
+    def _set_tracker(self, which: str) -> dict:
+        """Say once where tickets go, and stop being asked."""
+        which = (which or "").strip().lower()
+        live = trackers.names()
+        if which not in live:
+            c = connectors.get(which)
+            if c and trackers.is_tracker(c):
+                return self._say(
+                    f"{trackers.describe(c)} isn't connected yet, so I can't "
+                    f"file there. " + connectors.hint(c))
+            return self._say("I don't track tickets in that. I can use: "
+                             + (", ".join(live) or "nothing yet") + ".")
+        trackers.prefer(which)
+        c = trackers.get(which)
+        return self._say(f"Tickets go to {trackers.describe(c)} from now on. "
+                         f"Say \"use <other> for tickets\" to change it.")
+
+    def _ask_which_tracker(self, then) -> dict:
+        """Make the choice once and remember it.
+
+        A ticket filed in the wrong tracker is worse than no ticket, because
+        everybody believes it exists. So this is one of the few places Friday
+        stops rather than picking the likelier option."""
+        live = trackers.names()
+        pretty = [trackers.describe(c) for c in trackers.available()]
+        return self._offer(
+            "You have more than one tracker connected: "
+            + ", ".join(pretty)
+            + ". Which should I use? I'll remember it.",
+            yes=lambda n=live[0]: (trackers.prefer(n), then(n))[1],
+            again=lambda t: self._pick_tracker(t, then))
+
+    def _pick_tracker(self, said: str, then) -> dict:
+        name = nearest.pick((said or "").strip().lower(), trackers.names())
+        if not name:
+            return self._say("I don't have a tracker called that. I have: "
+                             + ", ".join(trackers.names()) + ".")
+        trackers.prefer(name)
+        return then(name)
+
+    def _file_ticket(self, project: str, summary: str,
+                     where: str = "") -> dict:
         """File a ticket, from what you said or from what you were just reading.
 
         This is the moment a Slack thread becomes work, which is the whole point
         of reading Slack in the first place. Nothing is filed without you seeing
         the exact wording, because a ticket is something colleagues read with
         your name on it."""
-        ji = self._tracker()
+        ji = self._tracker(where)
+        if ji is None and trackers.ambiguous():
+            return self._ask_which_tracker(
+                lambda n, p=project, sm=summary: self._file_ticket(p, sm, n))
         if ji is None:
+            if where:
+                return self._say(f"I don't have {where} connected. I have: "
+                                 + (", ".join(trackers.names()) or "nothing")
+                                 + ".")
             hint = connectors.get("jira")
             return self._say("No ticket tracker is connected. "
                              + (connectors.hint(hint) if hint else ""))
@@ -1352,13 +1422,19 @@ class Friday:
                              f"and I'll be able to, still showing you every one "
                              f"first.")
         self.pending = {"kind": "ticket", "project": project,
-                        "summary": summary}
-        where = f" in {project}" if project else ""
-        return self._say(f"File this{where}?\n\n{summary[:300]}",
+                        "summary": summary, "where": ji.name}
+        # Name the tracker as well as the project. With four of them possible,
+        # "File this?" is not enough to approve: you are approving WHERE as much
+        # as WHAT, and the wrong tracker is the failure that hides itself.
+        place = trackers.describe(ji) + (f", {project}" if project else "")
+        return self._say(f"File this in {place}?\n\n{summary[:300]}",
                          needs_confirm=True)
 
-    def _move_ticket(self, key: str, to: str) -> dict:
-        ji = self._tracker()
+    def _move_ticket(self, key: str, to: str, where: str = "") -> dict:
+        ji = self._tracker(where)
+        if ji is None and trackers.ambiguous():
+            return self._ask_which_tracker(
+                lambda n, k=key, t=to: self._move_ticket(k, t, n))
         if ji is None:
             return self._say("No ticket tracker is connected, so I can't move "
                              "anything.")
@@ -1369,8 +1445,10 @@ class Friday:
             return self._say(f"I can't change tickets yet. Say \"let yourself "
                              f"post\" if you want me to be able to move "
                              f"{key}.")
-        self.pending = {"kind": "move", "key": key, "to": to}
-        return self._say(f"Move {key} to {to}?", needs_confirm=True)
+        self.pending = {"kind": "move", "key": key, "to": to,
+                        "where": ji.name}
+        return self._say(f"Move {key} to {to} in {trackers.describe(ji)}?",
+                         needs_confirm=True)
 
     def _allow_write(self, on: bool) -> dict:
         """Turn posting on or off. The scope is only requested when you ask.
@@ -2287,16 +2365,46 @@ class Friday:
         return self._say(head + ":\n- " + "\n- ".join(lines))
 
     def _jira(self) -> dict:
-        ji = connectors.get("jira")
-        if not ji.ready():
-            return self._say("Jira isn't connected yet. " + connectors.hint(ji))
-        rows = ji.my_issues(8)
-        if rows and rows[0].get("error"):
-            return self._say("Jira answered with an error: " + rows[0]["error"])
-        if not rows:
-            return self._say("No open Jira tickets assigned to you.")
-        lines = [f"{r['key']} [{r['status']}]: {r['summary'][:80]}" for r in rows]
-        return self._say("Jira:\n- " + "\n- ".join(lines))
+        """Everything assigned to you, everywhere it is written down.
+
+        Reading is the one place Friday should NOT make you choose a tracker.
+        Writing has to pick one, because a ticket goes somewhere; reading has no
+        such constraint, and a person with work Jira and a side-project Linear
+        wants both when they ask what is on their plate. Being the single place
+        is the entire promise, and it cannot be true if the answer depends on
+        which tracker Friday felt like consulting."""
+        live = trackers.available()
+        if not live:
+            ji = connectors.get("jira")
+            return self._say("No ticket tracker is connected. "
+                             + connectors.hint(ji))
+        blocks, broke = [], []
+        for c in live:
+            try:
+                rows = c.my_issues(8) or []
+            except Exception as e:
+                broke.append(f"{trackers.describe(c)} ({str(e)[:60]})")
+                continue
+            if rows and rows[0].get("error"):
+                # A tracker that errors is not a tracker with no work, and
+                # reporting the two the same way is how you miss a day of it.
+                broke.append(f"{trackers.describe(c)} ({rows[0]['error'][:60]})")
+                continue
+            if not rows:
+                continue
+            lines = [f"{r.get('key', '')} [{r.get('status', '')}]: "
+                     f"{(r.get('summary') or '')[:80]}" for r in rows]
+            head = trackers.describe(c) if len(live) > 1 else \
+                trackers.describe(c)
+            blocks.append(f"{head}:\n- " + "\n- ".join(lines))
+        if not blocks and not broke:
+            where = " or ".join(trackers.describe(c) for c in live)
+            return self._say(f"Nothing open assigned to you in {where}.")
+        out = "\n\n".join(blocks)
+        if broke:
+            out += ("\n\nI couldn't reach " + ", ".join(broke)
+                    + ", so there may be more.")
+        return self._say(out)
 
     def _slack(self, query: str) -> dict:
         sl = connectors.get("slack")
@@ -2638,17 +2746,28 @@ class Friday:
                                  f"{r.get('error', 'the calendar refused it')}. "
                                  f"Nothing was added.")
             if act["kind"] == "ticket":
-                ji = self._tracker() or connectors.get("jira")
+                # The tracker you APPROVED, not whichever one resolves now.
+                # Re-deciding here could file it somewhere you did not agree to,
+                # which is the exact failure the confirmation exists to prevent.
+                ji = self._tracker(act.get("where", ""))
+                if ji is None:
+                    return self._say("That tracker isn't connected any more, so "
+                                     "nothing was filed.")
                 r = ji.create(act["summary"], project=act.get("project", ""))
                 if r.get("ok"):
                     return self._say(f"Filed {r['key']}. {r.get('url', '')}")
                 if r.get("error") == "which_project":
                     opts = ", ".join(r.get("projects") or []) or "none I can see"
                     return self._say(f"Which project? {opts}")
-                return self._say(f"It didn't file: {r.get('error', 'Jira said no')}"
-                                 f". Nothing was created.")
+                return self._say(
+                    f"It didn't file: "
+                    f"{r.get('error') or (trackers.describe(ji) + ' said no')}. "
+                    f"Nothing was created.")
             if act["kind"] == "move":
-                ji = self._tracker() or connectors.get("jira")
+                ji = self._tracker(act.get("where", ""))
+                if ji is None:
+                    return self._say("That tracker isn't connected any more, so "
+                                     "nothing moved.")
                 r = ji.move(act["key"], act["to"])
                 if r.get("ok"):
                     return self._say(f"{act['key']} is now {r['state']}.")

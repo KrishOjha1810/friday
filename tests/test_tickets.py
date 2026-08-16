@@ -21,6 +21,7 @@ from friday.conversation import Friday, classify  # noqa: E402
 
 
 class _Jira:
+    name = "jira"
     """A Jira that answers from a script."""
     def __init__(self):
         self.created, self.moved, self.states = [], [], ["To Do", "In Progress",
@@ -34,6 +35,12 @@ class _Jira:
 
     def projects(self):
         return [{"key": "PROJ", "name": "Project"}]
+
+    def my_issues(self, limit=8):
+        # Required to be recognised as a tracker at all: reading is the
+        # minimum, because a tracker Friday can write to and not read is not
+        # something anybody has.
+        return []
 
     def create(self, summary, project="", body="", kind="Task"):
         if not connectors.can_write() and not connectors.gh_can_write():
@@ -55,12 +62,26 @@ class _Jira:
         return {"ok": True, "state": want}
 
 
+def _only(**kinds):
+    """Make these the only trackers on the machine.
+
+    Patching `connectors.get` is not enough any more: the tracker seam asks
+    `all_connectors()` which trackers can answer, so a real `gh` on the test
+    machine counted as a second tracker and every ticket test started getting
+    "which tracker?" instead of doing the thing."""
+    from friday import trackers
+    trackers.forget()
+    real_all, real_get = connectors.all_connectors, connectors.get
+    connectors.all_connectors = lambda: dict(kinds)
+    connectors.get = lambda n: kinds.get((n or "").lower()) or real_get(n)
+    return real_all, real_get
+
+
 def _friday(writing=True):
     connectors.allow_write(writing)
     connectors.gh_allow_write(writing)
     jira = _Jira()
-    real = connectors.get
-    connectors.get = lambda n: jira if n == "jira" else real(n)
+    _only(jira=jira)
     f = Friday()
     f.announce = lambda *a, **k: None
     return f, jira
@@ -141,25 +162,111 @@ def test_a_misnamed_state_still_lands():
     assert jira.moved == [("PROJ-4", "In Progress")], jira.moved
 
 
+def test_it_asks_rather_than_choosing_between_two_trackers():
+    """A ticket filed in the wrong tracker is worse than no ticket, because
+    everybody believes it exists. With a work Jira and a side-project Linear
+    both connected, the old hard-coded order silently sent side-project work to
+    the employer's board."""
+    from friday import trackers
+    connectors.allow_write(True)
+    jira, linear = _Jira(), _Jira()
+    jira.name, linear.name = "jira", "linear"
+    _only(jira=jira, linear=linear)
+    f = Friday()
+    f.announce = lambda *a, **k: None
+    r = f.handle("file a ticket: the parser breaks")
+    assert "more than one tracker" in r["reply"], r["reply"]
+    assert jira.created == [] and linear.created == [], "picked one anyway"
+
+
+def test_naming_the_tracker_settles_it():
+    from friday import trackers
+    connectors.allow_write(True)
+    jira, linear = _Jira(), _Jira()
+    jira.name, linear.name = "jira", "linear"
+    _only(jira=jira, linear=linear)
+    f = Friday()
+    f.announce = lambda *a, **k: None
+    f.handle("file a linear ticket: the parser breaks")
+    f.handle("yes")
+    assert linear.created and not jira.created, (linear.created, jira.created)
+
+
+def test_saying_where_tickets_go_is_remembered():
+    """Being asked the same question every morning is its own kind of
+    broken."""
+    from friday import trackers
+    connectors.allow_write(True)
+    jira, linear = _Jira(), _Jira()
+    jira.name, linear.name = "jira", "linear"
+    _only(jira=jira, linear=linear)
+    f = Friday()
+    f.announce = lambda *a, **k: None
+    r = f.handle("use linear for tickets")
+    assert "Linear" in r["reply"], r["reply"]
+    f.handle("file a ticket: the parser breaks")
+    f.handle("yes")
+    assert linear.created and not jira.created, (linear.created, jira.created)
+    trackers.forget()
+
+
+def test_the_tracker_you_approved_is_the_one_it_files_in():
+    """Re-resolving at confirm time could file it somewhere you never agreed
+    to, which is exactly what the confirmation exists to prevent."""
+    from friday import trackers
+    connectors.allow_write(True)
+    jira, linear = _Jira(), _Jira()
+    jira.name, linear.name = "jira", "linear"
+    _only(jira=jira, linear=linear)
+    f = Friday()
+    f.announce = lambda *a, **k: None
+    f.handle("file a jira ticket: the parser breaks")
+    trackers.prefer("linear")          # changes underfoot before you say yes
+    try:
+        f.handle("yes")
+    finally:
+        trackers.forget()
+    assert jira.created and not linear.created, (jira.created, linear.created)
+
+
+def test_reading_shows_every_tracker_at_once():
+    """Writing has to pick one, because a ticket goes somewhere. Reading has no
+    such constraint, and being the single place is the whole promise."""
+    jira, linear = _Jira(), _Jira()
+    jira.name, linear.name = "jira", "linear"
+    jira.my_issues = lambda n=8: [{"key": "PROJ-1", "summary": "work thing",
+                                   "status": "Open"}]
+    linear.my_issues = lambda n=8: [{"key": "SID-2", "summary": "side thing",
+                                     "status": "Todo"}]
+    _only(jira=jira, linear=linear)
+    f = Friday()
+    f.announce = lambda *a, **k: None
+    reply = f.handle("what are my tickets?")["reply"]
+    assert "PROJ-1" in reply and "SID-2" in reply, reply
+
+
+def test_a_broken_tracker_is_not_reported_as_an_empty_one():
+    """Those look identical and only one of them means you have no work."""
+    jira, linear = _Jira(), _Jira()
+    jira.name, linear.name = "jira", "linear"
+    jira.my_issues = lambda n=8: [{"error": "token expired"}]
+    linear.my_issues = lambda n=8: [{"key": "SID-2", "summary": "side thing",
+                                     "status": "Todo"}]
+    _only(jira=jira, linear=linear)
+    f = Friday()
+    f.announce = lambda *a, **k: None
+    reply = f.handle("what are my tickets?")["reply"]
+    assert "couldn't reach" in reply and "token expired" in reply, reply
+
+
 def test_a_ticket_goes_wherever_you_actually_track_things():
     """Jira and Linear answer the same questions, so nothing above the
     connector should know which one it got. Plenty of teams replaced Jira with
     Linear entirely."""
     connectors.allow_write(True)
-    real = connectors.get
     linear = _Jira()          # same shape, different product
-
-    def only_linear(n):
-        if n == "linear":
-            return linear
-        if n == "jira":
-            class Off(_Jira):
-                def ready(self):
-                    return False
-            return Off()
-        return real(n)
-
-    connectors.get = only_linear
+    linear.name = "linear"
+    _only(linear=linear)
     try:
         f = Friday()
         f.announce = lambda *a, **k: None
@@ -167,28 +274,20 @@ def test_a_ticket_goes_wherever_you_actually_track_things():
         f.handle("yes")
         assert linear.created, "it never reached the tracker that was connected"
     finally:
-        connectors.get = real
         connectors.allow_write(False)
 
 
 def test_no_tracker_connected_says_so_rather_than_failing_oddly():
     connectors.allow_write(True)
-    real = connectors.get
-
-    class Off(_Jira):
-        def ready(self):
-            return False
-
     # Every tracker off, including the GitHub fallback, which is genuinely
     # connected on a machine where `gh` is signed in.
-    connectors.get = lambda n: Off()
+    _only()
     try:
         f = Friday()
         f.announce = lambda *a, **k: None
         r = f.handle("file a ticket: something")
         assert "no ticket tracker is connected" in r["reply"].lower(), r["reply"]
     finally:
-        connectors.get = real
         connectors.allow_write(False)
         connectors.gh_allow_write(False)
 

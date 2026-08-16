@@ -72,7 +72,15 @@ behind a switch. The honest list of what a developer actually does in a day:
 
 Ranked by how often a developer has to go and look:
 
-1. **Linear**, which for many teams replaced Jira entirely.
+1. **Linear**, which for many teams replaced Jira entirely. **Built, and then
+   rebuilt as a seam.** Adding Linear next to Jira exposed the real problem:
+   the choice between them was a hard-coded order, so with a work Jira and a
+   side-project Linear connected, side-project tickets went to the employer's
+   board. `trackers.py` now recognises a tracker by the verbs it answers rather
+   than by its name, which means GitHub Issues and GitLab are first class, any
+   tracker with an MCP server plugs in unwritten, and Friday asks rather than
+   guessing when more than one could be meant. Reading spans all of them at
+   once; only writing has to pick, because a ticket goes somewhere.
 2. **Sentry** or whatever error tracker: production is on fire is the one alert
    that outranks everything Friday currently watches. **Built.** The connector
    was the easy half; the restraint is the feature. It volunteers only issues it
