@@ -180,10 +180,29 @@ def test_no_cancels_a_guessed_action():
 
 
 def test_a_bare_yes_with_nothing_pending_does_nothing():
+    """Nothing of Friday's own pending AND nobody blocked. The fixture fleet
+    has a session asking "Which store?", and a bare yes now goes there, which
+    is the point: "yes" is the natural answer to a question an agent asked, and
+    saying "nothing was waiting" while one sat blocked was wrong."""
     _fake_engine()
     f = Friday()
+    f._waiting = lambda: []
     r = f.handle("yes")
     assert "nothing was waiting" in r["reply"].lower()
+
+
+def test_a_bare_yes_reaches_the_agent_that_asked():
+    _fake_engine()
+    f = Friday()
+    sent = []
+    orig = C.actions.send_to_session
+    C.actions.send_to_session = lambda sid, t: sent.append((sid, t)) or True
+    try:
+        r = f.handle("yes")
+    finally:
+        C.actions.send_to_session = orig
+    assert sent == [("s2", "yes")], sent
+    assert "api" in r["reply"], r["reply"]
 
 
 def test_a_failed_action_is_reported_not_swallowed():

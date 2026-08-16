@@ -897,6 +897,14 @@ class Friday:
                                       payload.get("await", False),
                                       payload.get("said", ""))
         if intent in (CONFIRM, CANCEL):
+            # Nothing of Friday's own is pending, but an AGENT may be waiting,
+            # and "yes" is the most natural possible answer to "Should I
+            # proceed?". This said "Nothing was waiting on you" while two
+            # sessions sat blocked, which is both wrong and the exact moment
+            # the product is supposed to earn its keep.
+            routed = self._bare_answer("yes" if intent == CONFIRM else "no")
+            if routed is not None:
+                return routed
             return self._say("Nothing was waiting on you." if intent == CONFIRM
                              else "Okay.")
 
@@ -927,10 +935,12 @@ class Friday:
             return None
         label = r.get("label") or "it"
         ok = actions.send_to_session(sid, text)
-        if ok:
-            self._acted_on(label)
-        return self._say(f"Told {label}." if ok
-                         else f"I couldn't reach {label}.",
+        if not ok:
+            return self._say(f"I couldn't reach {label}.",
+                             action={"kind": "tell", "sid": sid})
+        self._acted_on(label)
+        nxt = self._next_waiting(besides=sid)
+        return self._say(f"Told {label}." + (f"\n{nxt}" if nxt else ""),
                          action={"kind": "tell", "sid": sid})
 
     # ---- what it knows ----------------------------------------------------
@@ -1723,11 +1733,14 @@ class Friday:
         # could not keep.
         held = []
         try:
-            held = [text for _when, text, _src in self.budget.held(since=since)]
+            held = [text for _when, text, _src in self.budget.held(since=since,
+                                                                   clear=False)]
         except Exception:
             held = []
         if held:
-            news = news + [{"text": t} for t in held]
+            news = news + [{"text": t, "src": src}
+                           for _w, t, src in self.budget.held(since=since,
+                                                              clear=False)]
         if not news:
             waiting = self._waiting()
             if waiting:
@@ -1735,21 +1748,109 @@ class Friday:
                                  + _join([r["label"] for r in waiting])
                                  + f" {_is(len(waiting))} waiting on you.")
             return self._say("Nothing since you last spoke.")
-        # Newest last, so it reads in the order it happened.
-        lines = [h["text"] for h in news][-8:]
-        head = (f"{len(news)} things happened:" if len(news) > 1
-                else "One thing happened:")
-        extra = ""
-        if len(news) > 8:
-            extra = f" ({len(news) - 8} older ones before these)"
-        return self._say(head + extra + "\n- " + "\n- ".join(lines))
+        try:
+            self.budget.held(since=since)        # now you have been told
+        except Exception:
+            pass
+        return self._say(self._digest(news))
+
+    def _digest(self, news: list) -> str:
+        """An hour away, summarised by who rather than by line.
+
+        Twenty-two notes from four sessions is four things that happened, not
+        twenty-two. Listing them one per line is technically complete and
+        useless: you cannot act on a list you will not read, and the whole
+        reason for asking is that you were not there.
+
+        Only the latest from each is quoted, because the older ones were
+        superseded by it. What you want after an hour away is where everything
+        stands NOW, not a replay."""
+        by = {}
+        for h in news:
+            text = h.get("text", "")
+            who = (h.get("src") or "").strip() or text.split(" says")[0]
+            who = who.split(":")[0].strip()[:28] or "something"
+            by.setdefault(who, []).append(text)
+        if len(by) == 1 and len(news) <= 8:
+            lines = [h["text"] for h in news]
+            head = ("One thing happened:" if len(news) == 1
+                    else f"{len(news)} things happened:")
+            return head + "\n- " + "\n- ".join(lines)
+        rows = sorted(by.items(), key=lambda kv: -len(kv[1]))
+        lines = []
+        for who, texts in rows[:6]:
+            latest = texts[-1]
+            more = (f" (and {len(texts) - 1} earlier)" if len(texts) > 1 else "")
+            lines.append(f"{latest}{more}")
+        tail = ""
+        if len(rows) > 6:
+            tail = f"\nAnd {len(rows) - 6} others."
+        return (f"{len(news)} things while you were away, from "
+                f"{len(rows)} sources. The latest from each:\n- "
+                + "\n- ".join(lines) + tail)
 
     def _waiting(self) -> list:
+        """Everyone who cannot continue without you, oldest first.
+
+        Derived from the live fleet every time rather than kept as a list, and
+        that is the whole design of the queue. A stored queue goes stale in ways
+        you cannot see: the agent times out, you answer it in its own terminal,
+        it gives up and moves on, somebody else replies. Every one of those
+        leaves a queue entry that is still there and no longer true, and Friday
+        would go on offering you a question nobody is asking. The fleet cannot
+        be stale, because it is what is actually happening."""
         try:
-            return [r for r in fleetcache.snapshot().values()
+            rows = [r for r in fleetcache.snapshot().values()
                     if (r.get("question") or r.get("permission"))]
         except Exception:
             return []
+        # Oldest first: whoever has been stuck longest has cost the most.
+        rows.sort(key=lambda r: r.get("mtime") or 0)
+        return rows
+
+    def _bare_answer(self, word: str):
+        """A bare yes or no, when an agent is the thing waiting for it.
+
+        One waiting session gets it, because you answered a question only it
+        asked. Several is a question back, always: "yes" carries no clue about
+        which one you meant, and a yes typed into the wrong agent is not a
+        message, it is permission."""
+        rows = self._waiting()
+        if not rows:
+            return None
+        if len(rows) > 1:
+            lines = [f"  {r.get('label')}: "
+                     f"{(r.get('question') or r.get('permission') or '')[:80]}"
+                     for r in rows[:5]]
+            return self._say(
+                f"{len(rows)} sessions are waiting, so I don't know who that "
+                f"\"{word}\" is for:\n" + "\n".join(lines)
+                + "\n\nSay which, or \"tell <name> " + word + "\".")
+        r = rows[0]
+        label = r.get("label") or "it"
+        if not actions.send_to_session(r.get("sid", ""), word):
+            return self._say(f"I couldn't reach {label}.")
+        self.target = label
+        self._acted_on(label)
+        return self._say(f"Told {label} {word}.",
+                         action={"kind": "tell", "sid": r.get("sid", ""),
+                                 "undo": True})
+
+    def _next_waiting(self, besides: str = "") -> str:
+        """The line offering whoever is still stuck after this one.
+
+        Answering one of five and hearing nothing about the other four is how a
+        queue silently becomes a pile. This is said at the moment it is useful,
+        which is immediately after you have dealt with one."""
+        rest = [r for r in self._waiting() if r.get("sid") != besides]
+        if not rest:
+            return ""
+        first = rest[0]
+        label = first.get("label") or "another session"
+        q = (first.get("question") or first.get("permission") or "").strip()
+        more = (f" ({len(rest) - 1} more after that)" if len(rest) > 1 else "")
+        self.target = label
+        return f"Next{more}: {label} is asking {q[:120]}"
 
     def _stuck(self) -> dict:
         """Who cannot continue without you, and for how long.
@@ -2793,7 +2894,34 @@ class Friday:
         names = self._target_names()
         if not (said and names):
             return name, message, want, False
-        found, i, j, _sc = nearest.best_span(said, names)
+        # If the sentence already gave a name that IS a session, exactly, keep
+        # it. Re-splitting looks for the best-scoring name anywhere in the
+        # sentence, which meant a session called "test" matched the word
+        # "tests" at the end of "tell friday to run the tests" and quietly
+        # took the message away from friday. Common words do end up as session
+        # names, because they end up as directory names.
+        #
+        # Exact only, deliberately. This function exists because "tell voice
+        # bridge ..." split at the first space and "voice" resolves close
+        # enough to voicebridge to be acted on; that case must still re-split,
+        # and it does, because "voice" is not a session name.
+        said_name = (name or "").strip().lower()
+        exact_name = (said_name and any(said_name == (n or "").strip().lower()
+                                        for n in names))
+        found, i, j, _sc = ("", 0, 0, 0.0)
+        if exact_name:
+            # Locate the name where it actually appears, then carry on through
+            # the same logic. Returning early here skipped the phrase handling
+            # below, so "ask api FOR the test results" stopped becoming "Give me
+            # the test results" and sent the bare fragment instead.
+            toks = [w.lower().strip(".,?!:;") for w in said.split()]
+            parts = said_name.split()
+            for at in range(len(toks) - len(parts) + 1):
+                if toks[at:at + len(parts)] == parts:
+                    found, i, j = name, at, at + len(parts)
+                    break
+        if not found:
+            found, i, j, _sc = nearest.best_span(said, names)
         if not found:
             return name, message, want, False
         # Whether you actually SAID the name, or Friday worked it out. Resolving
@@ -2801,7 +2929,7 @@ class Friday:
         # skipped the confirmation that stops a wrong instruction being written
         # into a running agent.
         heard = " ".join(said.split()[i:j])
-        exact = nearest.flat(heard) == nearest.flat(found)
+        exact = exact_name or nearest.flat(heard) == nearest.flat(found)
         toks = [w for w in said.split() if w.strip(".,?!:;")]
         rest = toks[j:]
         bare = lambda w: w.lower().strip(".,?!:;")
@@ -2863,8 +2991,36 @@ class Friday:
             return self._perform(act)
         self.pending = act
         self._offered = None
+        if how == "ambiguous":
+            # Naming it exactly is normally your confirmation, and here it
+            # cannot be, because the name does not identify one session. Say
+            # what distinguishes them: what each is doing is the only thing you
+            # can tell them apart by out loud.
+            others = [r for r in self._same_named(hit.get("label", name))]
+            lines = []
+            for r in others[:4]:
+                doing = (r.get("question") or r.get("topic") or
+                         r.get("status") or "").strip()
+                when = connectors.when(r.get("mtime") or 0)
+                lines.append(f"  {doing[:70] or 'nothing I can see'} ({when})")
+            return self._say(
+                f"There are {len(others)} sessions called "
+                f"{hit.get('label', name)}:\n" + "\n".join(lines)
+                + f"\n\nI'd send \"{message}\" to the most recent one. "
+                  f"Yes to do that, or say which.", needs_confirm=True)
         return self._say(f'Did you mean {hit.get("label", name)}? '
                          f'I\'ll send "{message}".', needs_confirm=True)
+
+    def _same_named(self, label: str) -> list:
+        """Every session sharing a name, newest first."""
+        want = (label or "").strip().lower()
+        try:
+            rows = [r for r in fleetcache.snapshot().values()
+                    if (r.get("label") or "").strip().lower() == want]
+        except Exception:
+            return []
+        rows.sort(key=lambda r: r.get("mtime") or 0, reverse=True)
+        return rows
 
     def _perform(self, act: dict) -> dict:
         """Do the thing that was just confirmed. Failures are reported plainly,
@@ -2947,10 +3103,19 @@ class Friday:
                                      f"says.",
                                      action={"kind": "tell",
                                              "sid": act["sid"], "undo": True})
-                return self._say(f"Sent it to {label}." if ok else
-                                 f"I couldn't reach {label}.",
+                if not ok:
+                    return self._say(f"I couldn't reach {label}.",
+                                     action={"kind": "tell",
+                                             "sid": act["sid"], "undo": False})
+                # Whoever else is still stuck, said at the one moment it is
+                # useful: you have just dealt with one. This is the main path
+                # for answering an agent, and it was the one place the queue
+                # was not offered.
+                nxt = self._next_waiting(besides=act["sid"])
+                return self._say(f"Sent it to {label}."
+                                 + (f"\n{nxt}" if nxt else ""),
                                  action={"kind": "tell", "sid": act["sid"],
-                                         "undo": bool(ok)})
+                                         "undo": True})
         except Exception as e:
             return self._say(f"That failed: {e}")
         return self._say("I'm not sure what to do with that.")
@@ -3316,9 +3481,25 @@ class Friday:
             rows = list(fleetcache.snapshot().values())
         except Exception:
             rows = []
-        for r in rows:                                  # exact name
-            if (r.get("label") or "").lower() == q:
-                return r, "exact"
+        same = [r for r in rows if (r.get("label") or "").lower() == q]
+        if len(same) == 1:
+            return same[0], "exact"
+        if len(same) > 1:
+            # Two agents in the same directory get the same name, which is not
+            # rare: it is what happens the moment you open a second one on the
+            # same project. Picking either is a message typed into the wrong
+            # running agent, reported as success. "ambiguous" makes the caller
+            # ask, and the tie is broken by what the sessions are DOING, since
+            # that is the only thing that distinguishes them out loud.
+            asking = [r for r in same if (r.get("question") or
+                                          r.get("permission"))]
+            if len(asking) == 1:
+                # Only one of them is blocked on you, so that is the one you
+                # are talking to. This is a guess, but a narrow and defensible
+                # one, and it is marked as a guess.
+                return asking[0], "fuzzy"
+            same.sort(key=lambda r: r.get("mtime") or 0, reverse=True)
+            return same[0], "ambiguous"
         starts = [r for r in rows if (r.get("label") or "").lower().startswith(q)]
         if len(starts) == 1:                            # unambiguous prefix
             return starts[0], "fuzzy"

@@ -29,6 +29,7 @@ import threading
 import time
 
 from . import engine, fleetcache, replies
+from .budget import compose
 
 POLL = 3.0            # seconds between looks at the fleet
 SETTLE = 4.0          # an agent must be quiet this long before it is reported
@@ -155,12 +156,16 @@ class Watchtower:
                  if now - at >= SETTLE and sid in rows]
         ready.sort(key=lambda p: 0 if (rows[p[0]].get("question") or "")
                    else 1)
+        batch = []
         for sid, text in ready:
             self.pending.pop(sid, None)
             self.seen[sid] = text
             if sid in self.muted:
                 continue          # watched, marked seen, not mentioned
-            self._report(rows[sid], text)
+            got = self._prepare(rows[sid], text)
+            if got:
+                batch.append(got)
+        self._say_all(batch)
 
     def _looking_at(self) -> str:
         """The session whose window is in front of you right now, or "".
@@ -224,14 +229,23 @@ class Watchtower:
             self.muted.discard(sid)
 
     # ---- saying it -------------------------------------------------------
-    def _report(self, row: dict, text: str) -> None:
+    def _prepare(self, row: dict, text: str) -> dict:
+        """One report, worked out but not yet said.
+
+        Split from the saying so that several arriving together can be weighed
+        against each other and delivered as one thing. Five agents finishing
+        within the same second used to be five separate interruptions, which
+        costs five times the attention for one moment's worth of news."""
         label = row.get("label") or row.get("sid", "a session")
         self.last[row["sid"]] = text[:MAX_REPORT]
         answering = row["sid"] in self.expecting
         self.expecting.discard(row["sid"])
         short = summarise(text, label)
-        lead = f"{label} answered" if answering else f"{label} says"
         q = (row.get("question") or "").strip()
+        # "says" understates a session that cannot continue without you, and in
+        # a merged list the lead is the only part read at a glance.
+        lead = (f"{label} needs you" if q else
+                f"{label} answered" if answering else f"{label} says")
         if q and q[:40] not in short:
             short = short.rstrip(".") + f". It's asking: {q}"
         urgency = 0 if q else 1
@@ -246,13 +260,55 @@ class Watchtower:
             # You are watching this window. It said it on your screen a moment
             # ago; repeating it here is noise with extra steps. Not held
             # either: you have already seen it.
+            return {}
+        return {"sid": row["sid"], "label": label, "text": f"{lead}: {short}",
+                "urgency": urgency, "asking": bool(q)}
+
+    def _say_all(self, batch: list) -> None:
+        """Everything that came in together, as one thing to read.
+
+        Three rules, in this order:
+
+        Anything ASKING you goes first and is never merged away, because the
+        whole reason to interrupt is that somebody cannot continue without you.
+        Those are what you act on; the rest is news.
+
+        The rest is spent against the budget as before, so a busy minute does
+        not become a monologue, and what does not fit is HELD rather than
+        dropped. "and four others finished" is a count you can ask about.
+
+        And it is one announcement, not several. The items ride along so the
+        page can still offer each of them separately: merging is about the
+        interruption, not about what you can act on afterwards."""
+        if not batch:
             return
-        if self.budget and not self.budget.allow(urgency):
-            self.budget.hold(f"{lead}: {short}", label)
+        asking = [b for b in batch if b["asking"]]
+        rest = [b for b in batch if not b["asking"]]
+        lines, items, held = [], [], 0
+        for b in asking:
+            lines.append(b["text"])
+            items.append({"sid": b["sid"], "label": b["label"],
+                          "kind": "blocked"})
+        for b in rest:
+            if self.budget and not self.budget.allow(b["urgency"]):
+                self.budget.hold(b["text"], b["label"])
+                held += 1
+                continue
+            lines.append(b["text"])
+            items.append({"sid": b["sid"], "label": b["label"], "kind": "spoke"})
+        if not lines:
             return
-        self.announce(f"{lead}: {short}",
-                      items=[{"sid": row["sid"], "label": label,
-                              "kind": "blocked" if q else "spoke"}])
+        if held:
+            lines.append(f"{held} other{'s' if held > 1 else ''} finished too; "
+                         f"say \"what did I miss\" for those.")
+        body = compose(lines)
+        # More than one thing waiting on you is the case where you need telling
+        # how many, because you are about to answer one of them and the others
+        # have to still exist afterwards. Outside compose() rather than inside
+        # it, or the header counts itself as one of the things.
+        if len(asking) > 1:
+            body = (f"{len(asking)} sessions are waiting on you.\n" + body)
+        self.announce(body, items=items)
 
 
 # What a summary exists to carry, and therefore what it must not make up.

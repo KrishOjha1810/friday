@@ -148,9 +148,16 @@ def test_a_session_waiting_on_you_is_reported_first():
         w._tick()
         time.sleep(watchtower.SETTLE + 0.1)
         w._tick()
-        assert len(said) == 2, said
-        assert said[0][0].startswith("jobhunt"), [s[0] for s in said]
-        assert "Drop the parser?" in said[0][0], said[0][0]
+        # One announcement, not two: things arriving together are said
+        # together, because five agents finishing in the same second used to be
+        # five separate interruptions. The ORDER inside it is what this test is
+        # about, and it still is.
+        assert len(said) == 1, said
+        text, items = said[0]
+        assert items[0]["label"] == "jobhunt", items
+        assert items[0]["kind"] == "blocked", items
+        assert text.index("jobhunt") < text.index("api"), text
+        assert "Drop the parser?" in text, text
 
 
 def test_quiet_means_quiet():

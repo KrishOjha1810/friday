@@ -151,6 +151,7 @@ you are already signed in to.
 | `stop <name>` | the same Escape you would press |
 | `say more` | that session's exact words, not the summary |
 | `who am I talking to` | where a bare reply would land |
+| `yes` / `no` | goes to the agent that asked; if several asked, Friday asks which |
 | `what should I work on?` | an opinion, ranked by who is blocked, with the reason |
 | `what's on fire?` | unresolved errors in production, worst by people affected |
 | `what are my tickets?` | everything assigned to you, across every tracker at once |

@@ -111,6 +111,39 @@ already work.
 
 ---
 
+## When the whole fleet talks at once
+
+The interesting failures in a supervisor are not "does it work", they are what
+it does when five things land in the same second. That is also the normal case:
+agents finish in bursts because you started them in a burst.
+
+**Is there a queue?** Yes, and deliberately not a stored one. Who is waiting is
+derived from the live fleet every time it is asked. A stored queue goes stale in
+ways nobody can see: the agent times out, you answer it in its own terminal, it
+gives up and moves on, a teammate replies for you. Each of those leaves an entry
+that is still there and no longer true, and Friday would go on offering you a
+question nobody is asking. The fleet cannot be stale, because it is what is
+actually happening.
+
+What that gives, in order:
+
+- **Things arriving together are said together.** One announcement, not five.
+  Merging is about the interruption; each session still arrives as its own item
+  you can act on.
+- **Anything asking you leads, and is never merged away or rationed.** The rest
+  is spent against the budget, and what does not fit is held for "what did I
+  miss" rather than dropped.
+- **Answering one offers the next**, at the moment it is useful, with a count of
+  what remains. Answering one of five and hearing nothing about the other four
+  is how a queue silently becomes a pile.
+- **Oldest first**, because whoever has been stuck longest has cost the most.
+- **A bare "yes" reaches the one session that asked.** Several waiting is a
+  question back, always: "yes" carries no clue which one you meant, and a yes
+  typed into the wrong agent is not a message, it is permission.
+- **An hour away is summarised by who, not by line.** Twenty-two notes from four
+  sessions is four things that happened. A list you will not read is not an
+  answer, and the reason you asked is that you were not there.
+
 ## What this does NOT include, and why
 
 - **Writing code.** Friday conducts agents that write code. The moment it starts
