@@ -88,9 +88,14 @@ def _decay(row: dict, now: float) -> dict:
     if since <= 0:
         return row
     keep = 0.5 ** (since / HALF_LIFE)
-    return {"saw": (row.get("saw", 0.0)) * keep,
-            "acted": (row.get("acted", 0.0)) * keep,
-            "at": now}
+    out = {"saw": (row.get("saw", 0.0)) * keep,
+           "acted": (row.get("acted", 0.0)) * keep,
+           "at": now}
+    # Muting is a decision, not an observation, so it does not fade with the
+    # counts. Rebuilding the row without it silently un-muted things.
+    if row.get("muted"):
+        out["muted"] = True
+    return out
 
 
 def key_for(item: dict) -> str:
@@ -134,9 +139,24 @@ def acted(key: str) -> None:
 
 
 def never_again(key: str) -> None:
-    """You muted it. The strongest signal available and the only one you give on
-    purpose, so it counts for more than a run of ignored notifications."""
-    _bump(key, "saw", float(MIN_SEEN) * 2)
+    """You muted it. The strongest signal there is, and the only one you give
+    on purpose.
+
+    A flag, not a faked count. It used to add to the `saw` tally, and score is
+    acted/saw, so on a source you HAD been acting on the history absorbed it
+    completely: muting something you used to care about moved the score from
+    1.0 to 0.9999 and changed nothing. It also inflated the counts that `why()`
+    reports back to you, so a thing mentioned once was described as mentioned
+    nine times."""
+    if not key:
+        return
+    with _lock:
+        data = _load()
+        now = time.time()
+        row = _decay(data.get(key) or {"saw": 0.0, "acted": 0.0, "at": now}, now)
+        row["muted"] = True
+        data[key] = row
+        _save(data)
 
 
 def score(key: str) -> float:
@@ -147,6 +167,8 @@ def score(key: str) -> float:
     if not row:
         return 0.0
     row = _decay(row, time.time())
+    if row.get("muted"):
+        return -1.0          # you said so, which beats anything inferred
     seen = row.get("saw", 0.0)
     if seen < MIN_SEEN:
         return 0.0
@@ -176,6 +198,8 @@ def why(key: str) -> str:
     if not row:
         return ""
     row = _decay(row, time.time())
+    if row.get("muted"):
+        return "You asked me not to mention it."
     seen, did = int(round(row.get("saw", 0.0))), int(round(row.get("acted", 0.0)))
     if seen < MIN_SEEN:
         return f"I've only mentioned it {seen} times, so I have no opinion yet."
@@ -204,7 +228,7 @@ def summary(limit: int = 6) -> list:
     rows = []
     for key, row in (_load() or {}).items():
         row = _decay(row, now)
-        if row.get("saw", 0.0) < MIN_SEEN:
+        if row.get("saw", 0.0) < MIN_SEEN and not row.get("muted"):
             continue
         rows.append((abs(score(key)), key, score(key), row))
     rows.sort(reverse=True)

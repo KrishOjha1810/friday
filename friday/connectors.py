@@ -1542,7 +1542,21 @@ class MCPConnector:
             best = best or t
         return best or {}
 
-    def my_issues(self, limit: int = 8) -> list:
+    def __getattr__(self, name):
+        """`my_issues` exists only on a server that actually has a read tool.
+
+        It was defined unconditionally, so `trackers.is_tracker` said yes to
+        every MCP server on the machine. Connecting a Spotify server turned
+        filing a ticket into "I can't decide between Jira and Spotify", which
+        is the recognise-by-verbs idea failing at the one thing it is for: the
+        verb has to be one the thing can really answer."""
+        if name != "my_issues":
+            raise AttributeError(name)
+        if not self._issue_tool():
+            raise AttributeError(name)
+        return self._my_issues
+
+    def _my_issues(self, limit: int = 8) -> list:
         """Your work, from a tracker Friday has no code for.
 
         Best effort and honest about it: if the server does not answer in a

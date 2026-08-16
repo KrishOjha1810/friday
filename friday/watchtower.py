@@ -59,6 +59,7 @@ class Watchtower:
         self.seen = {}            # sid -> last reported text
         self.pending = {}         # sid -> (text, first_seen_at)
         self.expecting = set()    # sids Friday asked something, so it can say so
+        self.asked = {}           # sid -> the question it is currently blocked on
         self.last = {}            # sid -> full text, for "say more"
         self.muted = set()        # sids you have asked not to hear about
         self._gone = {}           # sid -> when it left the fleet
@@ -102,12 +103,28 @@ class Watchtower:
         happened to say, which is a wall of text about work you already know
         about."""
         for r in (rows if rows is not None else self._fleet()):
-            path = r.get("path", "")
-            if path:
-                try:
-                    self.seen[r["sid"]] = replies.mark(path)
-                except Exception:
-                    pass
+            # Through the vendor seam, and NOT truncated. Two bugs, one line.
+            #
+            # It called the Claude parser directly, so a Codex or Antigravity
+            # session was never primed and Friday recited its entire walkthrough
+            # at startup, which is the wall of text prime() exists to prevent.
+            #
+            # And it stored mark(), which is the first 200 characters, while
+            # _tick compares the whole thing. Almost every real agent reply is
+            # longer than 200 characters, so prime() suppressed essentially
+            # nothing; the existing test passed only because its fixture message
+            # was short.
+            try:
+                from . import agents
+                self.seen[r["sid"]] = agents.last_said(r)
+            except Exception:
+                pass
+            q = (r.get("question") or r.get("permission") or "").strip()
+            if q:
+                # Already blocked when Friday started. Recorded so it is not
+                # announced as though it just happened, but it is still there
+                # and "who needs me" will say so.
+                self.asked[r["sid"]] = q
 
     # ---- the loop --------------------------------------------------------
     def _fleet(self) -> list:
@@ -134,16 +151,27 @@ class Watchtower:
 
         for sid, r in rows.items():
             path = r.get("path", "")
-            if not path:
-                continue
             try:
                 # The agent's own words only, parsed by whoever made it: a
                 # Codex rollout and a Claude transcript are different files
                 # saying the same thing.
                 from . import agents
-                text = agents.last_said(r)
+                text = agents.last_said(r) if path else ""
             except Exception:
                 continue
+            asking = (r.get("question") or r.get("permission") or "").strip()
+            # BECOMING BLOCKED IS ITSELF NEWS. Everything here keyed off the
+            # transcript text changing, and a permission prompt is not text: it
+            # is a tool_use block Claude is waiting on, or a [!QUESTION] in a
+            # file Antigravity writes elsewhere. So the one category this whole
+            # thing exists to interrupt for could arrive, sit there, and never
+            # be mentioned or even held. It was invisible.
+            if asking and self.asked.get(sid) != asking:
+                self.asked[sid] = asking
+                self.pending[sid] = (text or f"needs you: {asking}", now)
+                continue
+            if not asking:
+                self.asked.pop(sid, None)
             if not text or text == self.seen.get(sid):
                 self.pending.pop(sid, None)
                 continue
@@ -156,16 +184,60 @@ class Watchtower:
                  if now - at >= SETTLE and sid in rows]
         ready.sort(key=lambda p: 0 if (rows[p[0]].get("question") or "")
                    else 1)
-        batch = []
+        # Blocked ones first, and summarised first, because _prepare calls the
+        # local model and that is seconds per session. With fifty sessions
+        # talking, one permission prompt waited nearly two minutes behind
+        # forty-nine summaries, most of which were then held and never spoken.
+        # A prompt answered two minutes late is an agent idle for two minutes,
+        # which is the cost this exists to remove.
+        batch, deferred = [], []
         for sid, text in ready:
             self.pending.pop(sid, None)
             self.seen[sid] = text
             if sid in self.muted:
                 continue          # watched, marked seen, not mentioned
-            got = self._prepare(rows[sid], text)
+            row = rows[sid]
+            if (row.get("question") or row.get("permission") or "").strip():
+                got = self._prepare(row, text)
+                if got:
+                    batch.append(got)
+            else:
+                deferred.append((row, text))
+        # What is left is rationed BEFORE it is summarised, so no model time is
+        # spent on something nobody will hear.
+        for row, text in self._affordable(deferred):
+            got = self._prepare(row, text)
             if got:
                 batch.append(got)
         self._say_all(batch)
+
+    def _affordable(self, deferred: list) -> list:
+        """Which of the unblocked ones there is budget to say, best first.
+
+        Sorted by urgency, which is what makes learn.py's demotion mean
+        anything: it returns a lower tier for a source you never act on, and
+        nothing consulted that ordering, so the ignored session spent the last
+        token and the one you do act on was held behind it.
+
+        Held here rather than after summarising, in the agent's own words. A
+        held item you never hear is not worth a model call, and the raw text is
+        a better record of what was said than a summary of it anyway."""
+        from . import learn
+        scored = []
+        for row, text in deferred:
+            label = row.get("label") or row.get("sid", "")
+            urgency = learn.adjust(1, learn.key_for({"kind": "spoke",
+                                                     "label": label}))
+            scored.append((urgency, label, row, text))
+        scored.sort(key=lambda x: x[0])
+        out = []
+        for urgency, label, row, text in scored:
+            if self.budget and not self.budget.allow(urgency):
+                self.budget.hold(f"{label} says: {' '.join(text.split())[:300]}",
+                                 label)
+                continue
+            out.append((row, text))
+        return out
 
     def _looking_at(self) -> str:
         """The session whose window is in front of you right now, or "".
@@ -208,7 +280,8 @@ class Watchtower:
         # them left entries stranded in the others: a session evicted from
         # `seen` was never looked for in `pending`, so `pending` went on
         # growing after the fix that was supposed to stop exactly this.
-        tracked = set(self.seen) | set(self.last) | set(self.pending)
+        tracked = (set(self.seen) | set(self.last) | set(self.pending)
+                   | set(self.asked))
         for sid in tracked:
             if sid not in rows:
                 self._gone.setdefault(sid, now)
@@ -223,6 +296,7 @@ class Watchtower:
         for sid in dead:
             self.seen.pop(sid, None)
             self.last.pop(sid, None)
+            self.asked.pop(sid, None)
             self.pending.pop(sid, None)
             self._gone.pop(sid, None)
             self.expecting.discard(sid)
@@ -290,12 +364,12 @@ class Watchtower:
             items.append({"sid": b["sid"], "label": b["label"],
                           "kind": "blocked"})
         for b in rest:
-            if self.budget and not self.budget.allow(b["urgency"]):
-                self.budget.hold(b["text"], b["label"])
-                held += 1
-                continue
+            # The budget was already spent in _affordable, before any of these
+            # were summarised. Spending it twice would hold things that had
+            # already paid.
             lines.append(b["text"])
             items.append({"sid": b["sid"], "label": b["label"], "kind": "spoke"})
+        held = self.budget.waiting() if self.budget else 0
         if not lines:
             return
         if held:
@@ -325,7 +399,7 @@ class Watchtower:
 # So: every number counts, compared by VALUE rather than as text, and an
 # identifier counts only when it is actually code-shaped. Shouting is not a
 # code.
-_NUM = re.compile(r"\b\d[\d,]*(?:\.\d+)?\b")
+_NUM = re.compile(r"\b(?:0[xX][0-9a-fA-F]+|\d[\d,]*(?:\.\d+)?)\b")
 # A dot with an extension after it, a slash, an underscore, or digits glued to
 # letters. That is report_2024_q3.pdf and PDF_PARSE_003; it is not HTTP, and it
 # is not TODO merely because a sentence ended. It must begin with a letter, so
@@ -358,8 +432,25 @@ def _invented(summary: str, source: str) -> str:
     on."""
     if not (summary and source):
         return ""
+    # Words, before the digit and code checks, because neither of those can see
+    # them. _NUM matches digits only, so "it broke on page seven" invented a
+    # page number and passed untouched; and an instruction is the most
+    # actionable thing a summary can carry and the most dangerous to invent, so
+    # "run make deploy" and "force-push to main" both got through.
+    said = set(re.findall(r"[a-z][a-z\-]*", (summary or "").lower()))
+    had = set(re.findall(r"[a-z][a-z\-]*", (source or "").lower()))
+    for tok in sorted((said & _WORD_NUM) - had):
+        return tok
+    for tok in sorted((said & _IMPERATIVE) - had):
+        return tok
     src_nums = _numbers(source)
     for tok in _NUM.findall(summary):
+        if tok.lower().startswith("0x"):
+            # An error code the source never gave is exactly the kind of
+            # specific somebody acts on.
+            if tok.lower() not in (source or "").lower():
+                return tok
+            continue
         try:
             val = float(tok.replace(",", ""))
         except ValueError:
@@ -378,6 +469,35 @@ def _invented(summary: str, source: str) -> str:
     return ""
 
 
+# What a message is FOR. If the source says one of these and the summary that
+# survives the invention check no longer carries any of them, the summary has
+# stopped saying what happened.
+_OUTCOME = {
+    "bad": ("failed", "failing", "failure", "error", "errors", "broke",
+            "broken", "crashed", "aborted", "rejected", "blocked", "refused",
+            "timed out", "cannot", "could not", "couldn't", "unable"),
+    "good": ("passed", "passing", "finished", "done", "succeeded", "complete",
+             "completed", "merged", "deployed", "green", "fixed", "works"),
+}
+# Numbers written as words. _NUM only sees digits, so "it broke on page seven"
+# invented a page number and passed the check untouched.
+_WORD_NUM = {"one", "two", "three", "four", "five", "six", "seven", "eight",
+             "nine", "ten", "eleven", "twelve", "first", "second", "third",
+             "fourth", "fifth", "dozen", "hundred", "thousand"}
+# An instruction is the most actionable thing a summary can contain and the
+# most dangerous to invent: "run make deploy" and "force-push to main" both got
+# through, because neither is digit-shaped or code-shaped.
+_IMPERATIVE = {"run", "delete", "remove", "drop", "force-push", "push",
+               "merge", "revert", "rollback", "deploy", "restart", "kill",
+               "reset", "rebase", "overwrite", "truncate", "disable"}
+
+
+def _outcome_of(text: str) -> set:
+    low = " " + " ".join((text or "").lower().split()) + " "
+    return {kind for kind, words in _OUTCOME.items()
+            if any(f" {w} " in low or f" {w}." in low for w in words)}
+
+
 def _drop_invented(summary: str, source: str) -> str:
     """Remove the sentences that are not supported, keep the rest.
 
@@ -388,7 +508,16 @@ def _drop_invented(summary: str, source: str) -> str:
     for sentence in re.split(r"(?<=[.!?])\s+", summary or ""):
         if sentence.strip() and not _invented(sentence, source):
             kept.append(sentence.strip())
-    return " ".join(kept)
+    out = " ".join(kept)
+    # Dropping the unsupported sentences can change what the message MEANS.
+    # "The nightly build finished. It failed with LNK2019 in main_x64.obj."
+    # loses its second sentence to the invented symbol and ships as "The
+    # nightly build finished", which is the opposite of what the agent said.
+    # A guard against fabrication must not manufacture the reassuring half.
+    was, now_ = _outcome_of(source), _outcome_of(out)
+    if was and not (was & now_):
+        return ""
+    return out
 
 
 def summarise(text: str, label: str = "") -> str:

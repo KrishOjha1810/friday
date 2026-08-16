@@ -136,13 +136,44 @@ def _save(subs: list) -> None:
         pass
 
 
+# Where a real push subscription can point. A browser gets its endpoint from
+# its own vendor's push service; nothing else is a legitimate destination.
+# Kept as suffixes rather than an exact list because these services use many
+# regional hostnames.
+_PUSH_HOSTS = (
+    "push.services.mozilla.com", "updates.push.services.mozilla.com",
+    "fcm.googleapis.com", "android.googleapis.com",
+    "notify.windows.com", "push.apple.com", "web.push.apple.com",
+)
+
+
+def _is_push_endpoint(url: str) -> bool:
+    """Whether this is somewhere a browser's push service actually lives.
+
+    Nothing checked, so any endpoint at all could be registered: a plain http
+    URL on the attacker's own machine was accepted, stored, and then received
+    every future alert, encrypted to a key the attacker chose. Slack contents,
+    what an agent is asking, all of it, silently and across restarts."""
+    try:
+        from urllib.parse import urlparse
+        u = urlparse(url or "")
+    except Exception:
+        return False
+    if u.scheme != "https" or not u.hostname:
+        return False
+    host = u.hostname.lower()
+    return any(host == h or host.endswith("." + h) for h in _PUSH_HOSTS)
+
+
 def subscribe(sub: dict) -> bool:
+    """Remember a browser. Returns whether anything changed."""
     if not HAVE_CRYPTO:
         return False
-    """Remember a browser. Returns whether anything changed."""
     if not (isinstance(sub, dict) and sub.get("endpoint")
             and (sub.get("keys") or {}).get("p256dh")
             and (sub.get("keys") or {}).get("auth")):
+        return False
+    if not _is_push_endpoint(sub.get("endpoint", "")):
         return False
     subs = [s for s in subscriptions() if s.get("endpoint") != sub["endpoint"]]
     subs.append({"endpoint": sub["endpoint"], "keys": sub["keys"],

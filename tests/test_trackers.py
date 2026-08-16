@@ -269,8 +269,26 @@ def test_it_will_not_call_a_tool_that_writes():
               {"name": "delete_ticket", "inputSchema": {}},
               {"name": "issues_create", "inputSchema": {}}])
     assert c._issue_tool() == {}, c._issue_tool()
-    assert c.my_issues() == []
+    # And with no read tool it is not a tracker at all. It used to define
+    # my_issues unconditionally, so every MCP server on the machine counted:
+    # connecting a Spotify server turned filing a ticket into "I can't decide
+    # between Jira and Spotify".
+    assert not trackers.is_tracker(c)
+    assert not hasattr(c, "my_issues")
     assert c.called == [], c.called
+
+
+def test_an_mcp_server_that_is_not_a_tracker_is_not_counted_as_one():
+    """The recognise-by-verbs idea only works if the verb is one the thing can
+    really answer."""
+    spotify = _MCP([{"name": "play_track", "inputSchema": {}},
+                    {"name": "search_tracks", "inputSchema": {"required": ["q"]}}])
+    jira = _Any()
+    jira.name = "jira"
+    _only(jira, spotify)
+    assert trackers.names() == ["jira"], trackers.names()
+    assert not trackers.ambiguous()
+    assert trackers.get() is not None
 
 
 def test_it_will_not_guess_required_arguments():

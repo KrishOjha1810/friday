@@ -77,6 +77,18 @@ def last_said(path: str) -> str:
     return msgs[-1][2] if msgs else ""
 
 
+def tally(path: str) -> int:
+    """How many assistant messages the transcript holds.
+
+    Position, not content. "Has it said something new" was answered by
+    comparing text, so an agent replying "Done." twice looked silent the second
+    time and the plan waited fifteen minutes for a reply it already had."""
+    try:
+        return len(_messages(path))
+    except Exception:
+        return 0
+
+
 def mark(path: str) -> str:
     """Where the transcript is now, so a later reply can be told apart from an
     older one. Returns an opaque marker."""

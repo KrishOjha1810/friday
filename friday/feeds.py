@@ -83,6 +83,9 @@ class Feeds:
         # insertion order, so trimming drops the oldest rather than whichever
         # the hash happened to put first.
         self.seen = _Seen()
+        # What was actually SAID under each key, so a reused key carrying
+        # different words can be told apart from a genuine repeat.
+        self.said = {}
         self.muted = set()        # source names you asked to be spared
         self.held = 0             # items not announced, so it can say so
         self._stop = threading.Event()
@@ -146,6 +149,18 @@ class Feeds:
                 key = it.get("key") or (name + ":" + it.get("text", "")[:60])
                 it["key"] = key
                 if key in self.seen:
+                    # Same key, different words, is not a duplicate. Feed keys
+                    # get reused (the shipped GitHub one is per repo and count),
+                    # so "deploy finished: all green" and "deploy ROLLED BACK,
+                    # prod is down" could share a key, and the second was
+                    # dropped with no record at all. This was the only path in
+                    # the proactive layer that destroyed an item silently, and
+                    # it could destroy an urgency 0 one.
+                    was = self.said.get(key)
+                    now = " ".join((it.get("text") or "").split())
+                    if was is not None and now and now != was:
+                        if self.budget:
+                            self.budget.hold(now, it.get("source", name))
                     continue
                 fresh.append(it)
         if prime:
@@ -164,6 +179,12 @@ class Feeds:
         said, rest, batch = 0, [], []
         for it in fresh:
             self.seen.add(it["key"])
+            self.said[it["key"]] = " ".join((it.get("text") or "").split())
+            # Bounded with `seen`, or this becomes exactly the unbounded
+            # dictionary the soak was written to catch.
+            if len(self.said) > _Seen.MAX:
+                for old in list(self.said)[:len(self.said) - _Seen.MAX]:
+                    self.said.pop(old, None)
             # What you actually do about this kind of thing. It can only push
             # an item DOWN a tier, so the worst it does is make something wait
             # for "what did I miss" instead of interrupting. It never touches

@@ -36,7 +36,9 @@ def _browser():
         serialization.PublicFormat.UncompressedPoint)
     auth = os.urandom(16)
     return priv, pub, auth, {
-        "endpoint": "https://push.example/abc",
+        # A real push service host: an arbitrary endpoint is refused now,
+        # because anything accepted here receives every future alert.
+        "endpoint": "https://updates.push.services.mozilla.com/wpush/v2/abc",
         "keys": {"p256dh": push._b64(pub), "auth": push._b64(auth)}}
 
 
@@ -88,6 +90,31 @@ def test_the_key_survives_a_restart():
 def test_a_subscription_must_actually_be_one():
     assert push.subscribe({}) is False
     assert push.subscribe({"endpoint": "https://x/y"}) is False, "no keys"
+    _p, _u, _a, sub = _browser()
+    assert push.subscribe(sub) is True
+
+
+def test_only_a_real_push_service_may_be_registered():
+    """Nothing checked where a subscription pointed, so any endpoint at all
+    could be registered and would then receive every alert Friday sends,
+    encrypted to a key the registrant chose. Slack contents, what an agent is
+    asking, all of it, and it survived a restart."""
+    _p, _u, _a, good = _browser()
+    for bad in ("http://127.0.0.1:8908/relay",          # not https
+                "https://evil.example/relay",           # not a push service
+                "https://fcm.googleapis.com.evil.test/x",   # lookalike host
+                "ftp://push.example/x", ""):
+        assert push.subscribe(dict(good, endpoint=bad)) is False, bad
+    for ok in ("https://updates.push.services.mozilla.com/wpush/v2/a",
+               "https://fcm.googleapis.com/fcm/send/a",
+               "https://web.push.apple.com/a"):
+        assert push.subscribe(dict(good, endpoint=ok)) is True, ok
+
+
+def test_the_same_browser_is_stored_once():
+    push.forget_all() if hasattr(push, "forget_all") else None
+    for s in list(push.subscriptions()):
+        push.unsubscribe(s.get("endpoint", ""))
     _p, _u, _a, sub = _browser()
     assert push.subscribe(sub) is True
     assert push.subscribe(sub) is True and len(push.subscriptions()) == 1, \

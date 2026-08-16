@@ -160,9 +160,17 @@ def resolve(heard: str, names) -> tuple:
     One call, so no caller has to reimplement the thresholds and quietly get
     them slightly different from every other caller."""
     q = flat(heard)
-    for n in names:
-        if flat(n) == q:
-            return "exact", n
+    # Every name that flattens to what was heard, not the first one. Flattening
+    # strips case and punctuation, so "voicebridge" and "voice-bridge" both
+    # match "voice bridge", and returning the first meant the answer depended on
+    # dictionary order and came back as "exact", the one confidence callers act
+    # on without asking. `pick` already refuses near-ties for this reason;
+    # `resolve` reached its own conclusion first and disagreed with it.
+    same = [n for n in names if flat(n) == q]
+    if len(same) == 1:
+        return "exact", same[0]
+    if len(same) > 1:
+        return "several", same[0]
     got = pick(heard, names)
     if got:
         return "sounds-like", got

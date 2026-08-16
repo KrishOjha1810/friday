@@ -3978,10 +3978,15 @@ class Friday:
         # decide. 'sounds-like' may be acted on; 'maybe' may only be offered.
         labels = [(r.get("label") or "") for r in rows]
         how, label = nearest.resolve(name, labels)
-        if how in ("sounds-like", "maybe"):
+        if how in ("sounds-like", "maybe", "several"):
             for r in rows:
                 if (r.get("label") or "") == label:
-                    return r, ("fuzzy" if how == "sounds-like" else "maybe")
+                    # "several" means two names flatten to the same thing, such
+                    # as voicebridge and voice-bridge. That is the same problem
+                    # as two sessions sharing a name, and it gets the same
+                    # answer: ask.
+                    return r, {"sounds-like": "fuzzy", "maybe": "maybe",
+                               "several": "ambiguous"}[how]
         return None, ""
 
     def _bring_back(self, path: str, mark: str, label: str) -> None:

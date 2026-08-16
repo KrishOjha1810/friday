@@ -115,6 +115,17 @@ class Inbox:
         for ch, r in fresh[:MAX_PER_ROUND]:
             self._report(ch, r)
         if len(fresh) > MAX_PER_ROUND:
+            # HELD, not dropped. `seen` has already advanced past these, so the
+            # next poll will not find them again: without this they were gone
+            # for good, while the sentence below promised a list that did not
+            # exist. That is the exact "quiet mode is a delete key" failure
+            # budget.py was written to end, still alive over here.
+            for ch, r in fresh[MAX_PER_ROUND:]:
+                who = (r.get("who") or "someone").strip()
+                where = (ch.get("name") or ch.get("id") or "").strip()
+                text = " ".join((r.get("text") or "").split())[:240]
+                if self.budget:
+                    self.budget.hold(f"{who} in #{where}: {text}", where)
             n = len(fresh) - MAX_PER_ROUND
             self.announce(f"And {n} more Slack message{'s' if n != 1 else ''} "
                           f"I haven't read out. Say \"what did I miss\" for the "

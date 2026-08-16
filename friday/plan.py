@@ -209,8 +209,14 @@ def create(title: str, target: str, steps: list, sid: str = "") -> int:
                 continue
             rows.append({"text": text,
                          "target": (st.get("target") or target or "").strip(),
-                         "sid": st.get("sid") or (sid if not st.get("target")
-                                                  else ""),
+                         # A step naming the SAME target as the plan is the
+                         # same session, so it inherits the sid. Blanking it
+                         # made two steps for one terminal look like two
+                         # separate agents to the queue.
+                         "sid": st.get("sid") or (
+                             sid if not st.get("target")
+                             or (st.get("target") or "").strip().lower()
+                             == (target or "").strip().lower() else ""),
                          "kind": st.get("kind") or "agent"})
         elif str(st).strip():
             rows.append({"text": str(st).strip(), "target": target,
@@ -304,10 +310,15 @@ def latest() -> dict:
 def track_of(step: dict) -> str:
     """Which queue a step belongs to.
 
-    One per person or agent it is aimed at. Everything about running a plan
-    across a fleet comes down to this: steps for the same target are a queue,
-    and steps for different targets have nothing to do with each other."""
-    return (step.get("target") or "").strip().lower() or "_"
+    The SESSION id when there is one, and only the name for a person. It was
+    the name, which meant "one at a time per agent" was enforced against a
+    display string a human typed: two steps saying "api" and "API server" for
+    the same terminal counted as two independent agents and both fired at once.
+    The guarantee has to be about the thing being typed into."""
+    sid = (step.get("sid") or "").strip()
+    if sid:
+        return f"sid:{sid}"
+    return "who:" + ((step.get("target") or "").strip().lower() or "_")
 
 
 def runnable(plan: dict) -> list:
@@ -427,6 +438,27 @@ def running_plans() -> list:
     return [get(r[0]) for r in rows]
 
 
+def _release(plan_id: int) -> list:
+    """Put steps left in flight back where they can run.
+
+    A step interrupted by a stop, a crash or a closed laptop stayed RUNNING,
+    and nothing anywhere reset it. `runnable` treats RUNNING as blocking its
+    track, so the plan was wedged for good while the interface went on offering
+    "run the plan to carry on", which did nothing at all, forever.
+
+    Returned to PENDING rather than DONE, and the note says so, because whether
+    it actually finished is exactly what nobody knows. Re-sending a step you may
+    have already sent is recoverable and visible; skipping one silently is
+    neither."""
+    plan = get(plan_id)
+    stuck = [s for s in (plan or {}).get("steps", []) if s["state"] == RUNNING]
+    for st in stuck:
+        set_step(st["id"], PENDING,
+                 "was in flight when the plan stopped, so this may have "
+                 "already run")
+    return stuck
+
+
 def sweep_on_start(announce) -> None:
     """Say what was left unfinished when Friday last stopped.
 
@@ -436,6 +468,7 @@ def sweep_on_start(announce) -> None:
     concerned."""
     for plan in running_plans():
         stuck = unfinished(plan)
+        _release(plan["id"])
         set_plan(plan["id"], HELD)
         if stuck:
             which = ", ".join(str(s["seq"] + 1) for s in stuck)
@@ -459,6 +492,8 @@ class Runner:
     STEP_TIMEOUT = 900        # 15 minutes on one step, then hold and say so
 
     def __init__(self, announce, send, look, log=None, tell_person=None):
+        # Guards start(), which is otherwise read-then-act on a threaded server.
+        self._gate = threading.Lock()
         self.announce = announce      # (text, items=None)
         self.send = send              # (sid, text) -> bool
         self.look = look              # (sid) -> {"status", "question", "path"}
@@ -470,17 +505,40 @@ class Runner:
         self._thread = None
 
     def start(self, plan_id: int) -> bool:
-        if self._thread and self._thread.is_alive():
-            return False
-        set_plan(plan_id, RUNNING)
-        self._stop.clear()
-        self._thread = threading.Thread(target=self._run, args=(plan_id,),
-                                        daemon=True)
-        self._thread.start()
-        return True
+        """One runner loop, ever.
 
-    def stop(self) -> None:
+        The check was read-then-act with no lock, and the server is threaded, so
+        saying "run the plan" twice quickly produced TWO loops with separate
+        in-flight bookkeeping. Neither could see the other's steps, so every
+        step was sent twice into the same session. That is the one rule this
+        module exists to enforce, broken by a double-tap."""
+        with self._gate:
+            if self._thread and self._thread.is_alive():
+                return False
+            set_plan(plan_id, RUNNING)
+            self._stop.clear()
+            self._thread = threading.Thread(target=self._run, args=(plan_id,),
+                                            daemon=True)
+            self._thread.start()
+            return True
+
+    def stop(self, plan_id: int = 0) -> None:
+        """Stop the loop, and leave the stored state telling the truth.
+
+        It used to set the event and nothing else, so the plan went on claiming
+        RUNNING while nothing ran, and the step in flight stayed RUNNING
+        forever. Nothing anywhere reset it, so the plan was wedged: `runnable`
+        treats RUNNING as blocking its track, and "run the plan to carry on"
+        did nothing, permanently."""
         self._stop.set()
+        t = self._thread
+        if t and t.is_alive() and t is not threading.current_thread():
+            t.join(timeout=2.0)
+        for plan in ([get(plan_id)] if plan_id else running_plans()):
+            if not plan:
+                continue
+            _release(plan["id"])
+            set_plan(plan["id"], HELD)
 
     @property
     def running(self) -> bool:
@@ -545,7 +603,10 @@ class Runner:
         if stuck:
             # Something stopped while this was in flight, so nobody knows
             # whether it ran. Saying "all done" here is the worst available
-            # answer: it is a claim about work that may not exist.
+            # answer: it is a claim about work that may not exist. The step goes
+            # back to pending so that saying "run the plan" can actually retry
+            # it, which it could not before.
+            _release(plan["id"])
             set_plan(plan["id"], HELD)
             which = ", ".join(str(s["seq"] + 1) for s in stuck)
             self.announce(
@@ -581,27 +642,46 @@ class Runner:
     NUDGE_AFTER = 900         # 15 minutes, then remind, and keep reminding
     NUDGE_LIMIT = 4           # after an hour of silence, stop nagging
 
-    def _nudge(self, plan_id: int, target: str, question: str) -> None:
-        """Bring a held plan back up, until it is answered or you give up on it.
+    def _nudge(self, plan_id: int, target: str, question: str,
+               step_id: int = 0) -> None:
+        """Bring a held STEP back up, until it is answered or you give up.
+
+        Watches the step, not the plan. It watched the plan, and with more than
+        one track the plan is usually still RUNNING when a step holds, because
+        the other tracks are fine. So the reminder loop exited on its first tick
+        and the question was mentioned exactly once; by the time the other
+        tracks finished and the plan did go HELD, no reminder thread existed.
+        Multi-agent plans are precisely the ones where you are least likely to
+        notice one line scrolling past.
 
         A repeating reminder rather than one shot, because the whole cost of a
-        held plan is that the work behind it is stopped. It stops on its own
+        held step is that the work behind it is stopped. It stops on its own
         after an hour: a reminder that never ends is just noise with a timer."""
+        def _still_held():
+            plan = get(plan_id)
+            if not plan:
+                return False
+            if step_id:
+                st = next((x for x in plan.get("steps", [])
+                           if x["id"] == step_id), None)
+                return bool(st and st["state"] == HELD)
+            return plan["state"] == HELD
+
         def _wait():
             for _ in range(self.NUDGE_LIMIT):
                 for _tick in range(int(self.NUDGE_AFTER / max(self.POLL, 0.05))):
                     if self._stop.is_set():
                         return
                     time.sleep(self.POLL)
-                    plan = get(plan_id)
-                    if not plan or plan["state"] != HELD:
+                    if not _still_held():
                         return           # answered, or you stopped it
                 self.announce(f"Still waiting on {target} before the plan can "
                               f"go on: {question[:120]}",
                               items=[{"sid": "", "label": target,
                                       "kind": "blocked"}])
-            self.announce(f"I'll stop reminding you about the plan on {target}. "
-                          f"Say \"where is the plan\" when you want it.")
+            if _still_held():
+                self.announce(f"I'll stop reminding you about {target}. Say "
+                              f"\"where is the plan\" when you want it.")
         threading.Thread(target=_wait, daemon=True).start()
 
     def _do(self, plan: dict, step: dict) -> bool:
@@ -610,14 +690,26 @@ class Runner:
         Everything here is per step rather than per plan now. A step names the
         agent it is for, so five of these run at once against five sessions,
         and one of them stopping stops its own queue and nothing else."""
-        from . import replies
+        from . import agents
         if step.get("kind") == "person":
             return self._ask_person(plan, step)
         sid = step.get("sid") or plan.get("sid", "")
         target = step.get("target") or plan.get("target", "")
         info = self.look(sid) or {}
+        info.setdefault("sid", sid)
         path = info.get("path", "")
-        mark = replies.mark(path) if path else ""
+        # Counted, and read through the vendor seam. Both matter. It used to
+        # call the Claude transcript parser directly, so a Codex or any other
+        # agent replied and the plan saw nothing, timed out after fifteen
+        # minutes and blamed the agent for silence. And it compared TEXT, so an
+        # agent answering "Done." to two steps in a row was invisible the second
+        # time.
+        before = agents.tally(info)
+        # A question the session was ALREADY sitting on is not an answer to a
+        # prompt that has not been sent yet. Taken as one, the first poll after
+        # the send held the step instantly, with the prompt already delivered
+        # and nobody watching the agent work on it.
+        was_asking = (info.get("question") or "").strip()
         set_step(step["id"], RUNNING)
         # Named, because with several running at once "step 3" no longer tells
         # you who is doing it.
@@ -632,11 +724,14 @@ class Runner:
             return False
 
         end = time.time() + self.STEP_TIMEOUT
-        settled_at, last_seen = 0.0, mark
+        settled_at, last_seen = 0.0, ""
         while time.time() < end and not self._stop.is_set():
             time.sleep(self.POLL)
             live = self.look(sid) or {}
+            live.setdefault("sid", sid)
             asked = (live.get("question") or "").strip()
+            if asked and asked == was_asking:
+                asked = ""          # the same one it was already sitting on
             if asked:
                 # A question stops the plan. Running the next step would be
                 # answering it by ignoring it.
@@ -649,11 +744,11 @@ class Runner:
                 # Say it once, then keep it alive. Announcing a hold and then
                 # never mentioning it again means you go to lunch and the plan
                 # quietly ceases to exist as far as you are concerned.
-                self._nudge(plan["id"], target, asked)
+                self._nudge(plan["id"], target, asked, step_id=step["id"])
                 return False
             if path:
-                said = replies.last_said(path)
-                if said and said[:200] != mark:
+                said = agents.last_said(live)
+                if agents.tally(live) > before:
                     # Wait for it to STOP talking, the same way the watchtower
                     # and wait_for_reply already do. Without this, an agent's
                     # first "Let me look at that" completes the step and the

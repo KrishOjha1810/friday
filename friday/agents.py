@@ -53,6 +53,10 @@ class Claude:
         from . import replies
         return replies.last_said(row.get("path", ""))
 
+    def tally(self, row: dict) -> int:
+        from . import replies
+        return replies.tally(row.get("path", ""))
+
     def resume(self, row: dict) -> list:
         return ["claude", "--resume", row.get("sid", "")]
 
@@ -96,18 +100,30 @@ class Codex:
         return out
 
     def _files(self, limit: int = 40) -> list:
+        """The newest rollouts, skipping any that cannot be read right now.
+
+        The stat was inside one try for the whole comprehension, so a single
+        file rotated or deleted between the glob and the stat returned [] for
+        the entire vendor: every Codex session vanished from the fleet. These
+        files are live and Codex writes them continuously, so that race is
+        ordinary, and it would have looked intermittent and unreproducible."""
         try:
-            files = [(p.stat().st_mtime, p)
-                     for p in self.ROOT.glob("*/*/*/rollout-*.jsonl")]
+            found = list(self.ROOT.glob("*/*/*/rollout-*.jsonl"))
         except Exception:
             return []
-        files.sort(reverse=True)
+        files = []
+        for p in found:
+            try:
+                files.append((p.stat().st_mtime, p))
+            except OSError:
+                continue          # gone between the glob and the stat
+        files.sort(key=lambda pair: pair[0], reverse=True)
         return [p for _m, p in files[:limit]]
 
     def _read(self, path: Path) -> dict:
         """One session, summarised from its rollout. Bounded: these grow."""
         meta, said, asked, first_user = {}, "", "", ""
-        last_event = ""
+        last_event, turns = "", 0
         try:
             with open(path, "r", errors="ignore") as f:
                 for line in f:
@@ -133,7 +149,7 @@ class Codex:
                         if not text or text.startswith("<"):
                             continue
                         if role == "assistant":
-                            said = text
+                            said, turns = text, turns + 1
                         elif role == "user":
                             if not first_user:
                                 first_user = text[:110]
@@ -142,7 +158,7 @@ class Codex:
         if not meta:
             return {}
         return {"meta": meta, "said": said, "asked": asked,
-                "about": first_user, "event": last_event}
+                "about": first_user, "event": last_event, "turns": turns}
 
     def sessions(self) -> list:
         rows = []
@@ -182,6 +198,10 @@ class Codex:
     def last_said(self, row: dict) -> str:
         got = self._read(Path(row.get("path", "")))
         return got.get("said", "") if got else ""
+
+    def tally(self, row: dict) -> int:
+        got = self._read(Path(row.get("path", "")))
+        return int(got.get("turns", 0)) if got else 0
 
     def resume(self, row: dict) -> list:
         return ["codex", "resume", row.get("sid", "")]
@@ -417,6 +437,20 @@ def last_said(row: dict) -> str:
         return vendor_of(row).last_said(row) or ""
     except Exception:
         return ""
+
+
+def tally(row: dict) -> int:
+    """How many times this agent has spoken, whoever made it.
+
+    A count rather than the text, because the text is not evidence of anything
+    new: an agent that answers "Done." to three steps in a row says the same
+    thing three times, and comparing text meant the second and third replies
+    were invisible. Short confirmations are the most common reply there is."""
+    try:
+        v = vendor_of(row)
+        return int(v.tally(row)) if hasattr(v, "tally") else 0
+    except Exception:
+        return 0
 
 
 def resume_command(row: dict) -> list:

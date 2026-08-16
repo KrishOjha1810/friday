@@ -24,6 +24,13 @@ from .conversation import Friday
 
 HOST, PORT = "127.0.0.1", 8765
 STATIC = Path(__file__).resolve().parent.parent / "static"
+# The largest body worth accepting. Speech uploads are the big one and they are
+# seconds of audio, not megabytes of it.
+MAX_BODY = 8 * 1024 * 1024
+# How long a quiet stream goes before writing something, so a dead client is
+# noticed, and how many events one tab may have waiting.
+HEARTBEAT = 20.0
+MAX_QUEUED = 200
 
 # Friday can drive the machine: open windows, type into running agents. The
 # moment it is reachable from anything but this computer, that has to be behind
@@ -57,14 +64,13 @@ _subs_lock = threading.Lock()
 
 
 def broadcast(kind: str, payload: dict) -> None:
-    """Push to every open tab. Dead subscribers are dropped, never retried."""
-    ev = {"kind": kind, **payload}
-    with _subs_lock:
-        for q in list(_subs):
-            try:
-                q.append(ev)
-            except Exception:
-                _subs.discard(q)
+    """Push to every open tab.
+
+    It iterated `_subs`, which holds `id(q)` integers, and called `.append` on
+    an int inside a bare `except`. So every call was a silent no-op and had
+    been since the day it was written: the immediate refresh other tabs depend
+    on after a command never once arrived. `_QUEUES` holds the real queues."""
+    _push({"kind": kind, **payload})
 
 
 def _fleet_rows() -> list:
@@ -128,10 +134,57 @@ def _transcribe(raw: bytes, ctype: str) -> str:
 
 class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
+    # A connection that goes quiet is dropped rather than holding a thread for
+    # as long as the client feels like. Longer than the SSE heartbeat, so a
+    # live stream is never cut; short enough that a socket opened to pin a
+    # thread cannot hold one indefinitely.
+    timeout = 60
+
+    # Hosts a request may claim to be addressed to. Anything else is a browser
+    # that resolved somebody else's domain to this machine.
+    _OURS = ("127.0.0.1", "localhost", "[::1]", "::1")
+
+    def _from_elsewhere(self) -> bool:
+        """Whether this request came from a page that is not Friday's.
+
+        "Nothing else can reach 127.0.0.1" is false, and it is the assumption
+        the whole local-only mode rested on. Every website you have open can
+        reach it: a plain fetch with a text/plain body is a CORS "simple
+        request", so it is SENT without a preflight, and the reply being
+        unreadable to the attacker does not matter when the point was the side
+        effect. A page on any origin could make Friday type into a running
+        agent.
+
+        And the Host header was never checked, so a domain that resolves to
+        127.0.0.1 could read /state, conversation history and all."""
+        if not LOCAL_ONLY:
+            # Exposed to a phone, the Host is whatever name that phone used, a
+            # tailnet address or a LAN IP, and there is no list of those. The
+            # key is the check in that mode and it is a real one: a page on
+            # another origin cannot read it.
+            return False
+        host = (self.headers.get("Host", "") or "").split(":")[0].strip().lower()
+        if host and host not in self._OURS:
+            return True
+        ours = tuple(f"http://{h}:{PORT}" for h in self._OURS)
+        origin = (self.headers.get("Origin", "") or "").strip().lower()
+        if origin and not origin.startswith(ours):
+            return True
+        # A post from another page carries no Origin in some browsers but does
+        # carry a Referer.
+        ref = (self.headers.get("Referer", "") or "").strip().lower()
+        if ref and not ref.startswith(ours):
+            return True
+        return False
 
     def _authed(self) -> bool:
-        """Local-only needs no key (nothing else can reach it). Exposed to the
-        network, every request must carry the secret."""
+        """Whether this request may act.
+
+        Local-only skips the key, which is fine, because the key is about the
+        NETWORK. It never made the request same-origin, and that is a different
+        question with a different answer."""
+        if self._from_elsewhere():
+            return False
         if LOCAL_ONLY:
             return True
         from urllib.parse import parse_qs, urlparse
@@ -230,7 +283,18 @@ class Handler(BaseHTTPRequestHandler):
         if not self._authed():
             self._send(401, b"unauthorized", "text/plain")
             return
-        n = int(self.headers.get("Content-Length", "0") or 0)
+        # Defensively. "Content-Length: -1" is truthy and read(-1) blocks until
+        # the client feels like closing, so forty sockets pinned forty threads
+        # indefinitely; "abc" raised ValueError and the client got a dropped
+        # connection and a traceback across the terminal.
+        try:
+            n = int(self.headers.get("Content-Length", "0") or 0)
+        except ValueError:
+            self._send(400, b"bad content-length", "text/plain")
+            return
+        if n < 0 or n > MAX_BODY:
+            self._send(400, b"bad content-length", "text/plain")
+            return
         # Read the body ONCE, as bytes. Parsing it as JSON up front ate binary
         # uploads (audio arrived, then /stt found an empty stream and the
         # request hung), so the raw bytes are kept and JSON is parsed lazily by
@@ -238,12 +302,18 @@ class Handler(BaseHTTPRequestHandler):
         raw = self.rfile.read(n) if n else b""
 
         def as_json():
+            """Always a dict. It returned whatever JSON parsed to, so a body of
+            `[1,2,3]` or `{"text": 12345}` reached `.get` and `.strip` on the
+            wrong type, and the client got a dropped connection instead of an
+            answer."""
             try:
-                return json.loads(raw or b"{}")
+                got = json.loads(raw or b"{}")
+                return got if isinstance(got, dict) else {}
             except Exception:
                 return {}
         if path == "/say":
-            text = (as_json().get("text") or "").strip()
+            # str(), because a JSON number or object reached .strip() and threw.
+            text = str(as_json().get("text") or "").strip()
             if not text:
                 self._json({"reply": "", "needs_confirm": False})
                 return
@@ -318,7 +388,7 @@ class Handler(BaseHTTPRequestHandler):
         with _subs_lock:
             _subs.add(id(q))
             _QUEUES[id(q)] = q
-        last_fleet = None
+        last_fleet, beat = None, 0.0
         try:
             while True:
                 while q:
@@ -333,6 +403,17 @@ class Handler(BaseHTTPRequestHandler):
                         f"data: {json.dumps({'kind': 'fleet', 'rows': rows})}\n\n"
                         .encode())
                     self.wfile.flush()
+                    beat = time.time()
+                elif time.time() - beat > HEARTBEAT:
+                    # A comment nobody reads, purely so a dead socket raises.
+                    # Nothing was ever written while the fleet was unchanged, so
+                    # a closed tab was never noticed: its thread and its queue
+                    # sat there, and the queue went on collecting every event
+                    # for a reader that had gone. The quieter Friday is, which
+                    # is to say overnight, the longer they accumulated.
+                    self.wfile.write(b": beat\n\n")
+                    self.wfile.flush()
+                    beat = time.time()
                 time.sleep(1.5)
         except Exception:
             pass
@@ -349,6 +430,11 @@ def _push(ev: dict):
     with _subs_lock:
         for q in _QUEUES.values():
             q.append(ev)
+            # Bounded. A tab that stops reading, or one whose socket died
+            # between heartbeats, must not grow a list forever. The newest are
+            # kept: an event from ten minutes ago is not worth the memory.
+            if len(q) > MAX_QUEUED:
+                del q[:len(q) - MAX_QUEUED]
 
 
 def supervisor_loop():
@@ -377,9 +463,29 @@ def supervisor_loop():
         time.sleep(3)
 
 
+class _Quiet(ThreadingHTTPServer):
+    """A server that does not shout at the terminal.
+
+    `log_message` was already silenced, but `handle_error` was not, so a client
+    hanging up mid-stream, a three-byte malformed request, or a phone going
+    through a tunnel printed a full traceback over Friday's own output. The
+    terminal is the interface; a dropped socket is not news.
+
+    Also stops a slow or dead client holding a thread indefinitely."""
+
+    daemon_threads = True
+    timeout = 30
+
+    def handle_error(self, request, client_address):
+        pass
+
+
 def run(port: int = PORT, expose: bool = False):
-    global LOCAL_ONLY
+    global LOCAL_ONLY, PORT
     LOCAL_ONLY = not expose
+    # Kept in step, because the same-origin check compares against it and the
+    # server does not always run on the default port.
+    PORT = port
     host = "0.0.0.0" if expose else HOST
     # Keep the fleet reading warm so no request ever waits on the CLI.
     fleetcache.refresh_forever()
@@ -413,7 +519,7 @@ def run(port: int = PORT, expose: bool = False):
         _plan.sweep_on_start(_friday.watch.announce)
     except Exception as e:
         engine.log(f"friday plan sweep: {e}")
-    srv = ThreadingHTTPServer((host, port), Handler)
+    srv = _Quiet((host, port), Handler)
     if expose:
         print(f"Friday is listening on http://{host}:{port}?k={SECRET}")
         print("  reachable from your phone. The key is required; keep the URL private.")
