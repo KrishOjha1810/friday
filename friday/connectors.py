@@ -1576,18 +1576,32 @@ class Sentry:
             return set()
 
     def _remember(self, ids) -> None:
-        keep = list(self._seen() | set(ids))[-self.MAX_SEEN:]
+        # Order preserved deliberately: trimming a SET takes arbitrary members,
+        # so past the cap you would forget issues at random and announce them
+        # again later as though they were new.
+        keep = list(dict.fromkeys(list(self._seen_ordered()) + list(ids)))
         try:
-            save_secret("sentry_seen", "\n".join(keep))
+            save_secret("sentry_seen", "\n".join(keep[-self.MAX_SEEN:]))
         except Exception:
             pass
 
-    def news(self, limit: int = 3) -> list:
+    def _seen_ordered(self) -> list:
+        try:
+            return [x for x in self.SEEN.read_text().split() if x]
+        except Exception:
+            return []
+
+    def news(self, limit: int = 3, remember: bool = True) -> list:
         """New unhandled issues, and nothing else.
 
         Called by the feed, so this is the method that decides whether Friday is
         useful or unbearable here. See the class docstring for why the filter is
-        this narrow."""
+        this narrow.
+
+        `remember=False` reads without consuming. This exists because reading it
+        marks everything seen, so "what should I work on?" - which consults the
+        same feed - silently ate the news, and the announcement that would have
+        interrupted you about it never came."""
         rows = [r for r in self.issues(limit=25)
                 if not r.get("error") and r.get("unhandled")
                 and r.get("count", 0) > 1]
@@ -1597,7 +1611,8 @@ class Sentry:
         # a two-month-old error backlog on first connect would be the worst
         # possible introduction to the feature.
         first_look = not known
-        self._remember([r["id"] for r in rows])
+        if remember:
+            self._remember([r["id"] for r in rows])
         if first_look:
             return []
         fresh.sort(key=lambda r: (-r.get("users", 0), -r.get("count", 0)))

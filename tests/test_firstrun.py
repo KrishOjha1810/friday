@@ -66,6 +66,13 @@ def test_help_works_without_the_model():
     assert "what should I work on" in r["reply"], r["reply"]
 
 
+def test_help_me_do_a_thing_is_not_a_request_for_the_menu():
+    """Answering "help me file a ticket" with a menu is the assistant
+    equivalent of pointing at the manual."""
+    assert classify("help me file a ticket")[0] != "help"
+    assert classify("help")[0] == "help"
+
+
 def test_everything_help_suggests_actually_answers():
     """A menu that lists things which do not work yet is worse than no menu."""
     f = _friday()

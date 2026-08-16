@@ -106,6 +106,38 @@ def test_the_same_error_is_not_announced_twice():
 
 
 # ---- what it does say -----------------------------------------------------
+def test_asking_what_to_work_on_does_not_eat_the_news():
+    """Reading the feed marks everything seen. "What should I work on?"
+    consults the same feed, so asking it silently consumed the news and the
+    announcement that would have interrupted you never came."""
+    s = _sentry([_issue("0")])
+    s.news()                                    # first look
+    s._get = lambda path, params=None: (
+        [{"slug": "acme"}] if path == "/organizations/"
+        else [_issue("hot", title="the new one")])
+    real = connectors.get
+    connectors.get = lambda n: s if n == "sentry" else real(n)
+    try:
+        from friday.conversation import Friday
+        f = Friday()
+        f.announce = lambda *a, **k: None
+        f.handle("what should I work on?")      # the read path
+        after = feeds.SentryFeed().poll()       # the announcing path
+    finally:
+        connectors.get = real
+    assert after and after[0]["urgency"] == 0, "the question ate the alert"
+
+
+def test_it_forgets_in_order_not_at_random():
+    """Trimming a set takes arbitrary members, so past the cap you forget
+    issues at random and announce them again as though they were new."""
+    s = _sentry([])
+    s._remember([str(i) for i in range(s.MAX_SEEN + 20)])
+    kept = s._seen_ordered()
+    assert len(kept) == s.MAX_SEEN
+    assert kept[-1] == str(s.MAX_SEEN + 19), kept[-3:]
+
+
 def test_it_says_how_many_people_it_hit():
     """The count alone hides the thing that matters: 4000 events hitting one
     bot matters less than 40 hitting 40 people."""

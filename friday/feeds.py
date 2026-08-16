@@ -421,13 +421,13 @@ class SentryFeed:
 
     EXEMPT = 2
 
-    def poll(self) -> list:
+    def poll(self, remember: bool = True) -> list:
         try:
             from . import connectors
             s = connectors.get("sentry")
             if not s or not hasattr(s, "news") or not s.ready():
                 return []
-            rows = s.news(limit=4)
+            rows = s.news(limit=4, remember=remember)
         except Exception:
             return []
         out = []

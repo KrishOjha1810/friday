@@ -222,6 +222,21 @@ def test_it_asks_which_session_rather_than_picking_one():
     assert not fake.sent, "guessed"
 
 
+def test_it_will_not_start_a_second_plan_over_a_running_one():
+    """Two live plans against the same fleet interleave, and "run the plan"
+    stops meaning one thing."""
+    fake = _Fake()
+    f = _friday(fake)
+    real = f.plans
+    f.plans = type("Busy", (), {"running": True})()
+    try:
+        r = f.handle("work out a plan for adding OAuth")
+    finally:
+        f.plans = real
+    assert "already running" in r["reply"], r["reply"]
+    assert not fake.sent
+
+
 def test_an_agent_it_cannot_type_into_is_refused():
     fake = _Fake()
     f = _friday(fake)

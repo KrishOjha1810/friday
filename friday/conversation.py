@@ -324,9 +324,13 @@ _PLAN_ASK_RE = re.compile(
     r"(?:for|to|on)\s+(.+)$"
     r"|\bhow (?:should|would) (?:we|i|you)\s+(.+)$", re.I)
 _HELP_RE = re.compile(
-    r"^\s*(?:help|\?|what can you do|what do you do|what are you|"
-    r"what can i (?:ask|say|do)|how does this work|commands?|"
-    r"what (?:else )?can you help (?:me )?with)\b|^\s*\?+\s*$", re.I)
+    # Bare "help" is anchored at both ends: "help me file a ticket" is a request
+    # to file a ticket, and answering it with a menu is the assistant equivalent
+    # of pointing at the manual.
+    r"^\s*(?:help|commands?|\?+)\s*[?.!]?$"
+    r"|^\s*(?:what can you do|what do you do|what are you|"
+    r"what can i (?:ask|say|do)|how does this work|"
+    r"what (?:else )?can you help (?:me )?with)\b", re.I)
 _FIRE_RE = re.compile(
     r"\bsentry\b|\bon fire\b|\banything (?:broken|breaking) in prod"
     r"|\bprod(?:uction)?\s+(?:errors?|issues?|exceptions?|ok|okay|healthy)"
@@ -1052,6 +1056,14 @@ class Friday:
         that plans and executes in one go is an agent you cannot say no to."""
         if not goal:
             return self._say("A plan for what?")
+        # One plan at a time, same as one step at a time. Two live plans against
+        # the same fleet interleave, and "run the plan" stops meaning one thing.
+        if self.plans.running:
+            live = plans.active() or {}
+            return self._say(
+                f"A plan is already running{(' on ' + live.get('target', '')) if live.get('target') else ''}. "
+                f"Say \"stop the plan\" first, or \"where is the plan\" to see "
+                f"where it got to.")
         name = target or self.target
         if not name:
             names = self._names_of_sessions()
@@ -1199,7 +1211,9 @@ class Friday:
 
         # 2. production, which is broken for people who are not you
         try:
-            for it in feeds.SentryFeed().poll():
+            # Read without consuming: this path is a question, not a poll, and
+            # marking the news as seen here means the feed never brings it up.
+            for it in feeds.SentryFeed().poll(remember=False):
                 candidates.append((1, "look at production", it["text"]))
                 break
         except Exception:
