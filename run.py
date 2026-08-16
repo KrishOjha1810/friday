@@ -3,6 +3,7 @@
 
     python3 run.py              on this machine only, no key needed
     python3 run.py --app        in the menu bar, as a Mac app
+    python3 run.py --check      what is missing, and how to fix each thing
     python3 run.py --phone      also reachable from your phone (prints a keyed URL)
 """
 import sys
@@ -10,6 +11,9 @@ import sys
 if __name__ == "__main__":
     args = sys.argv[1:]
     ports = [a for a in args if a.isdigit()]
+    if "--check" in args:
+        from friday.doctor import main as check
+        sys.exit(check())
     if "--app" in args:
         # The app starts the server itself, and adopts one that is already
         # running rather than adding a second.

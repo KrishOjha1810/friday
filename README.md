@@ -73,10 +73,14 @@ pip3 install --user jellyfish                    # phonetic name matching
 
 ```
 cd ~/friday
+python3 run.py --check      # what is missing, and what each thing costs
 python3 run.py
 ```
 
 Open **http://127.0.0.1:8765**. That is the whole setup.
+
+`--check` is worth running first. Nothing above is fatal, so without it a
+half-installed Friday looks the same as a working one that has nothing to say.
 
 ### As a Mac app
 

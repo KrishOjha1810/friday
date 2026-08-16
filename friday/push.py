@@ -32,11 +32,22 @@ import time
 import urllib.parse
 import urllib.request
 
-from cryptography.hazmat.primitives import hashes, serialization
-from cryptography.hazmat.primitives.asymmetric import ec
-from cryptography.hazmat.primitives.ciphers.aead import AESGCM
-from cryptography.hazmat.primitives.kdf.hkdf import HKDFExpand
-from cryptography.hazmat.primitives.hmac import HMAC
+# Optional, and it has to be genuinely optional rather than nearly optional.
+# These were plain imports, so on a machine without `cryptography` the failure
+# was not "no phone alerts", it was `friday.conversation` failing to import,
+# which is every part of Friday including the ones that have nothing to do with
+# push. A clean-machine test found it: the README said Friday runs without this
+# and says what is missing, and that was simply untrue.
+try:
+    from cryptography.hazmat.primitives import hashes, serialization
+    from cryptography.hazmat.primitives.asymmetric import ec
+    from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+    from cryptography.hazmat.primitives.kdf.hkdf import HKDFExpand
+    from cryptography.hazmat.primitives.hmac import HMAC
+    HAVE_CRYPTO = True
+except Exception:                   # pragma: no cover - depends on the machine
+    hashes = serialization = ec = AESGCM = HKDFExpand = HMAC = None
+    HAVE_CRYPTO = False
 
 from . import connectors            # for CONF_DIR, so tests can redirect it
 
@@ -87,8 +98,19 @@ def keys() -> tuple:
     return priv, pub
 
 
+def available() -> bool:
+    """Whether phone alerts can work here at all."""
+    return HAVE_CRYPTO
+
+
 def public_key() -> str:
-    """The applicationServerKey the browser needs, base64url."""
+    """The applicationServerKey the browser needs, base64url.
+
+    Empty when there is no crypto library: the page reads that as "alerts are
+    not available" and hides the bell, rather than offering a button that
+    cannot do anything."""
+    if not HAVE_CRYPTO:
+        return ""
     return _b64(keys()[1])
 
 
@@ -115,6 +137,8 @@ def _save(subs: list) -> None:
 
 
 def subscribe(sub: dict) -> bool:
+    if not HAVE_CRYPTO:
+        return False
     """Remember a browser. Returns whether anything changed."""
     if not (isinstance(sub, dict) and sub.get("endpoint")
             and (sub.get("keys") or {}).get("p256dh")
@@ -230,6 +254,8 @@ def send(title: str, body: str, url: str = "/", tag: str = "",
     a phone may hold the message until it next wakes. Sending everything as
     high, which is what this used to do, spends the one lever that keeps a
     locked phone from buzzing over something that could have waited."""
+    if not HAVE_CRYPTO:
+        return 0
     payload = {"title": title, "body": body[:300], "url": url,
                "tag": tag or "friday"}
     level = "high" if urgency <= 0 else "normal"

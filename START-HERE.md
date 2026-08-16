@@ -4,6 +4,7 @@ Five minutes, and the honest version of what works.
 
 ```
 cd ~/friday
+python3 run.py --check      # anything missing, and what it costs you
 python3 run.py
 ```
 
