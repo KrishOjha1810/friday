@@ -158,6 +158,16 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         path = self.path.split("?")[0]
+        # Before the key check on purpose, and the only thing that is. It
+        # answers "is a Friday already running here" and nothing else, which is
+        # what the menu bar app needs to decide whether to start one. Without
+        # it, the app starts a SECOND server against the same fleet, and every
+        # announcement arrives twice from two things that each think they are
+        # the only one. The answer carries no data, so requiring a key would
+        # protect nothing and break the case it exists for.
+        if path == "/health":
+            self._send(200, b"friday", "text/plain")
+            return
         if not self._authed():
             self._send(401, b"unauthorized", "text/plain")
             return

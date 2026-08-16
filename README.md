@@ -78,6 +78,23 @@ python3 run.py
 
 Open **http://127.0.0.1:8765**. That is the whole setup.
 
+### As a Mac app
+
+```
+python3 run.py --app
+```
+
+An **F** appears in your menu bar, with a count of how many agents are waiting
+on you. Click it for the full page in a panel; right-click for open-in-browser,
+reload and quit. It starts the server itself, or adopts one you already have
+running, so it never becomes a second Friday.
+
+No Dock icon and no window to manage on purpose: it is a thing that sits there.
+It is also not a packaged app, deliberately. Electron or Tauri would buy a nicer
+icon and cost a build pipeline, a signing identity and a notarisation step;
+pyobjc is already needed here for the calendar and WKWebView comes with macOS,
+so this runs from source with no build.
+
 From your phone:
 
 ```

@@ -14,6 +14,15 @@ machine. Tap the speaker to have Friday read replies aloud, or the call button
 for a continuous hands-free conversation; anything said in a call also lands in
 the chat, so the thread is always the whole record.
 
+### In the menu bar
+
+```
+python3 run.py --app
+```
+
+An **F** in the menu bar, with the number of agents waiting on you. Click for
+the whole thing in a panel. This is the one to leave running.
+
 ### From your phone
 
 ```
