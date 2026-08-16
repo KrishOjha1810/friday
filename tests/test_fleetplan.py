@@ -175,6 +175,37 @@ def test_a_plan_waiting_only_on_a_person_says_so():
     assert plans.get(p["id"])["state"] == plans.HELD
 
 
+def test_a_failed_step_is_never_reported_as_done():
+    """A failed step was counted as neither done nor waiting, so a plan with one
+    unreachable agent announced "All 2 steps done". Claiming work happened that
+    did not is worse than crashing, because you stop looking."""
+    said = []
+    r = plans.Runner(announce=lambda t, **k: said.append(t),
+                     send=lambda *a: True, look=lambda sid: {})
+    p = _plan({"text": "migrate", "target": "api"},
+              {"text": "rebuild", "target": "web"})
+    plans.set_step(p["steps"][0]["id"], plans.FAILED, "couldn't reach it")
+    plans.set_step(p["steps"][1]["id"], plans.DONE)
+    r._finish(plans.get(p["id"]))
+    out = " ".join(said)
+    assert "could not finish" in out, out
+    assert "api" in out and "step 1" in out, out
+    assert "All 2 steps done" not in out, out
+    assert plans.get(p["id"])["state"] == plans.HELD
+
+
+def test_one_track_failing_does_not_stop_the_others():
+    """The whole point of tracks. An unreachable agent is its own problem."""
+    said = []
+    r = plans.Runner(announce=lambda t, **k: said.append(t),
+                     send=lambda *a: True, look=lambda sid: {})
+    p = _plan({"text": "migrate", "target": "api"},
+              {"text": "rebuild", "target": "web"})
+    plans.set_step(p["steps"][0]["id"], plans.FAILED, "gone")
+    got = plans.runnable(plans.get(p["id"]))
+    assert [s["text"] for s in got] == ["rebuild"], got
+
+
 def test_everything_done_is_reported_as_done():
     said = []
     r = plans.Runner(announce=lambda t, **k: said.append(t),

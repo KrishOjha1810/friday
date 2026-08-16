@@ -144,6 +144,38 @@ What that gives, in order:
   sessions is four things that happened. A list you will not read is not an
   answer, and the reason you asked is that you were not there.
 
+## Things a person says that used to do the wrong thing
+
+Two hunts, one for misunderstandings and one adversarial, found twenty-two of
+these. Almost none were malformed input. They were sentences somebody would
+actually say, where Friday did something other than what they meant, and the
+worst of them put words into a running agent and reported success.
+
+The pattern behind most of them is the same: a pattern that matched anywhere in
+a sentence rather than where the grammar puts the thing it is looking for.
+
+- **A name Friday does not know must not be replaced by one it does.** "Ask sam
+  to review the api changes" sent the running api session the word "changes".
+  The search looked for the best-scoring session name anywhere in the sentence;
+  a name later in the sentence is what you are talking ABOUT.
+- **A permission is granted by a sentence about permission.** "Tell api you can
+  comment out that block" turned on posting for Slack and GitHub, and never
+  reached api.
+- **An interrupt begins with the verb.** "Cancel the meeting with api" pressed
+  Escape on a running agent, which is not undoable.
+- **A confirmation belongs to what you were shown, and expires.** File a ticket,
+  ask who needs you, say yes: the ticket was filed and the blocked agent got
+  nothing.
+- **A broadcast is an action.** "Tell everyone standup is at 10" rewrote the
+  statement as a question and typed it into every agent, unconfirmed.
+- **A destination you name is not a suggestion.** "Post it to #general" posted
+  to the channel the draft was written for.
+- **Never report a finish that did not happen.** "Tell me when api is done"
+  announced "api has finished" three seconds later, about work that never ran.
+
+The full set is in `tests/test_saying.py`, `tests/test_targets.py`,
+`tests/test_consent.py` and `tests/test_crowd.py`.
+
 ## What this does NOT include, and why
 
 - **Writing code.** Friday conducts agents that write code. The moment it starts

@@ -50,6 +50,10 @@ def _tower(rows, budget=None):
                               budget=budget or B.Budget())
     w._fleet = lambda: list(rows.values())
     w._looking_at = lambda: ""
+    # Not the machine's quiet setting. The watchtower asks voicebridge whether
+    # to stay silent, so running this suite with voice switched off made every
+    # announcement vanish and the failures looked like logic bugs.
+    w._hushed = lambda: False
     return w, said
 
 

@@ -541,6 +541,7 @@ class Runner:
     def _finish(self, plan: dict) -> None:
         stuck = unfinished(plan)
         held = [s for s in plan.get("steps", []) if s["state"] == HELD]
+        failed = [s for s in plan.get("steps", []) if s["state"] == FAILED]
         if stuck:
             # Something stopped while this was in flight, so nobody knows
             # whether it ran. Saying "all done" here is the worst available
@@ -551,6 +552,20 @@ class Runner:
                 f"Plan {plan['title']} stopped with step {which} already sent, "
                 f"so I don't know whether it finished. Check that one and say "
                 f"\"run the plan\" to carry on.")
+            return
+        if failed:
+            # A failed step used to be counted as neither done nor waiting, so
+            # a plan with one unreachable agent announced "All 2 steps done".
+            # Claiming work happened that did not is the worst thing this file
+            # can do, and it is worse than crashing, because you stop looking.
+            set_plan(plan["id"], HELD)
+            which = ", ".join(f"{s.get('target') or 'a session'} "
+                              f"(step {s['seq'] + 1})" for s in failed)
+            done = len([s for s in plan.get("steps", []) if s["state"] == DONE])
+            rest = (f" The other {done} finished." if done else "")
+            self.announce(f"Plan {plan['title']} could not finish: {which} "
+                          f"didn't run.{rest} Say \"run the plan\" to retry "
+                          f"those.")
             return
         if held:
             set_plan(plan["id"], HELD)

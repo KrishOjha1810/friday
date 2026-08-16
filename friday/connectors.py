@@ -36,7 +36,18 @@ CONF_DIR = Path.home() / ".friday"
 TIMEOUT = 12.0
 
 
+# `gh` subcommands that change something on GitHub.
+_GH_WRITES = {"create", "close", "reopen", "comment", "merge", "edit",
+              "delete", "approve", "review"}
+
+
+def _is_write(cmd: list) -> bool:
+    return bool(set(str(c) for c in cmd) & _GH_WRITES)
+
+
 def _run(cmd: list, timeout: float = TIMEOUT) -> str:
+    if _is_write(cmd) and _refuse("gh", tuple(cmd)):
+        return ""
     try:
         r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
         return r.stdout if r.returncode == 0 else ""
@@ -247,6 +258,8 @@ class GitHub:
         args = ["gh", "issue", "create", "--repo", repo,
                 "--title", summary.strip()[:250],
                 "--body", body.strip()[:4000] or summary.strip()[:250]]
+        if _refuse("gh", tuple(args)):
+            return {"error": "disarmed"}
         try:
             r = subprocess.run(args, capture_output=True, text=True, timeout=40)
         except Exception as e:
@@ -284,6 +297,8 @@ class GitHub:
         if not want:
             return {"error": "which_state", "states": list(self.STATES)}
         verb = "close" if want == "closed" else "reopen"
+        if _refuse("gh", ("issue", verb, key)):
+            return {"error": "disarmed"}
         try:
             r = subprocess.run(["gh", "issue", verb, key],
                                capture_output=True, text=True, timeout=30)
@@ -303,6 +318,8 @@ class GitHub:
             return {"ok": False, "error": "writing_not_enabled"}
         if not (target and body.strip()):
             return {"ok": False, "error": "nothing_to_send"}
+        if _refuse("gh", ("issue", "comment", target)):
+            return {"ok": False, "error": "disarmed"}
         try:
             r = subprocess.run(["gh", "issue", "comment", target,
                                 "--body", body],
@@ -421,7 +438,12 @@ class Slack:
 
     _err = ""        # why Slack last said no, so it can be repeated to you
 
+    WRITES = ("chat.postMessage", "chat.update", "chat.delete",
+              "conversations.invite", "files.upload")
+
     def _call(self, method: str, **params) -> dict:
+        if method in self.WRITES and _refuse("slack", method):
+            return {"ok": False, "error": "disarmed"}
         tok = self.token()
         if not tok:
             self._err = "not_configured"
@@ -732,6 +754,45 @@ SCOPE_LIST = ["search:read", "channels:history", "groups:history", "im:history",
 # own without tearing down the whole connection.
 WRITE_SCOPES = ["chat:write"]
 WRITE_FLAG = "slack_can_write"
+
+
+# The same switch `actions` has, for the same reason and after the same
+# accident. actions.disarm() exists because a test once typed a prompt into a
+# live terminal; nothing equivalent guarded the CONNECTORS, so a test that
+# enabled posting filed a real issue on a real public repository. A config
+# directory redirected to a temp folder does not help here: `gh` is
+# authenticated at the machine level and Slack tokens can arrive from the
+# environment, so the only reliable guard is refusing at the verb.
+ARMED = os.environ.get("FRIDAY_SAFE", "") != "1"
+attempted = []          # [(what, args)] while disarmed
+
+
+def _refuse(what: str, *args) -> bool:
+    """True when this write must not leave the machine."""
+    if ARMED:
+        return False
+    attempted.append((what, args))
+    return True
+
+
+def disarm() -> None:
+    """No connector in this module will reach the network to WRITE anything.
+
+    Reading is left alone: a test that reads GitHub is slow, not dangerous.
+
+    Guarded at the transport rather than at can_write(), which was the first
+    attempt and was wrong: plenty of tests use FAKE connectors and genuinely
+    need the permission to be on. Blocking the switch made those fail while
+    proving nothing, because a fake never touches the network anyway. What has
+    to be impossible is the real call leaving the machine."""
+    global ARMED
+    ARMED = False
+    attempted.clear()
+
+
+def arm() -> None:
+    global ARMED
+    ARMED = True
 
 
 def can_write() -> bool:
@@ -1582,6 +1643,8 @@ class Linear:
                 "it to me on its own. It starts with lin_api_.")
 
     def _q(self, query: str, variables: dict = None) -> dict:
+        if query.strip().startswith("mutation") and _refuse("linear", query[:40]):
+            return {"error": "disarmed"}
         tok = self.token()
         if not tok:
             return {}
@@ -1959,6 +2022,8 @@ class GitLab:
 
     def _call(self, method: str, path: str, params: dict = None,
               body: dict = None):
+        if method != "GET" and _refuse("gitlab", method, path):
+            return {"error": "disarmed"}
         tok = self.token()
         if not tok:
             return {"error": "no_token"}

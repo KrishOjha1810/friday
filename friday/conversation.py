@@ -171,14 +171,31 @@ _BRIEF_RE = re.compile(
 
 # Sending is never inferred from a sentence about sending. It happens only when
 # you say yes to a specific piece of text Friday has just shown you.
+# The destination is CAPTURED now. It was matched and then thrown away, so
+# "post it to #general" posted the draft to whichever channel it was drafted
+# for, which is a message going to colleagues the user had just redirected it
+# away from.
 _SEND_RE = re.compile(
     r"^\s*(?:go ahead and\s+)?(?:send|post)\s*(?:it|that|this)?\s*"
-    r"(?:to\s+(?:slack|#?[\w.\-]+))?\s*[.!]?\s*$", re.I)
+    r"(?:to\s+(?:slack|(#?[\w.\-]+)))?\s*[.!]?\s*$", re.I)
+# The one switch in front of every Slack post, DM, ticket and GitHub comment.
+# It was unanchored, so "tell api you can comment out that block" turned
+# posting on for Slack AND GitHub, and the sentence never reached api at all.
+# An ordinary coding sentence must not be able to grant this.
+#
+# So: the whole utterance has to be about the permission and nothing else. Any
+# sentence that is really an instruction to a session is excluded at the call
+# site, and the bare forms below are anchored at both ends.
 _ALLOW_RE = re.compile(
-    r"\b(?:let|allow)\s+(?:yourself|you)\s+(?:to\s+)?(post|write|reply|comment)"
-    r"|\b(?:enable|turn on)\s+(?:slack\s+)?(?:posting|writing|replies)\b"
-    r"|\b(?:stop|disable|turn off)\s+(?:yourself\s+)?(?:posting|writing)\b"
-    r"|\byou\s+can\s+(?:post|reply|comment)\b", re.I)
+    r"^\s*(?:friday[,\s]+)?(?:please\s+)?"
+    r"(?:(?:let|allow)\s+(?:yourself|you)\s+(?:to\s+)?"
+    r"(?:post|write|reply|comment|send)(?:\s+things?)?"
+    r"|(?:enable|turn on)\s+(?:slack\s+|github\s+)?"
+    r"(?:posting|writing|replies|comments)"
+    r"|(?:stop|disable|turn off)\s+(?:yourself\s+)?"
+    r"(?:posting|writing|commenting)"
+    r"|you\s+can\s+(?:post|reply|comment|send\s+things)(?:\s+now)?)"
+    r"\s*[.!]?\s*$", re.I)
 
 _DRAFT_RE = re.compile(
     r"\b(?:draft|write|compose)\s+(?:me\s+)?(?:a\s+|the\s+)?"
@@ -190,11 +207,20 @@ _MISSED_RE = re.compile(
     r"(?!\s+on\b)|\bwhat\s+happened\s+while\s+i\s+was\s+(?:away|out|gone)\b|"
     r"\banything\s+(?:new|since)\b", re.I)
 # One noisy agent should not cost you the whole feature.
+# Muting names ONE session. The captured span used to run to the end of the
+# sentence, so "silence the notifications for a bit" asked to mute a session
+# called "notifications for a bit". A trailing "for a bit" or "for now" is how
+# long, not who, and "the notifications" is not a session at all.
+_MUTE_TAIL = r"(?:\s+session)?(?:\s+for\s+(?:now|a\s+(?:bit|while|moment)))?"
 _MUTE_RE = re.compile(
     r"\b(?:ignore|mute|silence|stop\s+telling\s+me\s+about)\s+"
-    r"(?:the\s+)?([\w.\- ]{2,40}?)(?:\s+session)?(?:\s+for\s+now)?\s*[.!?]?$"
-    r"|\b(?:unmute|listen\s+to|un-?ignore)\s+(?:the\s+)?([\w.\- ]{2,40}?)"
-    r"(?:\s+session)?\s*[.!?]?$", re.I)
+    r"(?:the\s+)?([\w.\-]+(?:\s+[\w.\-]+)?)" + _MUTE_TAIL + r"\s*[.!?]?$"
+    r"|\b(?:unmute|listen\s+to|un-?ignore)\s+(?:the\s+)?"
+    r"([\w.\-]+(?:\s+[\w.\-]+)?)" + _MUTE_TAIL + r"\s*[.!?]?$", re.I)
+# Words that mean "everything", not a session. These reach the whole-quiet
+# switch rather than being hunted for as a name.
+_MUTE_ALL = {"notifications", "notification", "alerts", "everything",
+             "all of it", "them", "all", "updates", "it all"}
 _STUCK_RE = re.compile(
     r"\b(?:is\s+)?any(?:one|thing|body)\s+(?:stuck|blocked|waiting)\b|"
     r"\bwho(?:'?s|\s+is)?\s+(?:stuck|blocked|waiting)\b|"
@@ -218,19 +244,37 @@ _WATCH_RE = re.compile(
     r"\b(?:tell|let)\s+me\s+know\s+when\b|\bnotify\s+me\s+when\b|"
     r"\bping\s+me\s+when\b|\bwhen\s+(?:it|that|he|she|they|\S+)\s+"
     r"(?:is\s+|has\s+)?(?:done|finished|finishes|ready)\b", re.I)
+# Anchored at the START, because interrupting an agent destroys in-flight work
+# and cannot be undone. Unanchored, "cancel the meeting with api" and "stop
+# worrying about the api" both hit Escape on a running session: the pattern
+# fired on any short sentence containing the word, and the session name was
+# then found anywhere in it. A stop command begins with the verb.
 _STOP_RE = re.compile(
-    r"\b(?:stop|interrupt|halt|cancel|escape)\s+(?:the\s+)?"
-    r"([\w.\- ]{2,40}?)(?:\s+session)?\s*[.!?]?$", re.I)
+    r"^\s*(?:please\s+)?(?:stop|interrupt|halt|cancel|escape)\s+(?:the\s+)?"
+    r"([\w.\-]+(?:\s+[\w.\-]+)?)(?:\s+session)?\s*[.!?]?$", re.I)
 # "it", "him", "that one": whoever we were just talking to.
 _ITS_RE = re.compile(r"^(?:it|him|her|them|that\s+(?:one|session)|"
                      r"the\s+same\s+one)$", re.I)
 
+# "who needs me" and "which sessions need..." are NOT this. They were folded in
+# here, so the one question about urgency was answered with the wall of text it
+# exists to replace: with fifty sessions running, "who needs me?" listed all
+# fifty. They are handled by the stuck path instead.
 _FLEET_RE = re.compile(
-    r"\b(what('?s| is)? (running|going on|happening)|status|who needs me|"
-    r"which (agents?|sessions?) need|what are you (running|watching)|"
+    r"\b(what('?s| is)? (running|going on|happening)|status|"
+    r"what are you (running|watching)|"
     r"how are (things|we)|(show|list) (me )?(my )?(agents?|sessions?))\b", re.I)
+_WHO_NEEDS_RE = re.compile(
+    r"\bwho needs me\b|\bwho'?s? (?:waiting|stuck|blocked)\b"
+    r"|\bwhich (?:agents?|sessions?) (?:need|are waiting|are stuck)\b"
+    r"|\bwhat needs (?:me|my attention)\b", re.I)
+# The article is skipped BEFORE the name is captured. It was optional-and-
+# captured, so "open a new tab" gave the name "a", which prefix-matched the
+# first session starting with that letter and focused it. _FILLER exists for
+# exactly this and was never consulted on this path.
 _OPEN_RE = re.compile(
-    r"\b(open|switch to|go to|jump to|resume|show me)\s+(?:the\s+)?"
+    r"\b(open|switch to|go to|jump to|resume|show me)\s+"
+    r"(?:(?:the|a|an|my|that)\s+)?"
     r"(?:session\s+)?([\w.\-]+)", re.I)
 # "open it", "open that" name nothing. Treating a pronoun as a session name is
 # how "can you open it through Claude?" became "I couldn't bring Reply with
@@ -268,9 +312,17 @@ _FIND_RE = re.compile(
 _RECENT_RE = re.compile(
     r"\b(?:what (?:was|were) i (?:working on|doing)|recent sessions?|"
     r"my recent work|what have i been (?:working on|doing))\b", re.I)
+# Deliberately narrow, and deliberately nameless. This carried a hard-coded
+# person's name, which is both a privacy problem in a public repository and a
+# feature that only worked for one machine. It also matched a bare "anyone
+# else", so "is anyone else seeing this error" was answered with a list of the
+# other accounts on the Mac: a confident, off-topic answer that volunteered
+# somebody's name. It now needs an actual reference to users or accounts.
 _OTHERS_RE = re.compile(
-    r"\b(?:other users?|another user|someone else|other accounts?|"
-    r"anyone else|nikhil|other people)\b", re.I)
+    r"\b(?:other|another|someone else'?s?|anyone else'?s?)\s+"
+    r"(?:users?|accounts?|logins?|people|sessions on this (?:mac|machine))\b"
+    r"|\bwho else is (?:logged|signed) in\b"
+    r"|\b(?:other|anyone else)\s+logged in\b", re.I)
 _GITHUB_RE = re.compile(
     r"\b(?:github|gh|pull requests?|prs?\b|my notifications?)\b\s*(.*)$", re.I)
 _SLACK_RE = re.compile(r"\bslack\b\s*(.*)$", re.I)
@@ -523,12 +575,13 @@ def classify(text: str) -> tuple:
         return PLAN_GO, {"stop": False, "bare": True}
     if _BRIEF_RE.search(t):
         return BRIEF, {}
-    m = _ALLOW_RE.search(t)
+    m = _ALLOW_RE.search(t) if not _TELL_RE.search(t) else None
     if m:
         off = bool(re.search(r"\b(stop|disable|turn off)\b", t, re.I))
         return ALLOW, {"on": not off}
-    if _SEND_RE.match(t):
-        return SEND, {}
+    m = _SEND_RE.match(t)
+    if m:
+        return SEND, {"where": (m.group(1) or "").strip()}
     if not t:
         return CHAT, {}
     # Specific multi-word intents go FIRST. "resume that session" is not the
@@ -565,8 +618,12 @@ def classify(text: str) -> tuple:
         return STUCK, {}
     m = _MUTE_RE.search(t)
     if m and len(t.split()) <= 7:
-        return MUTE, {"name": (m.group(1) or m.group(2) or "").strip(),
-                      "on": bool(m.group(1))}
+        who = (m.group(1) or m.group(2) or "").strip()
+        if who.lower() in _MUTE_ALL:
+            # "silence the notifications" means all of them, and hunting for a
+            # session by that name found the nearest match and muted it.
+            return QUIET if m.group(1) else RESUME, {}
+        return MUTE, {"name": who, "on": bool(m.group(1))}
     if _WHO_RE.search(t):
         return WHO, {}
     if _MORE_RE.search(t):
@@ -666,6 +723,11 @@ def classify(text: str) -> tuple:
         name = m.group(2)
         if name.lower() in _PRONOUNS:
             return OPEN, {"name": ""}   # "open it": we must ask which
+        if name.lower() in _FILLER:
+            # An article that survived the pattern is not a name. One letter
+            # prefix-matches any session starting with it, so "open a new tab"
+            # opened api.
+            return OPEN, {"name": ""}
         return OPEN, {"name": name}
     if _SLACK_RE.search(t):
         return SLACK, {"query": _strip_verbs(_SLACK_RE.search(t).group(1) or t)}
@@ -682,6 +744,8 @@ def classify(text: str) -> tuple:
     m = _NEEDS_RE.search(t)
     if m:
         return NEEDS, {"name": m.group(1)}
+    if _WHO_NEEDS_RE.search(t):
+        return STUCK, {}
     if _FLEET_RE.search(t):
         return ASK_FLEET, {}
     if _YES_RE.match(t):
@@ -689,6 +753,27 @@ def classify(text: str) -> tuple:
     if _NO_RE.match(t):
         return CANCEL, {}
     return CHAT, {}
+
+
+def _describe_pending(act: dict) -> str:
+    """An offer, in the words you would use to ask for it again."""
+    kind = (act or {}).get("kind", "")
+    if kind == "ticket":
+        return f'file "{(act.get("summary") or "")[:60]}"'
+    if kind == "move":
+        return f"move {act.get('key', 'that ticket')} to {act.get('to', '')}"
+    if kind == "tell":
+        return (f'send "{(act.get("message") or "")[:50]}" to '
+                f'{act.get("label", "a session")}')
+    if kind == "two":
+        return "send those two instructions"
+    if kind == "open":
+        return f"open {act.get('label', 'that session')}"
+    if kind == "new":
+        return "start a new session"
+    if kind == "send":
+        return "send that message"
+    return "do that"
 
 
 class Friday:
@@ -710,6 +795,8 @@ class Friday:
         # them shortly after can be told apart from ordinary work.
         self._told = {}
         self.quiet = False         # Friday's own switch, independent of vb's
+        self._turn = 0
+        self._pending = None
         # Whether you are looking at the page. Pushing to a phone something
         # already on the screen in front of you is how a notification
         # permission gets revoked, and there is no second chance at that.
@@ -784,6 +871,11 @@ class Friday:
         if _NOISE_RE.fullmatch((text or "").strip()):
             return {"reply": "", "needs_confirm": False, "action": {}}
         self.add("user", text)
+        # Counted here so an offer knows how many things you have said since.
+        # Elapsed time alone is not enough: a three-turn detour taken quickly
+        # and a slow one are the same mistake, because in both you have stopped
+        # thinking about what you were asked.
+        self._turn += 1
         intent, payload = classify(text)
 
         # Something Friday offered a moment ago ("did you mean X?"). A yes takes
@@ -803,9 +895,38 @@ class Friday:
         elif self._offered:
             self._offered = None
 
-        # A pending offer takes precedence: "yes" means yes to THAT.
+        # A pending offer takes precedence: "yes" means yes to THAT. But only
+        # while it is still plausibly what you are answering.
+        #
+        # Nothing ever expired a pending action, so this sequence did the wrong
+        # thing: file a ticket (Friday asks), then "who needs me?" (Friday says
+        # api is waiting on you), then "yes". The yes filed the ticket and api's
+        # question went unanswered. Friday had itself just said an agent was
+        # waiting, and then took the word for something else.
         if self.pending and intent in (CONFIRM, CANCEL):
             act = self.pending
+            stale = (time.time() - float(act.get("asked_at") or 0)
+                     > self.PENDING_LIVES)
+            moved_on = int(act.get("turn") or 0) < self._turn - self.PENDING_TURNS
+            if stale or moved_on:
+                self.pending = None
+                what = _describe_pending(act)
+                if intent == CANCEL:
+                    return self._say(f"Dropped it, then. I won't {what}.")
+                waiting = self._waiting()
+                if waiting:
+                    who = waiting[0].get("label", "a session")
+                    return self._say(
+                        f"I'm not sure what that's yes to. A while back I "
+                        f"asked whether to {what}, and {who} is waiting on you "
+                        f"as well. Say \"tell {who} yes\", or ask me again to "
+                        f"{what}.")
+                # Nothing else is competing for it, but the offer is old enough
+                # that acting on it silently would be acting on something you
+                # may not still have in mind. Show it again.
+                self.pending = act
+                return self._say(f"Just to check, this is still from earlier: "
+                                 f"{what}?", needs_confirm=True)
             self.pending = None
             if intent == CANCEL:
                 return self._say("Okay, left it alone.")
@@ -901,7 +1022,7 @@ class Friday:
         if intent == ALLOW:
             return self._allow_write(payload["on"])
         if intent == SEND:
-            return self._send_draft()
+            return self._send_draft(payload.get("where", ""))
         if intent == DRAFT:
             return self._draft(payload.get("gist", ""))
         if intent == MISSED:
@@ -1120,6 +1241,30 @@ class Friday:
                          if lines else "Nothing is running and nothing is "
                                        "waiting.")
 
+    # How long an unanswered offer stays answerable by a bare "yes", and how
+    # many of your turns it survives. Both, because a three-turn detour taken
+    # quickly and a slow one are the same mistake: you have stopped thinking
+    # about the thing you were asked.
+    PENDING_LIVES = 300
+    PENDING_TURNS = 1
+
+    @property
+    def pending(self):
+        return self._pending
+
+    @pending.setter
+    def pending(self, act):
+        """Stamped as it is set, so no call site can forget to.
+
+        There are a dozen places that offer something for confirmation, and a
+        rule about staleness that each of them has to remember is a rule that
+        will be missed by the thirteenth."""
+        if isinstance(act, dict):
+            act = dict(act)
+            act.setdefault("asked_at", time.time())
+            act.setdefault("turn", self._turn)
+        self._pending = act
+
     ACTED_WITHIN = 900        # a quarter of an hour counts as "about that"
 
     def _acted_on(self, label: str, kind: str = "") -> None:
@@ -1174,6 +1319,17 @@ class Friday:
     # it in a numbered list. Bounded to a short name so an ordinary sentence
     # with a colon in it ("note: this is fragile") is not read as a target.
     _FOR_RE = re.compile(r"^\s*(?:ask\s+)?([A-Za-z][\w.\-]{1,28})\s*:\s*(.+)$")
+    # Words that precede a colon in ordinary writing. "note: do not touch main"
+    # became a colleague called "note", and every later unlabelled step was
+    # reassigned to them, so a commit meant for api ended up owed by a person
+    # who does not exist and the plan reported itself as waiting on "note".
+    _NOT_A_PERSON = {
+        "note", "notes", "warning", "caution", "caveat", "caveats", "tip",
+        "important", "todo", "fixme", "nb", "example", "eg", "ie", "reminder",
+        "goal", "aim", "context", "background", "why", "how", "what", "when",
+        "step", "steps", "first", "then", "finally", "also", "and", "but",
+        "result", "output", "input", "requirement", "requirements", "detail",
+        "details", "summary", "conclusion", "rule", "rules", "constraint"}
 
     def _assign(self, steps: list, default: str = "") -> list:
         """Work out who each step is for.
@@ -1200,9 +1356,19 @@ class Friday:
                     out.append({"text": text, "target": current,
                                 "sid": hit.get("sid", ""), "kind": "agent"})
                     continue
-                current, kind = name, "person"
+                if name.lower() in self._NOT_A_PERSON:
+                    # A label, not a target. Keep the whole line as a step for
+                    # whoever the current one is, colon and all, because the
+                    # words after "note:" are still the instruction.
+                    out.append({"text": f"{name}: {text}", "target": current,
+                                "sid": "", "kind": "agent"})
+                    continue
                 out.append({"text": text, "target": name, "sid": "",
                             "kind": "person"})
+                # Deliberately NOT setting `current`. A name Friday does not
+                # recognise should never capture the steps after it: if it is
+                # unsure this is even a person, reassigning somebody else's
+                # remaining work to them is the worst of both readings.
                 continue
             hit, _how = self._find_how(current) if current else (None, "")
             out.append({"text": text, "target": current,
@@ -1673,7 +1839,7 @@ class Friday:
         with urllib.request.urlopen(req, timeout=6) as r:
             return scope in (r.headers.get("x-oauth-scopes") or "")
 
-    def _send_draft(self) -> dict:
+    def _send_draft(self, where: str = "") -> dict:
         """Send the thing you were just shown. Never anything else.
 
         There is no path from "reply to Sam saying yes" straight to a
@@ -1683,6 +1849,18 @@ class Friday:
         if not d:
             return self._say("There's nothing drafted. Say \"draft a reply\" "
                              "and I'll write one for you to check first.")
+        # A destination you named and Friday ignored is how a message goes to
+        # the colleagues you had just redirected it away from. The name was
+        # captured and thrown away, and the draft always went to its own
+        # channel.
+        want = (where or "").strip().lstrip("#").lower()
+        here = (d.get("where") or "").strip().lstrip("#").lower()
+        if want and here and want != here:
+            return self._say(
+                f"That draft is addressed to {d.get('where')}, not "
+                f"#{want.lstrip('#')}. I won't quietly move it. Say \"draft a "
+                f"reply\" again while reading #{want.lstrip('#')}, or \"send "
+                f"it\" to post it where it was written for.")
         if not connectors.can_write():
             return self._say("I can't post to Slack yet. Say \"let yourself "
                              "post\" if you want me to be able to, and I'll "
@@ -1839,6 +2017,13 @@ class Friday:
             return []
         # Oldest first: whoever has been stuck longest has cost the most.
         rows.sort(key=lambda r: r.get("mtime") or 0)
+        # Every display of a blocked session comes through here, so the naming
+        # guarantee is applied here too. fleetcache makes the same promise for
+        # the live fleet; this covers rows that arrive from anywhere else.
+        for r in rows:
+            if not (r.get("label") or "").strip():
+                sid = (r.get("sid") or "").strip()
+                r["label"] = f"session {sid[:8]}" if sid else "an unnamed session"
         return rows
 
     def _bare_answer(self, word: str):
@@ -1860,7 +2045,22 @@ class Friday:
                 f"\"{word}\" is for:\n" + "\n".join(lines)
                 + "\n\nSay which, or \"tell <name> " + word + "\".")
         r = rows[0]
-        label = r.get("label") or "it"
+        label = (r.get("label") or "").strip()
+        # A bare yes goes straight through with no confirmation, which is right
+        # when you recognise the name. A session Friday can only call "session
+        # 4f2a" is one you may never have seen announced, and a yes typed into
+        # an agent is not a message, it is authority. So the name it fell back
+        # to earns one extra beat, and nothing more: the question is shown and
+        # the yes is confirmed rather than refused.
+        if label.startswith("session ") or label == "an unnamed session":
+            q = (r.get("question") or r.get("permission") or "").strip()
+            self.pending = {"kind": "tell", "sid": r.get("sid", ""),
+                            "label": label, "message": word, "await": False,
+                            "path": r.get("path", "")}
+            return self._say(
+                f"{label} has no name I can show you, so before I answer for "
+                f"you: it is asking \"{q[:120]}\". Send \"{word}\"?",
+                needs_confirm=True)
         if not actions.send_to_session(r.get("sid", ""), word):
             return self._say(f"I couldn't reach {label}.")
         self.target = label
@@ -1882,7 +2082,11 @@ class Friday:
         label = first.get("label") or "another session"
         q = (first.get("question") or first.get("permission") or "").strip()
         more = (f" ({len(rest) - 1} more after that)" if len(rest) > 1 else "")
-        self.target = label
+        # Deliberately NOT setting self.target. Mentioning who is still waiting
+        # must not change who "it" means: this line is printed right after you
+        # addressed somebody else, and re-pointing the pronoun sent the next
+        # "ask it to also run the tests" into a different agent that was
+        # mid-question. Saying something about a session is not addressing it.
         return f"Next{more}: {label} is asking {q[:120]}"
 
     def _stuck(self) -> dict:
@@ -1966,7 +2170,8 @@ class Friday:
                              f"up.")
         return self._say(f"{self.target}, in full:\n{full}")
 
-    def _ask_all(self, tail: str, joiner: str = "") -> dict:
+    def _ask_all(self, tail: str, joiner: str = "",
+                 approved: bool = False) -> dict:
         """Put one question to every running session and collect the answers.
 
         Doing this by hand means typing the same thing into five windows and
@@ -1980,7 +2185,19 @@ class Friday:
             rows = []
         if not rows:
             return self._say("Nothing is running, so there is nobody to ask.")
-        question = self._as_question(tail, joiner)
+        question = tail if approved else self._as_question(tail, joiner)
+        # One sentence writing into every agent at once, in words Friday
+        # rephrased, is the largest single action available here and it had no
+        # confirmation at all. Worse, _as_question turns a statement into a
+        # question, so "tell everyone standup is at 10" arrived in every session
+        # as "standup is at 10?", which the agents then answer.
+        if not approved:
+            names = ", ".join((r.get("label") or r.get("sid", ""))[:20]
+                              for r in rows[:8])
+            self.pending = {"kind": "askall", "question": question}
+            return self._say(
+                f"That goes to all {len(rows)}: {names}.\nEach of them gets, "
+                f"exactly:\n\n{question}\n\nSend it?", needs_confirm=True)
         asked, marks = [], {}
         for r in rows:
             path = r.get("path", "")
@@ -2046,6 +2263,16 @@ class Friday:
         if not row:
             return self._no_session(target, self._watch)
         self.target = target
+        # Already stopped is an answer, not something to wait an hour for. Say
+        # so now rather than watching a session that is not going to transition.
+        if row.get("status") != "working":
+            q = (row.get("question") or "").strip()
+            if q:
+                return self._say(f"{target} isn't working, it's waiting on "
+                                 f"you: {q}")
+            return self._say(f"{target} is already idle, so there's nothing to "
+                             f"wait for. I'll watch it anyway in case it starts "
+                             f"again.")
         self._watch_until_idle(row["sid"], target)
         return self._say(f"Watching {target}. I'll tell you when it stops.")
 
@@ -2055,7 +2282,12 @@ class Friday:
 
         def _wait():
             end = time.time() + timeout
-            was_working = True
+            # False, not True. Starting at True meant the first poll of a
+            # session that was ALREADY idle counted as a transition, so "tell me
+            # when api is done" announced "api has finished" three seconds
+            # later about work that never ran. Nothing is reported until it has
+            # actually been seen working.
+            was_working = False
             while time.time() < end:
                 time.sleep(3)
                 try:
@@ -2955,6 +3187,18 @@ class Friday:
                     break
         if not found:
             found, i, j, _sc = nearest.best_span(said, names)
+            # Only if it is at or before where the sentence PUT the name. The
+            # search looks anywhere, so "ask sam to review the api changes"
+            # found "api" five words in, re-anchored onto it, and sent the
+            # running api session the word "changes". The name you said is not
+            # a session, and the right answer is to say so; a session mentioned
+            # later in the sentence is part of what you are talking ABOUT.
+            #
+            # At or before, not exactly at, because the case this fallback
+            # exists for is "tell voice bridge ...", where the parser cut at
+            # the first space and the real name starts in the same place.
+            if found and i > self._name_at(said, name):
+                found = ""
         if not found:
             return name, message, want, False
         # Whether you actually SAID the name, or Friday worked it out. Resolving
@@ -2991,6 +3235,13 @@ class Friday:
     _SECOND_TARGET_RE = re.compile(
         r"\b(?:and\s+|then\s+|,\s*)?(?:tell|ask)\s+([\w.\-]{2,30})\s+"
         r"(?:to\s+)?(.+)$", re.I)
+    # "ask api and web to run the tests": the second name is not introduced by
+    # another verb, so the pattern above cannot see it. api received the words
+    # "and web to run the tests", which reads to a coding agent as an
+    # instruction about another agent, and web got nothing at all.
+    _AND_TARGET_RE = re.compile(
+        r"^(?:and|,)\s+([\w.\-]{2,30})(?:\s+sessions?)?\s+(?:to\s+)?(.+)$",
+        re.I)
 
     def _propose_tell(self, name: str, message: str,
                       want_answer: bool = False, said: str = "") -> dict:
@@ -3070,6 +3321,22 @@ class Friday:
         return self._say(f'Did you mean {hit.get("label", name)}? '
                          f'I\'ll send "{message}".', needs_confirm=True)
 
+    def _name_at(self, said: str, name: str) -> int:
+        """Which word the sentence put the name at, or 1 if it cannot tell.
+
+        1 rather than 0 because these sentences open with a verb ("tell api
+        ..."), so the name slot is the second word, and a fallback that allowed
+        position 0 would let anything through."""
+        want = (name or "").strip().lower().strip("'\"`")
+        if not want:
+            return 1
+        toks = [w.lower().strip(".,?!:;'\"`") for w in said.split()]
+        first = want.split()[0]
+        for at, w in enumerate(toks):
+            if w == first:
+                return at
+        return 1
+
     def _split_instructions(self, name: str, message: str):
         """Notice a second instruction hiding inside the first.
 
@@ -3083,6 +3350,10 @@ class Friday:
         "tell api to build and tell me when it's done" is left alone: "me" is
         not a session, and that sentence means one thing."""
         m = self._SECOND_TARGET_RE.search(message)
+        both = False
+        if not m:
+            m = self._AND_TARGET_RE.match(message)
+            both = bool(m)
         if not m:
             return None
         other, rest = m.group(1).strip(), m.group(2).strip()
@@ -3093,6 +3364,10 @@ class Friday:
         # The conjunction has to go as a word.
         first = re.sub(r"[\s,]*\b(?:and|then)\s*$", "",
                        message[:m.start()]).strip(" ,.")
+        if both:
+            # "ask api and web to run the tests" is ONE instruction for two
+            # agents, not two different ones, so they both get the same words.
+            first = rest
         if not first:
             return None
         self.pending = {"kind": "two", "first": {"name": name, "text": first},
@@ -3172,6 +3447,8 @@ class Friday:
                 ok = actions.new_session(act.get("about", ""))
                 return self._say("Started it in a new window." if ok else
                                  "I couldn't open a new window.")
+            if act["kind"] == "askall":
+                return self._ask_all(act["question"], approved=True)
             if act["kind"] == "two":
                 out = []
                 for part in (act["first"], act["second"]):

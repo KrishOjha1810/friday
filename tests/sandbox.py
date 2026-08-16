@@ -32,6 +32,7 @@ def use_temp_config() -> Path:
 
     from friday import actions
     actions.disarm()
+    connectors.disarm()
 
     # Tests must not read your real project history either: it made results
     # depend on which folders happen to exist on this machine.

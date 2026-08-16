@@ -48,7 +48,10 @@ def _fake_engine(monkey=True):
 # ---- understanding --------------------------------------------------------
 def test_commands_are_understood_exactly():
     assert classify("what's running?")[0] == C.ASK_FLEET
-    assert classify("who needs me")[0] == C.ASK_FLEET
+    # "who needs me" is the urgency question, not the fleet dump. It used to be
+    # folded into ASK_FLEET, so with fifty sessions running it answered with all
+    # fifty: the wall of text the question exists to replace.
+    assert classify("who needs me")[0] == C.STUCK
     assert classify("open jobhunt") == (C.OPEN, {"name": "jobhunt"})
     assert classify("switch to api") == (C.OPEN, {"name": "api"})
     i, p = classify("tell api to use the redis store")

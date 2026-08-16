@@ -53,7 +53,7 @@ def snapshot(max_age: float = None) -> dict:
         # Every vendor, not just Claude. Friday conducted one agent on a machine
         # that had two, and the plan always said vendor-neutral.
         from . import agents
-        rows = agents.sessions()
+        rows = _named(agents.sessions())
         err = ""
     except Exception as e:
         rows, err = None, f"{type(e).__name__}: {e}"
@@ -65,6 +65,28 @@ def snapshot(max_age: float = None) -> dict:
             return _rows
         _at, _rows, _failed = now, rows, ""
         return _rows
+
+
+def _named(rows: dict) -> dict:
+    """Guarantee every session has something you can say out loud.
+
+    A row can arrive with an empty label: a vendor that could not work out a
+    name, a directory that is just a slash, a thread with no title. Downstream
+    everything uses the label to identify a session to YOU, so an empty one
+    printed as "- : Delete the production database?" and, worse, a bare "yes"
+    was routed to it. Approving something Friday cannot name back is a blind
+    approval.
+
+    Fixed here rather than at each display, because there are a dozen displays
+    and the next one will forget."""
+    for row in (rows or {}).values():
+        if not (row.get("label") or "").strip():
+            sid = (row.get("sid") or "").strip()
+            cwd = (row.get("cwd") or "").strip()
+            row["label"] = (cwd.rstrip("/").rsplit("/", 1)[-1] if cwd
+                            else "") or (f"session {sid[:8]}" if sid
+                                         else "an unnamed session")
+    return rows or {}
 
 
 def _refresh_once() -> None:
