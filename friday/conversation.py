@@ -149,9 +149,13 @@ _MOVE_RE = re.compile(
 _PLAN_RE = re.compile(
     r"^\s*(?:make|write|draft)?\s*a?\s*plan(?:\s+for\s+(\S+))?\s*[:,]\s*(.+)$",
     re.I | re.S)
+# "run the plan" always means the plan. A bare "approved" or "go ahead" only
+# means the plan if there IS one waiting: said with an agent blocked on a
+# question, it is an answer to the agent, and starting a plan instead is a
+# different action entirely from the one intended.
 _PLAN_GO_RE = re.compile(
-    r"\b(?:run|start|go ahead with|approve|do)\s+(?:the\s+)?plan\b|"
-    r"^\s*(?:approved|go ahead)\s*[.!]?\s*$", re.I)
+    r"\b(?:run|start|go ahead with|approve|do)\s+(?:the\s+)?plan\b", re.I)
+_PLAN_GO_BARE_RE = re.compile(r"^\s*(?:approved|go ahead)\s*[.!]?\s*$", re.I)
 _PLAN_WHERE_RE = re.compile(
     r"\b(?:where\s+(?:is|are)\s+(?:we|the plan)|how(?:'?s| is)\s+the\s+plan|"
     r"what'?s?\s+left|plan\s+status|show\s+(?:me\s+)?the\s+plan)\b", re.I)
@@ -251,7 +255,11 @@ _ASKED_RE = re.compile(r"\b(?:ask|reply to|answer)\b", re.I)
 _TELL_RE = re.compile(
     r"(?:^|\b)(?:go to|open)?\s*(?:the\s+)?(?:session\s+(?:of|called)\s+)?"
     r"(?:tell|ask|reply to|answer|send(?:\s+a\s+message)?\s+to|message)\s+"
-    r"(?:the\s+)?(?:session\s+)?([\w.\-]+)\s+"
+    # Quotes around the name are how people write one that reads as an
+    # ordinary word ("tell 'test' to stop"), and they stopped the name matching
+    # at all, so the whole sentence fell through to the model.
+    r"(?:the\s+)?(?:session\s+)?['\"`‘’“”]?([\w.\-]+)"
+    r"['\"`‘’“”]?\s+"
     r"(?:session\s+)?(?:that\s+|to\s+|about\s+)?(.+)$", re.I)
 _FIND_RE = re.compile(
     r"\b(?:find|search(?:\s+for)?|look for|which session|what session|"
@@ -419,8 +427,18 @@ _TELL_BACK_RE = re.compile(
     r"|(?!the\b|a\b|an\b|my\b|your\b|this\b|that\b)([\w.\-]+)\s+session)\b"
     r"[^.]*?\b(?:tell|ask|say to|message)\b\s*(.+)$", re.I)
 _NOISE_RE = re.compile(r"[\[\(][^\]\)]*[\]\)]|\W*", re.I)
-_YES_RE = re.compile(r"^\s*(yes|yeah|yep|sure|do it|go ahead|please|ok(ay)?)\b", re.I)
-_NO_RE = re.compile(r"^\s*(no|nope|cancel|stop|don'?t|never ?mind)\b", re.I)
+# A bare yes, and it has to be BARE. These matched the opening word and let the
+# rest of the sentence go, so "go ahead and restart the api server" was read as
+# "yes" and answered "Nothing was waiting on you". Anything with an instruction
+# attached is an instruction, and it should reach the parser that handles it or
+# the model, not the confirmation path.
+_YES_RE = re.compile(
+    r"^\s*(?:yes|yeah|yep|yup|sure|ok|okay|do it|go ahead|please|"
+    r"go for it|sounds good|approved|confirmed)"
+    r"(?:\s+(?:please|thanks|then|mate))?\s*[.!]?\s*$", re.I)
+_NO_RE = re.compile(
+    r"^\s*(?:no|nope|nah|cancel|stop|don'?t|do not|never ?mind|forget it)"
+    r"(?:\s+(?:please|thanks|thanks))?\s*[.!]?\s*$", re.I)
 _QUIET_RE = re.compile(r"^\s*(quiet|shush|be quiet|stop talking|silence)\b", re.I)
 _RESUME_RE = re.compile(r"^\s*(resume|unmute|you can talk|start talking)\b", re.I)
 
@@ -500,7 +518,9 @@ def classify(text: str) -> tuple:
         return PLAN, {"target": (m.group(1) or "").strip(),
                       "body": m.group(2).strip()}
     if _PLAN_GO_RE.search(t):
-        return PLAN_GO, {"stop": False}
+        return PLAN_GO, {"stop": False, "bare": False}
+    if _PLAN_GO_BARE_RE.match(t):
+        return PLAN_GO, {"stop": False, "bare": True}
     if _BRIEF_RE.search(t):
         return BRIEF, {}
     m = _ALLOW_RE.search(t)
@@ -867,6 +887,14 @@ class Friday:
         if intent == PLAN:
             return self._make_plan(payload["target"], payload["body"])
         if intent == PLAN_GO:
+            # A bare "approved" with no plan waiting is a plain yes, and the
+            # thing it is most likely answering is an agent. Running a plan
+            # instead would be a different action from the one intended, taken
+            # silently.
+            if payload.get("bare") and not (plans.active() or plans.latest()):
+                routed = self._bare_answer("yes")
+                if routed is not None:
+                    return routed
             return self._run_plan(payload.get("stop", False))
         if intent == PLAN_WHERE:
             return self._plan_status()
@@ -915,6 +943,11 @@ class Friday:
         routed = self._maybe_route_answer(text)
         if routed is not None:
             return routed
+        # A reference with nothing to refer to must not reach the model, which
+        # will answer it as a general question about a machine it cannot see.
+        nowhere = self._pointing_at_nothing(text)
+        if nowhere is not None:
+            return nowhere
         return self._chat(text)
 
     def _maybe_route_answer(self, text: str):
@@ -2946,10 +2979,36 @@ class Friday:
         msg, want = _phrase(msg, joiner, want)
         return found, msg, want, exact
 
+    # Words that are not an instruction on their own. "tell api to" left the
+    # dangling "to" as the message and sent it, so a sentence you stopped
+    # halfway through became a prompt typed into a running agent.
+    _NOT_AN_INSTRUCTION = {
+        "to", "that", "the", "a", "an", "it", "and", "or", "please", "then",
+        "this", "for", "about", "with", "of", "in", "on", "so", "just", "ok"}
+    # A second target inside the message. "tell api to deploy and tell web to
+    # build" sent api the words "deploy and tell web to build", which api reads
+    # as an instruction to go and do something to web.
+    _SECOND_TARGET_RE = re.compile(
+        r"\b(?:and\s+|then\s+|,\s*)?(?:tell|ask)\s+([\w.\-]{2,30})\s+"
+        r"(?:to\s+)?(.+)$", re.I)
+
     def _propose_tell(self, name: str, message: str,
                       want_answer: bool = False, said: str = "") -> dict:
+        # Quotes around a name are how people write one that sounds ordinary,
+        # and they stopped it being recognised at all.
+        name = (name or "").strip().strip("'\"`\u2018\u2019\u201c\u201d")
         name, message, want_answer, said_exactly = self._resplit(
             said, name, message, want_answer)
+        message = (message or "").strip()
+        bare = [w for w in re.findall(r"[\w']+", message.lower())
+                if w not in self._NOT_AN_INSTRUCTION]
+        if not bare:
+            who = name or self.target or "it"
+            return self._say(f"What should I say to {who}? I heard the name "
+                             f"but not the message.")
+        split = self._split_instructions(name, message)
+        if split is not None:
+            return split
         # "ask it to also run the tests": you already told me who, once.
         if _ITS_RE.match((name or "").strip()) or (name or "").lower() in \
                 _STANDS_FOR_SESSION:
@@ -3010,6 +3069,39 @@ class Friday:
                   f"Yes to do that, or say which.", needs_confirm=True)
         return self._say(f'Did you mean {hit.get("label", name)}? '
                          f'I\'ll send "{message}".', needs_confirm=True)
+
+    def _split_instructions(self, name: str, message: str):
+        """Notice a second instruction hiding inside the first.
+
+        "tell api to deploy and tell web to build" used to send api the words
+        "deploy and tell web to build". That is not a truncation, it is worse: a
+        coding agent reading "tell web to build" will try to do something about
+        web, so the second half does not vanish, it gets carried out by the
+        wrong agent.
+
+        Only fires when the second name is a session that actually exists, so
+        "tell api to build and tell me when it's done" is left alone: "me" is
+        not a session, and that sentence means one thing."""
+        m = self._SECOND_TARGET_RE.search(message)
+        if not m:
+            return None
+        other, rest = m.group(1).strip(), m.group(2).strip()
+        hit, _how = self._find_how(other)
+        if not hit or not rest:
+            return None
+        # strip(" ,.and") strips CHARACTERS, so "deploy" came out as "eploy".
+        # The conjunction has to go as a word.
+        first = re.sub(r"[\s,]*\b(?:and|then)\s*$", "",
+                       message[:m.start()]).strip(" ,.")
+        if not first:
+            return None
+        self.pending = {"kind": "two", "first": {"name": name, "text": first},
+                        "second": {"name": hit.get("label", other),
+                                   "sid": hit.get("sid", ""), "text": rest}}
+        return self._say(
+            f"That's two instructions. Send them separately?\n"
+            f"  {name}: {first}\n"
+            f"  {hit.get('label', other)}: {rest}", needs_confirm=True)
 
     def _same_named(self, label: str) -> list:
         """Every session sharing a name, newest first."""
@@ -3080,6 +3172,17 @@ class Friday:
                 ok = actions.new_session(act.get("about", ""))
                 return self._say("Started it in a new window." if ok else
                                  "I couldn't open a new window.")
+            if act["kind"] == "two":
+                out = []
+                for part in (act["first"], act["second"]):
+                    sid = part.get("sid")
+                    if not sid:
+                        hit, _how = self._find_how(part["name"])
+                        sid = hit.get("sid", "") if hit else ""
+                    ok = bool(sid) and actions.send_to_session(sid, part["text"])
+                    out.append(f"{part['name']}: "
+                               + ("sent" if ok else "couldn't reach it"))
+                return self._say("; ".join(out) + ".")
             if act["kind"] == "tell":
                 # Note where the transcript ends BEFORE sending, or the agent's
                 # answer cannot be told apart from what it said a minute ago.
@@ -3327,6 +3430,46 @@ class Friday:
                    if "jira or email" not in c.lower()]
         return can, cannot
 
+    # "the redis one", "that one", "the second one", "do that". A reference to
+    # something, and the something has to exist. Bounded to short utterances,
+    # because a long sentence carries enough of its own meaning to be answered
+    # even when it also contains "that one".
+    _POINTS_AT_RE = re.compile(
+        r"\b(?:the\s+\w+\s+one|the\s+(?:first|second|third|last|other)\b"
+        r"|that\s+one|this\s+one|the\s+one)\b|^\s*(?:do|use|try)\s+"
+        r"(?:that|it|this)\s*[.!?]?$", re.I)
+
+    def _pointing_at_nothing(self, text: str):
+        """Catch a reference whose referent does not exist.
+
+        "Use the redis one" means nothing on its own. It means something when an
+        agent has just offered you a choice, or when Friday has just listed
+        things. With nothing in play it used to fall through to the local model,
+        which would answer it as a general question and produce confident prose
+        about a machine it cannot see. That is the single worst failure mode
+        available here: an assistant that invents an answer about YOUR system is
+        worse than one that says it does not know, because you cannot tell the
+        difference from the reply.
+
+        Deliberately narrow. If anything is waiting, or Friday just spoke about
+        something, the reference has a plausible target and the normal routing
+        handles it. This only fires when there is genuinely nothing to point
+        at."""
+        if len(text.split()) > 12 or not self._POINTS_AT_RE.search(text):
+            return None
+        if self.target or self._waiting():
+            return None
+        try:
+            if fleetcache.snapshot():
+                return None      # something is running; routing can try
+        except Exception:
+            pass
+        return self._say(
+            "I don't know what that refers to. Nothing is running and nothing "
+            "has asked you anything, so there's no \"one\" for me to pick. "
+            "Say what you'd like me to do, or \"what's running\" to see "
+            "what's there.")
+
     def _chat(self, text: str) -> dict:
         """Real conversation, bounded by what Friday can actually do.
 
@@ -3365,7 +3508,22 @@ class Friday:
             "Rules: if asked for something in the CANNOT list, say plainly that "
             "you cannot do it yet, in one sentence, and do not speculate. If "
             "asked about something you have no fact for, say you do not know. "
-            "Never guess what an unfamiliar name or id means. Answer in one or "
+            "Never guess what an unfamiliar name or id means. "
+            # This reply cannot act. Anything that gets DONE is done by code
+            # before the model is ever called, so a model that says "I'll use
+            # Redis instead" has promised something nobody will carry out, and
+            # the user has no way to tell that from a real confirmation. Asked
+            # "use the redis one" with nothing running, it answered exactly
+            # that.
+            "You cannot take any action in this reply: you are not able to run "
+            "anything, change anything, or send anything from here. Never say "
+            "you will do something, are doing something, or have done "
+            "something. If asked to do something, say what you would need in "
+            "order to do it, or that you cannot. "
+            "If the user refers to a thing (\"the redis one\", \"that\", "
+            "\"the second one\") and no fact above says what it is, say you "
+            "do not know what it refers to; never pick one. "
+            "Answer in one or "
             "two short sentences, no lists, no markdown.")
         recent = [{"role": "user" if m["role"] == "user" else "assistant",
                    "content": m["text"]} for m in self.history[-6:]]
