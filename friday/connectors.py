@@ -1382,6 +1382,109 @@ class MCPConnector:
             return {"error": "not connected"}
         return c.call(tool, args)
 
+    # ---- looking like a tracker, when the server is one -------------------
+    # A read that lists work assigned to you. Matched by name because that is
+    # all a server reliably gives: descriptions are prose and schemas vary.
+    # Read verbs only, and never anything that could write: `create_issue` and
+    # `update_issue` cannot match these, which is the whole safety argument for
+    # calling a tool nobody wrote code for.
+    _MINE = re.compile(
+        r"^(?:[a-z]+_)?(?:list|search|get|find)_?(?:my_)?"
+        r"(?:issues?|tickets?|tasks?|work_?items?)$", re.I)
+
+    def _issue_tool(self) -> dict:
+        """The tool on this server that lists your work, if it has one.
+
+        Preference goes to one that needs no arguments, because guessing what
+        to put in a required field is how you call somebody's API wrongly and
+        get an answer that looks fine."""
+        best = None
+        for t in self.tools():
+            name = (t.get("name") or "")
+            if not self._MINE.match(name.split("/")[-1]):
+                continue
+            need = ((t.get("inputSchema") or {}).get("required") or [])
+            if not need:
+                return t
+            best = best or t
+        return best or {}
+
+    def my_issues(self, limit: int = 8) -> list:
+        """Your work, from a tracker Friday has no code for.
+
+        Best effort and honest about it: if the server does not answer in a
+        shape that has something ticket-like in it, this returns nothing rather
+        than a list of stringified JSON, because a list of stringified JSON read
+        out loud is worse than saying there is nothing."""
+        t = self._issue_tool()
+        if not t:
+            return []
+        if ((t.get("inputSchema") or {}).get("required") or []):
+            # It wants arguments and Friday does not know which. Filling them in
+            # by guessing means asking the wrong question and being told an
+            # answer, which is worse than asking nothing.
+            return []
+        got = self.call(t.get("name", ""))
+        if not isinstance(got, dict) or got.get("error"):
+            return []
+        return _as_issues(got, limit)
+
+
+# Where a tracker-shaped thing keeps each field, in the order to look. Servers
+# disagree about all three and there is no standard, so this is a list of the
+# names that actually turn up rather than a specification of anything.
+_KEY_FIELDS = ("key", "identifier", "id", "number", "iid", "shortId")
+_TITLE_FIELDS = ("summary", "title", "name", "text")
+_STATE_FIELDS = ("status", "state", "stateName", "workflowState")
+
+
+def _as_issues(got: dict, limit: int = 8) -> list:
+    """Whatever an MCP server returned, as tickets, or nothing.
+
+    MCP results wrap the real payload in a content list, sometimes as JSON in a
+    text block and sometimes as structured content, and the payload underneath
+    may be a list or a dict with the list inside it. Every layer here is a place
+    a server can differ, so each one gives up quietly rather than guessing."""
+    rows = got.get("structuredContent")
+    if rows is None:
+        for block in (got.get("content") or []):
+            if isinstance(block, dict) and block.get("type") == "text":
+                try:
+                    rows = json.loads(block.get("text") or "")
+                    break
+                except Exception:
+                    continue
+    if isinstance(rows, dict):
+        for field in ("issues", "results", "items", "nodes", "data", "tickets"):
+            if isinstance(rows.get(field), list):
+                rows = rows[field]
+                break
+    if not isinstance(rows, list):
+        return []
+    out = []
+    for r in rows[:limit]:
+        if not isinstance(r, dict):
+            continue
+        fields = (r.get("fields") if isinstance(r.get("fields"), dict) else r)
+        def _pick(names, src=fields):
+            for n in names:
+                v = src.get(n)
+                if isinstance(v, dict):
+                    v = v.get("name") or v.get("value")
+                if isinstance(v, (str, int)) and str(v).strip():
+                    return str(v).strip()
+            return ""
+        title = _pick(_TITLE_FIELDS) or _pick(_TITLE_FIELDS, r)
+        key = _pick(_KEY_FIELDS, r) or _pick(_KEY_FIELDS)
+        if not title:
+            # Nothing ticket-shaped in it. Returning the raw dict as a "ticket"
+            # is how you end up reading JSON out loud.
+            continue
+        out.append({"key": key, "summary": title,
+                    "status": _pick(_STATE_FIELDS) or "open",
+                    "url": _pick(("url", "web_url", "permalink", "link"), r)})
+    return out
+
 
 def mcp_servers() -> dict:
     """Configured MCP servers as connector objects, by name."""

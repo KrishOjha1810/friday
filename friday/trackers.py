@@ -18,10 +18,14 @@ and anything missing on another tracker is filled in here rather than being
 faked there.
 
 The long tail is real and it is not solved by writing more classes. There are
-dozens of trackers and somebody uses each of them. The answer is that any
-tracker with an MCP server already plugs in through `connectors.mcp_servers()`,
-and `is_tracker()` below recognises one by the verbs it answers rather than by
-its name, so a tracker Friday has never heard of works the moment you add it.
+dozens of trackers and somebody uses each of them. So `is_tracker()` below
+recognises one by the verbs it answers rather than by its name, and
+`MCPConnector` answers those verbs by finding a read tool on the server and
+calling it: a tracker Friday has no code for works the moment you connect it.
+
+That claim was written here before it was true. The MCP wrapper had no read verb
+at all, so no MCP server was ever recognised, and the sentence sat in this
+docstring being wrong. Worth remembering when reading the rest of these files.
 """
 
 from . import connectors

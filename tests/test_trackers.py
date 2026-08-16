@@ -22,6 +22,8 @@ from sandbox import use_temp_config  # noqa: E402
 
 use_temp_config()
 
+import json  # noqa: E402
+
 from friday import connectors, trackers  # noqa: E402
 
 
@@ -219,6 +221,95 @@ def test_a_state_nobody_has_is_refused_rather_than_guessed():
     finally:
         connectors.allow_write(False)
         connectors.gh_allow_write(False)
+
+
+# ---- a tracker nobody wrote code for --------------------------------------
+class _MCP(connectors.MCPConnector):
+    """An MCP server, with its tool list and answer under our control."""
+
+    def __init__(self, tools, answer=None):
+        super().__init__("someserver")
+        self._tools = tools
+        self._answer = answer or {}
+        self.called = []
+
+    def ready(self):
+        return True
+
+    def tools(self):
+        return self._tools
+
+    def call(self, tool, **args):
+        self.called.append((tool, args))
+        return self._answer
+
+
+def _payload(rows):
+    return {"content": [{"type": "text", "text": json.dumps(rows)}]}
+
+
+def test_an_mcp_server_that_lists_issues_is_a_tracker():
+    """The claim that any tracker with an MCP server plugs in unwritten was
+    false when it was first written: the wrapper had no read verb at all, so
+    no MCP server was ever recognised as a tracker."""
+    c = _MCP([{"name": "list_issues", "inputSchema": {}}],
+             _payload([{"identifier": "ENG-4", "title": "Fix the parser",
+                        "state": {"name": "In Progress"}}]))
+    assert trackers.is_tracker(c)
+    got = c.my_issues()
+    assert got == [{"key": "ENG-4", "summary": "Fix the parser",
+                    "status": "In Progress", "url": ""}], got
+
+
+def test_it_will_not_call_a_tool_that_writes():
+    """Calling a tool nobody wrote code for is only safe because the names it
+    matches cannot create or change anything."""
+    c = _MCP([{"name": "create_issue", "inputSchema": {}},
+              {"name": "update_issue", "inputSchema": {}},
+              {"name": "delete_ticket", "inputSchema": {}},
+              {"name": "issues_create", "inputSchema": {}}])
+    assert c._issue_tool() == {}, c._issue_tool()
+    assert c.my_issues() == []
+    assert c.called == [], c.called
+
+
+def test_it_will_not_guess_required_arguments():
+    """Filling in a required field by guessing means asking the wrong question
+    and being told an answer, which is worse than asking nothing."""
+    c = _MCP([{"name": "search_issues",
+               "inputSchema": {"required": ["jql"]}}],
+             _payload([{"title": "something"}]))
+    assert c.my_issues() == []
+    assert c.called == [], "called it anyway"
+
+
+def test_it_prefers_the_tool_that_needs_nothing():
+    c = _MCP([{"name": "search_tickets", "inputSchema": {"required": ["q"]}},
+              {"name": "list_my_tasks", "inputSchema": {}}],
+             _payload([{"title": "a task"}]))
+    assert c._issue_tool()["name"] == "list_my_tasks"
+
+
+def test_an_answer_it_cannot_read_is_nothing_not_noise():
+    """A list of stringified JSON read out loud is worse than being told there
+    is nothing."""
+    c = _MCP([{"name": "list_issues", "inputSchema": {}}],
+             _payload([{"nothing": "ticket shaped"}, "just a string", 7]))
+    assert c.my_issues() == []
+
+
+def test_it_reads_the_shapes_servers_actually_use():
+    """Every layer here is somewhere servers differ: the wrapper, whether the
+    payload is a list or a dict with the list inside, and what the fields are
+    called."""
+    rows = [{"key": "ENG-5", "fields": {"summary": "Ship it",
+                                        "status": {"name": "Todo"}}}]
+    for wrapped in ({"structuredContent": rows},
+                    _payload(rows),
+                    {"structuredContent": {"issues": rows}},
+                    {"structuredContent": {"nodes": rows}}):
+        got = connectors._as_issues(wrapped)
+        assert got and got[0]["summary"] == "Ship it", (wrapped, got)
 
 
 if __name__ == "__main__":
