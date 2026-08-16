@@ -32,7 +32,7 @@ from pathlib import Path
 from . import (actions, agents, budget as budgets, connectors, engine,
                feeds,
                fleetcache, inbox, memory, nearest, plan as plans,
-               push, replies, trackers, watchtower, when)
+               learn, push, replies, trackers, watchtower, when)
 
 # What kind of thing the user just said.
 ASK_FLEET = "fleet"        # "what's running", "who needs me"
@@ -68,6 +68,7 @@ ALLOW = "allow"            # "let yourself post to slack"
 NEXT = "next"              # "what should I work on?"
 FIRE = "fire"              # "what's on fire?"
 HELP = "help"              # "what can you do?"
+LEARNED = "learned"        # "what have you learned?" / "forget that"
 PLAN_ASK = "plan_ask"      # "work out a plan for adding OAuth"
 TRACKER_PREF = "tracker_pref"   # "use linear for tickets"
 SCHEDULE = "schedule"      # "put it in for Thursday at 4"
@@ -337,6 +338,12 @@ _PLAN_ASK_RE = re.compile(
     r"|\bask\s+(\S+)\s+(?:for|to (?:make|write|draw up))\s+a plan\s+"
     r"(?:for|to|on)\s+(.+)$"
     r"|\bhow (?:should|would) (?:we|i|you)\s+(.+)$", re.I)
+# A learned preference you cannot see or clear is a bug you cannot fix.
+_LEARNED_RE = re.compile(
+    r"\bwhat have you learn(?:ed|t)\b|\bwhat do you think i (?:care|don'?t care)\b"
+    r"|\bwhy (?:are you|have you been) (?:so )?quiet about\s+(.+?)\s*[.?!]?$"
+    r"|\b(forget) what you(?:'?ve)? learn(?:ed|t)(?:\s+about\s+(.+?))?\s*[.?!]?$",
+    re.I)
 _HELP_RE = re.compile(
     # Bare "help" is anchored at both ends: "help me file a ticket" is a request
     # to file a ticket, and answering it with a menu is the assistant equivalent
@@ -572,6 +579,10 @@ def classify(text: str) -> tuple:
         srcs = [x for x in srcs if x]
         return READ_CHANNEL, {"channel": srcs[-1] if srcs else "",
                               "said": t}
+    m = _LEARNED_RE.search(t)
+    if m:
+        return LEARNED, {"about": (m.group(1) or m.group(3) or "").strip(),
+                         "forget": bool(m.group(2))}
     if _HELP_RE.search(t):
         return HELP, {}
     m = _PLAN_ASK_RE.search(t)
@@ -675,6 +686,9 @@ class Friday:
         # when it's done" are how people speak once a session is in play, and
         # making you say the name every time is making you do the bookkeeping.
         self.target = ""
+        # What Friday has mentioned lately, so that doing something about one of
+        # them shortly after can be told apart from ordinary work.
+        self._told = {}
         self.quiet = False         # Friday's own switch, independent of vb's
         # Whether you are looking at the page. Pushing to a phone something
         # already on the screen in front of you is how a notification
@@ -834,6 +848,9 @@ class Friday:
             return self._what_next()
         if intent == PLAN_ASK:
             return self._ask_for_plan(payload["goal"], payload.get("target", ""))
+        if intent == LEARNED:
+            return self._learned(payload.get("about", ""),
+                                 payload.get("forget", False))
         if intent == HELP:
             return self._help()
         if intent == FIRE:
@@ -910,6 +927,8 @@ class Friday:
             return None
         label = r.get("label") or "it"
         ok = actions.send_to_session(sid, text)
+        if ok:
+            self._acted_on(label)
         return self._say(f"Told {label}." if ok
                          else f"I couldn't reach {label}.",
                          action={"kind": "tell", "sid": sid})
@@ -1057,6 +1076,26 @@ class Friday:
         return self._say("\n- ".join(["Here's where everything stands:"] + lines)
                          if lines else "Nothing is running and nothing is "
                                        "waiting.")
+
+    ACTED_WITHIN = 900        # a quarter of an hour counts as "about that"
+
+    def _acted_on(self, label: str, kind: str = "") -> None:
+        """You did something about a thing Friday mentioned.
+
+        Only counted when it was actually mentioned recently. Replying to a
+        session you have been working in all morning is not evidence that
+        Friday's notifications are useful, and counting it would teach Friday
+        that everything it says lands."""
+        if not label:
+            return
+        now = time.time()
+        for k, when in list(self._told.items()):
+            if now - when > self.ACTED_WITHIN:
+                self._told.pop(k, None)
+                continue
+            if k.split(":", 1)[-1] == label.strip().lower():
+                learn.acted(k)
+                self._told.pop(k, None)
 
     def _tell_person(self, who: str, text: str) -> bool:
         """Send a plan step to a colleague, if Friday is allowed to.
@@ -1753,6 +1792,10 @@ class Friday:
         if not sid:
             return self._no_session(name, lambda n: self._mute(n, on))
         self.watch.mute(sid, on)
+        # The only signal you give deliberately, so it counts for more than a
+        # run of notifications you happened not to answer.
+        for kind in ("blocked", "spoke"):
+            (learn.never_again if on else learn.forget)(f"{kind}:{target.lower()}")
         return self._say(f"I won't mention {target} again until you say "
                          f"\"unmute {target}\"." if on else
                          f"Telling you about {target} again.")
@@ -2891,6 +2934,8 @@ class Friday:
                     except Exception:
                         mark = ""
                 ok = actions.send_to_session(act["sid"], act["message"])
+                if ok:
+                    self._acted_on(act.get("label", ""))
                 if ok and act.get("await") and act.get("path"):
                     # The watchtower is already reading this session, so let it
                     # do the reporting. Two watchers means saying it twice.
@@ -2980,6 +3025,53 @@ class Friday:
         "start a brand new session, or write code itself",
         "see INSIDE another person's sessions on this Mac",
     ]
+
+    def _learned(self, about: str = "", forget: bool = False) -> dict:
+        """What Friday thinks it has worked out about you, and how to undo it.
+
+        The whole reason a learned attention model is acceptable here rather
+        than creepy: it is counts of two things, you can read them, and you can
+        delete them. The day it decides wrongly that you do not care about
+        something, the only acceptable answer is a way to say otherwise."""
+        if forget:
+            if not about:
+                learn.forget()
+                return self._say("Forgotten. I'll go back to telling you about "
+                                 "everything until I have a reason not to.")
+            hits = [r["key"] for r in learn.summary(limit=50)
+                    if about.strip().lower() in r["key"]]
+            for k in hits:
+                learn.forget(k)
+            return self._say(
+                f"Forgotten what I'd learned about {about}."
+                if hits else f"I hadn't learned anything about {about}.")
+        if about:
+            hits = [r for r in learn.summary(limit=50)
+                    if about.strip().lower() in r["key"]]
+            if not hits:
+                return self._say(f"Nothing I've learned is making me quieter "
+                                 f"about {about}. If you're not hearing about "
+                                 f"it, it's the rules rather than a habit.")
+            r = hits[0]
+            return self._say(
+                f"{r['why']} So I've been treating it as less urgent. Say "
+                f"\"forget what you learned about {about}\" to undo that.")
+        rows = learn.summary()
+        if not rows:
+            return self._say("Nothing yet. I need to mention something a few "
+                             "times before what you do about it means anything.")
+        lines = []
+        for r in rows:
+            kind, _, name = r["key"].partition(":")
+            verdict = ("you act on this" if r["score"] > 0.3
+                       else "you don't act on this" if r["score"] < -0.3
+                       else "no strong view")
+            lines.append(f"{name}: {verdict}. {r['why']}")
+        return self._say(
+            "What I've picked up:\n- " + "\n- ".join(lines)
+            + "\n\nIt only ever makes me quieter, never louder, and never "
+              "about a session that's waiting on you. Say \"forget what you "
+              "learned\" to clear it.")
 
     def _help(self) -> dict:
         """What Friday can do, answered without the model.
@@ -3325,6 +3417,15 @@ class Friday:
         # to naming a session you were just told about.
         if items and len(items) == 1:
             self.target = items[0].get("label") or self.target
+        # What was mentioned, and when, so that acting on it shortly afterwards
+        # can be recognised as acting on it. Without the timestamp any later
+        # mention of the same session would count, and everything would look
+        # interesting.
+        for it in (items or []):
+            k = learn.key_for(it)
+            if k:
+                learn.saw(k)
+                self._told[k] = time.time()
         self._maybe_push(text, items)
         return self.add("friday", text, kind="proactive", about=items)
 

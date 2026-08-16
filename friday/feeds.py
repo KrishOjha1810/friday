@@ -164,7 +164,14 @@ class Feeds:
         said, rest, batch = 0, [], []
         for it in fresh:
             self.seen.add(it["key"])
-            urgency = it.get("urgency", 1)
+            # What you actually do about this kind of thing. It can only push
+            # an item DOWN a tier, so the worst it does is make something wait
+            # for "what did I miss" instead of interrupting. It never touches
+            # urgency 0.
+            from . import learn
+            urgency = learn.adjust(it.get("urgency", 1),
+                                   learn.key_for({"kind": it.get("source", ""),
+                                                  "label": it.get("source", "")}))
             spendable = (self.budget.allow(urgency) if self.budget
                          else said < PER_ROUND)
             if said < PER_ROUND and spendable:

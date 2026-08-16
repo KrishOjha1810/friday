@@ -159,6 +159,8 @@ you are already signed in to.
 | `work out a plan for <goal>` | the agent writes the steps, you approve before any run |
 | `plan: api: migrate; web: rebuild; sam: sign off` | one plan across the fleet, agents in parallel, people as tracks |
 | `help` | the six commands that work before you connect anything |
+| `what have you learned?` | what Friday thinks you ignore, in counts you can argue with |
+| `forget what you learned` | undo it, all of it or one thing |
 | `file a ticket: the parser dies on PDFs` | Jira, Linear, or GitHub issues with no setup at all |
 | `move PROJ-12 to done` | moves it, matching the states that exist |
 | `put it in for Thursday at 4` | into your calendar, after reading the time back |

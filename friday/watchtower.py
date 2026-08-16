@@ -235,6 +235,13 @@ class Watchtower:
         if q and q[:40] not in short:
             short = short.rstrip(".") + f". It's asking: {q}"
         urgency = 0 if q else 1
+        # A session you never do anything about after being told costs a tier,
+        # so it waits for "what did I miss" rather than interrupting. A session
+        # that is ASKING you something is untouchable, which learn.adjust
+        # enforces rather than trusting this caller.
+        from . import learn
+        urgency = learn.adjust(urgency, learn.key_for(
+            {"kind": "blocked" if q else "spoke", "label": label}))
         if row.get("sid") and row["sid"] == self._looking_at():
             # You are watching this window. It said it on your screen a moment
             # ago; repeating it here is noise with extra steps. Not held

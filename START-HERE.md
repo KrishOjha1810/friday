@@ -42,6 +42,7 @@ running agents, so anyone with that link can drive your machine.
 
 ```
 help                           the short list, works before anything is set up
+what have you learned?         what it has picked up about what you ignore
 what should I work on?         one thing to start with, and why
 what are my tickets?           across Jira, Linear, GitHub and GitLab at once
 use linear for tickets         say once where new ones go
