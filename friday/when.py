@@ -79,8 +79,30 @@ def parse(text: str, today: _dt.date = None) -> tuple:
 _CLOCK = re.compile(
     r"\b(?:at\s+)?(\d{1,2})(?::(\d{2}))?\s*(am|pm|a\.m\.|p\.m\.)?\b", re.I)
 _DAY_WORD = re.compile(
-    r"\b(today|tomorrow|monday|tuesday|wednesday|thursday|friday|saturday|"
-    r"sunday)\b", re.I)
+    r"\b(today|tomorrow|tonight|monday|tuesday|wednesday|thursday|friday|"
+    r"saturday|sunday)\b", re.I)
+# A day that was named and NOT understood. "the 31st of February", "on the
+# 14th", "next month", "yesterday": each of these says plainly which day is
+# meant, and none of them is a day word. With no day word found the parser fell
+# through to today, so "the 31st of February at 4" and "yesterday at 4" both
+# quietly became today at 16:00. A meeting in the wrong slot is worse than one
+# you had to type yourself, and a date in the PAST is not a slot at all.
+_A_DAY_WAS_MEANT = re.compile(
+    r"\b(?:yesterday|last\s+\w+|next\s+(?:week|month|year)|"
+    r"\d{1,2}(?:st|nd|rd|th)|"
+    r"jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|"
+    r"jul(?:y)?|aug(?:ust)?|sep(?:tember)?|oct(?:ober)?|nov(?:ember)?|"
+    r"dec(?:ember)?|\d{1,2}/\d{1,2})\b", re.I)
+
+
+def names_a_day(text: str) -> bool:
+    """Whether the sentence tried to say which day.
+
+    So a refusal can tell you which kind it was. "When?" in answer to
+    "yesterday at 4" is baffling, because you did say when: Friday read it and
+    would not use it."""
+    low = (text or "").lower()
+    return bool(_DAY_WORD.search(low) or _A_DAY_WAS_MEANT.search(low))
 
 
 def moment(text: str, now: _dt.datetime = None) -> tuple:
@@ -95,14 +117,22 @@ def moment(text: str, now: _dt.datetime = None) -> tuple:
     now = now or _dt.datetime.now()
     low = text.lower()
 
-    day = None
-    m = _DAY_WORD.search(low)
-    if m:
-        word = m.group(1)
-        if word == "today":
-            day = now.date()
+    day, said_today, evening = None, False, False
+    # Named separately from the clock match below, which reuses `m` in its own
+    # loop: sharing the name meant a later check read the clock match and
+    # silently did nothing.
+    dm = _DAY_WORD.search(low)
+    if dm:
+        word = dm.group(1)
+        if word in ("today", "tonight"):
+            day, said_today = now.date(), True
+            evening = word == "tonight"
         elif word == "tomorrow":
             day = now.date() + _dt.timedelta(days=1)
+        elif re.search(r"\blast\s+" + word + r"\b", low):
+            # "last Tuesday" is a day that has gone. Reading it as next Tuesday
+            # puts the meeting a week from the one you meant.
+            return 0, ""
         else:
             want = _DAYS[word]
             ahead = (want - now.weekday()) % 7
@@ -123,13 +153,27 @@ def moment(text: str, now: _dt.datetime = None) -> tuple:
             h = 0
         elif not mer and h <= 7:
             h += 12
+        elif not mer and evening and h < 12:
+            h += 12          # "tonight at 8" is not eight in the morning
         hour, minute = h, int(m.group(2) or 0)
         break
 
     if hour is None:
         return 0, ""
+    if day is None and _A_DAY_WAS_MEANT.search(low):
+        # You named a day and Friday could not read it. Refusing is the only
+        # honest answer: assuming today puts the meeting on a day nobody asked
+        # for, and it looks exactly like a correct answer.
+        return 0, ""
     day = day or now.date()
     when = _dt.datetime.combine(day, _dt.time(hour, minute))
     if when < now:
+        # Only a bare time rolls forward to tomorrow, which is what "at 4" said
+        # in the evening means. A day that was named explicitly and has already
+        # gone is a mistake, not tomorrow.
+        if said_today or day != now.date():
+            # "Today at 9" said at six in the evening is a mistake, not
+            # tomorrow morning, and neither is a day you named that has gone.
+            return 0, ""
         when += _dt.timedelta(days=1)
     return when.timestamp(), when.strftime("%A %-d %B at %H:%M")

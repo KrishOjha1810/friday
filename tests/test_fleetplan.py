@@ -332,6 +332,49 @@ def test_the_agents_really_do_work_at_the_same_time():
     assert api[1] - api[0] > 0.3, f"piled two onto one agent: {api}"
 
 
+def test_a_rotated_transcript_is_still_evidence():
+    """Evidence is a count of what the agent has said. Requiring that count to
+    go UP meant a transcript rotated or truncated mid-step, which is ordinary
+    for a live file, looked like silence: the step waited the full fifteen
+    minutes and then blamed the agent."""
+    import json
+    import threading
+
+    room = Path(__file__).resolve().parent
+    from sandbox import use_temp_config as _u
+    tmp = _u()
+    path = tmp / "rot.jsonl"
+
+    def write(count, tag):
+        with open(path, "w") as fh:
+            for i in range(count):
+                fh.write(json.dumps({"type": "assistant", "message": {
+                    "content": [{"type": "text",
+                                 "text": f"{tag}{i}"}]}}) + "\n")
+
+    write(5, "before")
+    turns = [0]
+
+    def send(sid, text):
+        turns[0] += 1
+        # Rotated smaller on the first reply, grown on the second.
+        write(2 if turns[0] == 1 else 7, f"turn{turns[0]}")
+        return True
+
+    r = plans.Runner(announce=lambda *a, **k: None, send=send,
+                     look=lambda sid: {"status": "idle", "question": "",
+                                       "path": str(path), "vendor": "claude",
+                                       "sid": sid})
+    r.POLL, r.SETTLE, r.STEP_TIMEOUT = 0.05, 0.1, 3
+    pid = plans.create("rot", "api", ["one", "two"], sid="s1")
+    started = time.time()
+    r.start(pid)
+    while r.running and time.time() - started < 15:
+        time.sleep(0.05)
+    got = plans.get(pid)
+    assert got["state"] == plans.DONE, (got["state"], got["steps"])
+
+
 if __name__ == "__main__":
     for name, fn in sorted(globals().items()):
         if name.startswith("test_") and callable(fn):

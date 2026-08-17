@@ -137,3 +137,61 @@ if __name__ == "__main__":
         if name.startswith("test_") and callable(fn):
             fn()
     print("ok  scheduling: refuses when unsure, and reads the time back first")
+
+
+# ---- a day it cannot read is not today -------------------------------------
+def test_a_date_it_cannot_read_is_refused_not_assumed():
+    """"The 31st of February at 4" and "yesterday at 4" both became TODAY at
+    16:00. The parser found no weekday word, fell through to today, and read
+    the 4. A meeting in the wrong slot is worse than one you had to type
+    yourself, and this one looks exactly like a correct answer."""
+    import datetime as _dt
+    from friday import when as _w
+    now = _dt.datetime(2026, 8, 17, 9, 0)          # a Monday morning
+    for said in ("put it in for the 31st of February at 4",
+                 "put it in for yesterday at 4",
+                 "put it in for last Tuesday at 4",
+                 "put it in for the 14th at 4",
+                 "put it in for March at 4"):
+        stamp, reads = _w.moment(said, now)
+        assert stamp == 0, (said, reads)
+
+
+def test_a_time_today_that_has_gone_is_a_mistake_not_tomorrow():
+    """"Today at 9" said at six in the evening means you misspoke. Rolling it
+    forward books tomorrow morning under the word "today"."""
+    import datetime as _dt
+    from friday import when as _w
+    evening = _dt.datetime(2026, 8, 17, 18, 0)
+    assert _w.moment("today at 9am", evening)[0] == 0
+    # A bare time with no day is the one that legitimately rolls forward: "at
+    # 4" said in the evening means tomorrow afternoon.
+    assert _w.moment("at 4", evening)[0] > 0
+
+
+def test_the_ordinary_ways_of_saying_it_still_work():
+    """The guard is worthless if it costs the feature."""
+    import datetime as _dt
+    from friday import when as _w
+    morning = _dt.datetime(2026, 8, 17, 9, 0)      # Monday
+    for said, want in (("Thursday at 4", "Thursday"),
+                       ("tomorrow at 10:30am", "Tuesday"),
+                       ("friday 2pm", "Friday"),
+                       ("tonight at 8", "Monday"),
+                       ("today at 9am", "Monday")):
+        stamp, reads = _w.moment(said, morning)
+        assert stamp and reads.startswith(want), (said, reads)
+    # "Tonight at 8" is not eight in the morning.
+    assert "20:00" in _w.moment("tonight at 8", morning)[1]
+
+
+def test_it_says_which_way_the_date_failed():
+    """"When?" in answer to "yesterday at 4" is baffling: you did say when, and
+    Friday read it and refused. The two cases need different things from you."""
+    f = Friday()
+    f.announce = lambda *a, **k: None
+    vague = f.handle("schedule a meeting")["reply"]
+    unusable = f.handle("put it in for yesterday at 4")["reply"]
+    assert "When?" in vague, vague
+    assert "When?" not in unusable, unusable
+    assert "gone" in unusable or "understand" in unusable, unusable

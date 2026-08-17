@@ -705,6 +705,7 @@ class Runner:
         # agent answering "Done." to two steps in a row was invisible the second
         # time.
         before = agents.tally(info)
+        before_text = agents.last_said(info)
         # A question the session was ALREADY sitting on is not an answer to a
         # prompt that has not been sent yet. Taken as one, the first poll after
         # the send held the step instantly, with the prompt already delivered
@@ -748,7 +749,13 @@ class Runner:
                 return False
             if path:
                 said = agents.last_said(live)
-                if agents.tally(live) > before:
+                # CHANGED, not merely greater. Transcripts get rotated and
+                # truncated, and a count that goes DOWN is still the file
+                # changing under us; requiring an increase meant a rotation
+                # mid-step waited the full fifteen minutes and then blamed the
+                # agent for silence. The text is the second signal, for a file
+                # rewritten to the same length.
+                if agents.tally(live) != before or (said and said != before_text):
                     # Wait for it to STOP talking, the same way the watchtower
                     # and wait_for_reply already do. Without this, an agent's
                     # first "Let me look at that" completes the step and the

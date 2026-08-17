@@ -1705,6 +1705,14 @@ class Friday:
                              "Say \"connect calendar\" and allow it.")
         stamp, reads = when.moment(said)
         if not stamp:
+            # Say WHICH way it failed. "When?" in answer to "yesterday at 4" is
+            # baffling: you did say when, and Friday read it and refused. The
+            # two cases need different things from you.
+            if when.names_a_day(said):
+                return self._say(
+                    "I read a day in that but not one I can use: it may have "
+                    "gone already, or it isn't a date I understand. Give me a "
+                    "weekday and a time, like \"Thursday at 4\".")
             return self._say("When? Tell me a day and a time, like \"Thursday "
                              "at 4\", and I'll put it in.")
         # What it is ABOUT: whoever asked, if anybody did.
