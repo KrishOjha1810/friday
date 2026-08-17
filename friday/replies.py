@@ -17,6 +17,7 @@ was asked to talk to. It never goes looking through anyone else's.
 
 import json
 import os
+import re
 import time
 
 # How much of the tail to read. Transcripts run to many megabytes, and the only
@@ -77,19 +78,41 @@ def last_said(path: str) -> str:
     return msgs[-1][2] if msgs else ""
 
 
+# Marks an assistant turn, in either transcript dialect, without parsing.
+_SPOKE = re.compile(rb'"(?:type|role)"\s*:\s*"assistant"')
+
+
 def tally(path: str) -> int:
-    """How many assistant messages the transcript holds.
+    """How many times the agent has spoken, over the WHOLE file.
 
     Position, not content. "Has it said something new" was answered by
     comparing text, so an agent replying "Done." twice looked silent the second
     time and the plan waited fifteen minutes for a reply it already had.
 
-    ASSISTANT messages only, matching the docstring and matching what
-    wait_for_reply counts. Counting every message meant the two disagreed by
-    however many times you had spoken, so the marker always looked stale and an
-    old reply was returned as though it were new."""
+    The whole file, not the tail, and this is the part that matters. Counting
+    within a 200KB tail gives a number that goes DOWN when the file grows:
+    Friday appends its own prompt, an old message falls out of the window, and
+    the count drops. Any check for "the count changed" then fires immediately,
+    on Friday's own writing, and a whole multi-step plan completed against an
+    agent that never worked. On a long-lived session that is most sends.
+
+    A byte scan rather than a parse, because this runs on every poll and the
+    files run to many megabytes: counting a marker is milliseconds where
+    decoding the JSON is not."""
     try:
-        return len([m for m in _messages(path) if m[1] == "assistant"])
+        n = 0
+        with open(path, "rb") as f:
+            while True:
+                chunk = f.read(1 << 20)
+                if not chunk:
+                    return n
+                # Read whole lines, so a marker split across two chunks is not
+                # missed and not counted twice.
+                tail = b""
+                if not chunk.endswith(b"\n"):
+                    extra = f.readline()
+                    chunk += extra
+                n += len(_SPOKE.findall(chunk + tail))
     except Exception:
         return 0
 
@@ -115,16 +138,25 @@ def wait_for_reply(path: str, marker: str, timeout: float = 120,
     and returning the first of those gives you 'Let me look' instead of the
     answer."""
     deadline = time.time() + timeout
-    was, _, was_text = (marker or "").partition("|")
-    try:
-        before = int(was)
-    except ValueError:
-        before, was_text = -1, marker or ""      # an old-style marker
+    was, sep, was_text = (marker or "").partition("|")
+    # By the separator, not by whether the left half parses as a number. A
+    # pre-fix marker whose text happened to be digits became a bogus count, and
+    # the reply already on screen was handed back as the answer.
+    if sep:
+        try:
+            before = int(was)
+        except ValueError:
+            before, was_text = -1, marker or ""
+    else:
+        before, was_text = -1, marker or ""
     last, last_seen_at = "", 0.0
     while time.time() < deadline:
         msgs = [m for m in _messages(path) if m[1] == "assistant"]
         newest = msgs[-1][2] if msgs else ""
-        moved = len(msgs) != before if before >= 0 else False
+        # GREATER, not different. A count that falls means the file was
+        # rotated, and the words are the discriminator there; treating a fall
+        # as a new reply handed back the previous one.
+        moved = tally(path) > before if before >= 0 else False
         if newest and (moved or newest[:200] != was_text):
             if newest != last:
                 last, last_seen_at = newest, time.time()

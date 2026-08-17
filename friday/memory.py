@@ -161,6 +161,30 @@ def by_project(name: str, limit: int = 5) -> list:
     return out[:limit]
 
 
+_PEEKS = {}
+
+
+def _peek(path):
+    """Every line of a transcript, cached on (mtime, size).
+
+    The scoring pass is cached and this one was not, so a repeat search re-read
+    the whole corpus while the pass beside it cost nothing. That is fine at
+    fifty megabytes and about two and a half seconds per gigabyte, paid on
+    every single query, and a real projects directory gets there."""
+    try:
+        st = path.stat()
+        key = (str(path), st.st_mtime, st.st_size)
+    except OSError:
+        return []
+    got = _PEEKS.get(key)
+    if got is None:
+        got = list(_texts(path))
+        if len(_PEEKS) > 400:
+            _PEEKS.clear()          # bounded, and cheap to rebuild
+        _PEEKS[key] = got
+    return got
+
+
 def _cwd_of(d) -> str:
     """The working directory a project directory was named for.
 
@@ -177,7 +201,12 @@ def _cwd_of(d) -> str:
         for f in sorted(d.glob("*.jsonl"),
                         key=lambda p: p.stat().st_mtime, reverse=True)[:3]:
             with open(f, "r", errors="ignore") as fh:
-                for _n, line in zip(range(40), fh):
+                # No line limit. Forty lines is a guess about where the field
+                # sits, and when it sat on line sixty-one this fell back to the
+                # lossy decode this function exists to replace. The scan stops
+                # at the first cwd it finds, so the usual case still costs one
+                # line.
+                for line in fh:
                     if '"cwd"' not in line:
                         continue
                     try:
@@ -298,7 +327,7 @@ def search(query: str, limit: int = 5) -> list:
         # alone, and the loser was returned with four matched terms and an
         # empty snippet to show for them.
         first_user, best_line, phrase = "", "", False
-        for role, text in _texts(path):
+        for role, text in _peek(path):
             low = text.lower()
             if not first_user and role == "user" and len(text) > 12:
                 first_user = text[:110]

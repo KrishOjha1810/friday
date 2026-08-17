@@ -168,10 +168,20 @@ class Watchtower:
             # be mentioned or even held. It was invisible.
             if asking and self.asked.get(sid) != asking:
                 self.asked[sid] = asking
-                self.pending[sid] = (text or f"needs you: {asking}", now)
+                # The question alone when it has said nothing else. The
+                # fallback used to be "needs you: <question>", which the lead
+                # then prefixed again: "api needs you: needs you: Continue?".
+                self.pending[sid] = (text or asking, now)
                 continue
             if not asking:
                 self.asked.pop(sid, None)
+            if asking and sid in self.pending and not text:
+                # A session that hit a permission prompt before saying anything
+                # has no text at all. The line below would overwrite the
+                # "needs you" fallback with an empty string AND restart the
+                # settle timer every tick, so the one case that fallback exists
+                # for was announced late and with an empty body.
+                continue
             if not text or text == self.seen.get(sid):
                 # UNLESS it is waiting on you and has not been reported yet.
                 # The line above deleted the entry the blocked branch had just

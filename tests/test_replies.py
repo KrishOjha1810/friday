@@ -120,6 +120,42 @@ def test_the_same_words_twice_is_still_a_new_reply():
         assert got == "Done.", repr(got)
 
 
+def test_fridays_own_prompt_is_not_the_agent_answering():
+    """The count was taken over a 200KB tail, so appending Friday's prompt
+    pushed an old message out of the window and the count went DOWN. Any check
+    for "the count changed" then fired on Friday's own writing, and a whole
+    multi-step plan could complete against an agent that never worked."""
+    with tempfile.TemporaryDirectory() as d:
+        p = Path(d) / "big.jsonl"
+        with open(p, "w") as fh:
+            for i in range(400):
+                fh.write(json.dumps({"type": "assistant", "message": {
+                    "content": [{"type": "text",
+                                 "text": f"reply {i} " + "x" * 600}]}}) + "\n")
+        assert p.stat().st_size > replies.TAIL_BYTES, "not past the tail window"
+        before = replies.tally(str(p))
+        assert before == 400, before
+        with open(p, "a") as fh:
+            fh.write(json.dumps({"type": "user", "message": {
+                "content": "do the thing"}}) + "\n")
+        assert replies.tally(str(p)) == before, "Friday's own prompt moved it"
+        with open(p, "a") as fh:
+            fh.write(json.dumps({"type": "assistant", "message": {
+                "content": [{"type": "text", "text": "Done."}]}}) + "\n")
+        assert replies.tally(str(p)) == before + 1
+
+
+def test_an_old_style_marker_that_looks_like_a_number():
+    """A pre-fix marker is plain text. One whose text happened to be digits
+    parsed as a count, so the reply already on screen came back as the answer
+    to the new question."""
+    with tempfile.TemporaryDirectory() as d:
+        p = Path(d) / "s.jsonl"
+        _write(p, [("assistant", "2")])
+        got = replies.wait_for_reply(str(p), "2", timeout=1.0, settle=0.2)
+        assert got == "", repr(got)
+
+
 if __name__ == "__main__":
     for name, fn in sorted(globals().items()):
         if name.startswith("test_") and callable(fn):

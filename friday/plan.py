@@ -729,17 +729,34 @@ class Runner:
             # Resolve it by name from the live fleet, and refuse rather than
             # guess. A step delivered to the wrong agent is worse than a step
             # that says it could not be delivered.
-            try:
-                from . import fleetcache
-                for row in fleetcache.snapshot().values():
-                    if (row.get("label") or "").strip().lower() == \
-                            (target or "").strip().lower():
-                        sid = row.get("sid", "")
-                        break
-            except Exception:
-                sid = ""
+            want = (target or "").strip().lower()
+            matches = []
+            if want:
+                try:
+                    from . import fleetcache
+                    matches = [r for r in fleetcache.snapshot().values()
+                               if (r.get("label") or "").strip().lower() == want]
+                except Exception:
+                    matches = []
+            # Exactly one, or none. An empty target matched a fleet row with an
+            # empty label, so an untargeted step went to an arbitrary session
+            # and was announced with no name at all; and two sessions answering
+            # to one name picked whichever the dictionary yielded first.
+            if len(matches) == 1:
+                sid = matches[0].get("sid", "")
+            elif len(matches) > 1:
+                set_step(step["id"], FAILED,
+                         f"{len(matches)} sessions are called {target}")
+                self._maybe_hold(plan["id"])
+                self.announce(
+                    f"There are {len(matches)} sessions called {target}, so I "
+                    f"didn't send that step anywhere. Name the one you mean and "
+                    f"say \"run the plan\" again.")
+                return False
         if not sid:
-            set_step(step["id"], FAILED, f"no session called {target}")
+            set_step(step["id"], FAILED,
+                     f"no session called {target}" if target
+                     else "this step says who it is for nowhere")
             self._maybe_hold(plan["id"])
             self.announce(f"I can't find a session called {target}, so that "
                           f"part of the plan didn't run. The rest carries on.")
@@ -811,7 +828,11 @@ class Runner:
                 # mid-step waited the full fifteen minutes and then blamed the
                 # agent for silence. The text is the second signal, for a file
                 # rewritten to the same length.
-                if agents.tally(live) != before or (said and said != before_text):
+                # Greater, or the words changed. "Different" counted a falling
+                # count as a reply, and the count fell whenever Friday's own
+                # prompt pushed an old message out of the read window, so a
+                # whole plan could complete against an agent that never worked.
+                if agents.tally(live) > before or (said and said != before_text):
                     # Wait for it to STOP talking, the same way the watchtower
                     # and wait_for_reply already do. Without this, an agent's
                     # first "Let me look at that" completes the step and the

@@ -727,6 +727,11 @@ def classify(text: str) -> tuple:
     # never a session, and this path types into a running agent.
     if m and (m.group(1) or "").lower() in _FILLER:
         m = None
+    # "let's not tell anyone yet" is a decision not to say something. Reading it
+    # as an instruction to a session called "anyone" is the opposite.
+    if m and re.search(r"\b(?:not|never|don'?t|do not|rather not|no need to)\s+"
+                       r"(?:\w+\s+){0,2}(?:tell|ask|message|send)\b", t, re.I):
+        m = None
     if m:
         name, msg = m.group(1), m.group(2).strip()
         # "tell voicebridge him that X" / "tell it that X": drop the pronoun
