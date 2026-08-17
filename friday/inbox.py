@@ -25,6 +25,7 @@ back to you, and it says each thing once.
 
 import re
 import threading
+import time
 
 from . import connectors, engine
 
@@ -163,9 +164,21 @@ class Inbox:
         text = " ".join((row.get("text") or "").split())
         # The channel id travels with it: a draft with no destination is a
         # draft you have to send yourself, which is the thing being fixed.
-        self.last[ch.get("id", "")] = {"where": where, "who": who,
-                                       "text": text,
-                                       "channel": ch.get("id", "")}
+        # Popped first, so re-assigning moves it to the END. A dict keeps
+        # INSERTION order, and re-assigning an existing key does not change it,
+        # so position recorded a channel's first sighting rather than its latest
+        # message. Everything that answers "the thing you were just looking at",
+        # the draft, the ticket body and the meeting title, took the last entry
+        # and got the wrong colleague in the wrong channel. A message written
+        # under your name went to somebody who had not spoken to you, and was
+        # reported as sent.
+        #
+        # The timestamp travels too, so recency is a fact rather than a
+        # position.
+        cid = ch.get("id", "")
+        self.last.pop(cid, None)
+        self.last[cid] = {"where": where, "who": who, "text": text,
+                          "channel": cid, "when": row.get("when") or time.time()}
         gist = text if len(text) <= 200 else text[:200].rsplit(" ", 1)[0] + "…"
         offer = ", ".join(self._offers(text, where))
         if self.budget and not self.budget.allow(1):

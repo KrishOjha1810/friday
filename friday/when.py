@@ -71,12 +71,31 @@ def _end_of(d: _dt.date) -> float:
     return _dt.datetime.combine(d, _dt.time.max).timestamp()
 
 
+# Addressing the assistant and then asking it something. In `moment` a bare
+# leading "friday" is the day, because "friday at 4" is a booking; when READING,
+# "friday, what did sam say?" is a question with no timeframe, and answering it
+# with a one-day window over last Friday is the failure this module opens by
+# describing. The two entry points differ because the sentences differ.
+# Not the possessive: "friday's messages" is about the day, and "friday, what
+# did sam say?" is somebody talking to the assistant. The apostrophe is the
+# whole difference.
+# The word after it decides. Somebody addressing the assistant follows the name
+# with a question or an instruction; somebody naming the day follows it with a
+# noun. "Friday, what did sam say?" is a question with no timeframe; "friday
+# standup" and "friday's messages" are both about the day.
+_ADDRESSED = re.compile(
+    r"^\s*(?:hey|hi|ok|okay|yo|thanks|thank you)?\s*friday\b(?!'s)"
+    r"[\s,:!.\-]*(?=(?:what|whats|what's|who|when|where|why|how|any|anything|"
+    r"did|do|does|is|are|was|were|can|could|would|will|show|tell|give|read|"
+    r"summari[sz]e|catch|remind|find|check)\b)", re.I)
+
+
 def parse(text: str, today: _dt.date = None) -> tuple:
     """(oldest, latest, label) or (0, 0, "") when no time was named."""
     # The wake word first: it is called Friday and that is also a weekday, so
     # "friday, what did sam say?" searched last Friday and labelled the answer
     # as though the question had been understood.
-    t = " " + _unwake((text or "").lower()) + " "
+    t = " " + _ADDRESSED.sub("", (text or "").lower(), count=1) + " "
     today = today or _dt.date.today()
 
     # Both named at once is a two-day span, not the older of the two: "yesterday
@@ -212,7 +231,19 @@ def moment(text: str, now: _dt.datetime = None) -> tuple:
     now = now or _dt.datetime.now()
     low = _unwake(text.lower())
 
-    day, said_today, evening = None, False, False
+    day, said_today = None, False
+    # Which half of the day was named, in words rather than by am/pm. Only the
+    # single word "tonight" was ever read, so "tomorrow at 8 in the evening"
+    # booked eight in the morning and "at 7 in the morning" booked seven at
+    # night: twelve hours out, on the most ordinary phrasing there is, and read
+    # back as a confident confirmation.
+    half = ""
+    if re.search(r"\b(?:evening|tonight|at night|tonite)\b", low):
+        half = "pm"
+    elif re.search(r"\b(?:morning)\b", low):
+        half = "am"
+    elif re.search(r"\b(?:afternoon)\b", low):
+        half = "pm"
     # Named separately from the clock match below, which reuses `m` in its own
     # loop: sharing the name meant a later check read the clock match and
     # silently did nothing.
@@ -220,6 +251,10 @@ def moment(text: str, now: _dt.datetime = None) -> tuple:
     # not hide a real day later in the sentence: "we sat at 4 on friday" means
     # Friday. Suppressing and stopping turned a named day into today, which is
     # the failure this file says is worse than making you type it.
+    if half and re.search(r"\b(?:this|tonight|tonite)\b", low) and \
+            not _SOME_OTHER_DAY.search(low):
+        # "This evening at 8" and "tonight at 8" are today.
+        day, said_today = now.date(), True
     dm = None
     for cand in _DAY_WORD.finditer(low):
         abbrev = cand.group(3) or ""
@@ -269,6 +304,13 @@ def moment(text: str, now: _dt.datetime = None) -> tuple:
     strong = [m for m in found
               if (m.group(3) or "")
               or m.group(0).lower().lstrip().startswith("at")]
+    # A move names two times and only the ORIGIN usually carries the am or pm:
+    # "push the 3pm back to 4" left the meeting where it was and read that back
+    # as agreement. Where the sentence moves something, the destination is
+    # whatever comes last, marked or not.
+    if re.search(r"\b(?:push|move|shift|reschedule|bump|change|make it|"
+                 r"back to|instead)\b", low) and len(found) > 1:
+        strong = []
     # LAST, in both tiers. The destination of a move and the correction in a
     # self-correcting sentence are both the last time named: "at 3pm, actually
     # make it 4pm" was booking three.
@@ -284,10 +326,15 @@ def moment(text: str, now: _dt.datetime = None) -> tuple:
             h += 12
         elif mer.startswith("a") and h == 12:
             h = 0
+        elif not mer and half == "pm" and h < 12:
+            h += 12          # "8 in the evening" is not eight in the morning
+        elif not mer and half == "am":
+            if h == 12:
+                h = 0        # "12 in the morning" is midnight
         elif not mer and h <= 7:
+            # No half named. A bare small number means the afternoon to anybody
+            # arranging something: nobody says "four" and means 04:00.
             h += 12
-        elif not mer and evening and h < 12:
-            h += 12          # "tonight at 8" is not eight in the morning
         hour, minute = h, int(m.group(2) or 0)
         break
 

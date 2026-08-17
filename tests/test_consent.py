@@ -474,3 +474,47 @@ if __name__ == "__main__":
     _writing(False)
     _armed(False)
     print("ok  consent: a yes belongs to what you were shown, and to nothing else")
+
+
+def test_yes_is_not_an_answer_to_which_one():
+    """Every one of these bound a yes to the FIRST option, and this is a voice
+    product, so "yes" is the likeliest spoken reply to any sentence ending in a
+    question mark. "Tell it to drop the migrations table" then "yes" typed that
+    into whichever session came first and reported it as sent."""
+    f = _friday("jobhunt", "api", "web")
+    f.handle("tell it to drop the migrations table")
+    SENT.clear()
+    r = f.handle("yes")
+    assert not SENT, SENT
+    assert "doesn't tell me" in r["reply"], r["reply"]
+    # Naming it still works.
+    f.handle("api")
+    assert SENT and SENT[0][1] == "drop the migrations table", SENT
+
+
+def test_a_re_shown_offer_can_actually_be_accepted():
+    """It was re-shown with the original timestamps, so the next yes found it
+    stale again and showed it again, forever: the action could never be accepted
+    and the only escape was "no"."""
+    f = _friday("api")
+    f.handle("tell ap to delete the old branches")
+    f.handle("what's running")
+    SENT.clear()
+    f.handle("yes")            # re-shown
+    f.handle("yes")            # and accepted
+    assert SENT and SENT[0][1] == "delete the old branches", SENT
+
+
+def test_a_draft_answers_the_newest_message():
+    """A dict does not reorder on re-assignment, so the "newest" message was
+    whichever channel had spoken FIRST. A reply written under your name went to
+    the wrong colleague in the wrong channel, and was reported as sent."""
+    f = _friday("api")
+    f.inbox._report({"id": "CENG", "name": "eng"},
+                    {"who": "Ana", "text": "first thing", "when": 1})
+    f.inbox._report({"id": "CGEN", "name": "general"},
+                    {"who": "Ravi", "text": "middle thing", "when": 2})
+    f.inbox._report({"id": "CENG", "name": "eng"},
+                    {"who": "Sam", "text": "the newest thing", "when": 3})
+    who = [m["who"] for _c, m in f._newest_messages()]
+    assert who[0] == "Sam", who

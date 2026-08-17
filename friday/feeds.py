@@ -156,11 +156,18 @@ class Feeds:
                     # dropped with no record at all. This was the only path in
                     # the proactive layer that destroyed an item silently, and
                     # it could destroy an urgency 0 one.
+                    # `now` is the clock in this function. Reusing the name for
+                    # a string turned the next source's "now - last < period"
+                    # into a TypeError that killed the whole collect, so one
+                    # repeated GitHub notification, which is the normal steady
+                    # state, permanently silenced git, the calendar and Sentry
+                    # for the life of the process: one log line and no
+                    # user-visible sign at all.
                     was = self.said.get(key)
-                    now = " ".join((it.get("text") or "").split())
-                    if was is not None and now and now != was:
+                    words = " ".join((it.get("text") or "").split())
+                    if was is not None and words and words != was:
                         if self.budget:
-                            self.budget.hold(now, it.get("source", name))
+                            self.budget.hold(words, it.get("source", name))
                     continue
                 fresh.append(it)
         if prime:

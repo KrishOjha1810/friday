@@ -936,6 +936,11 @@ class Friday:
         # it; a short reply is another go at the name. Letting either fall
         # through to the model produced the same invented refusal three times
         # while the answer sat in a list Friday had already fetched.
+        if (self._offered and self._offered.get("pick")
+                and intent == CONFIRM):
+            # "Which one?" has no yes. Asking again is the only honest move.
+            return self._say("Which one, though? A yes doesn't tell me. Say the "
+                             "name.")
         if self._offered and intent in (CONFIRM, CANCEL, CHAT):
             offer, self._offered = self._offered, None
             if intent == CONFIRM:
@@ -977,7 +982,13 @@ class Friday:
                         f"{what}.")
                 # Nothing else is competing for it, but the offer is old enough
                 # that acting on it silently would be acting on something you
-                # may not still have in mind. Show it again.
+                # may not still have in mind. Show it again, and RE-STAMP it, or
+                # the next yes finds the same stale timestamps and shows it
+                # again, forever: the action could never be accepted and the
+                # only escape was "no".
+                act = dict(act)
+                act.pop("asked_at", None)
+                act.pop("turn", None)
                 self.pending = act
                 return self._say(f"Just to check, this is still from earlier: "
                                  f"{what}?", needs_confirm=True)
@@ -1343,6 +1354,21 @@ class Friday:
                 learn.acted(k)
                 self._told.pop(k, None)
 
+    def _newest_messages(self):
+        """Slack messages Friday has mentioned, newest first.
+
+        By timestamp, not by position. Everything that answers "the thing you
+        were just looking at" read the last entry of a dict, and a dict does not
+        reorder on re-assignment, so the newest message was whichever channel
+        had spoken FIRST. A reply written under your name went to the wrong
+        colleague in the wrong channel, and was reported as sent."""
+        try:
+            rows = list(self.inbox.last.items())
+        except Exception:
+            return []
+        rows.sort(key=lambda kv: (kv[1] or {}).get("when") or 0, reverse=True)
+        return rows
+
     def _tell_person(self, who: str, text: str) -> bool:
         """Send a plan step to a colleague, if Friday is allowed to.
 
@@ -1381,6 +1407,12 @@ class Friday:
         down before any of it runs precisely so a bad split is something you
         SEE rather than something an agent discovers halfway through."""
         text = " ".join((body or "").split())
+        # "api: then deploy it" is one step for api. Splitting on "then" first
+        # cut it into a bare label and an orphan, and the orphan inherited the
+        # PREVIOUS agent: a third clause addressed to one agent was typed into
+        # another, and a prompt consisting of nothing but "api:" was sent as
+        # well. Both then counted toward "all steps done".
+        text = re.sub(r"(:\s*)(?:then|and then)\s+", r"\1", text, flags=re.I)
         parts = re.split(r"\s*(?:\d+[.)]\s+|;|,\s*then\s+|\s+then\s+|,\s+and\s+"
                          r"|\.\s+(?=[A-Z])|,\s+)", text)
         return [p.strip(" .;,") for p in parts if p and len(p.strip()) > 2]
@@ -1478,7 +1510,7 @@ class Friday:
             return self._offer(
                 "Which session should work it out? " + ", ".join(names[:8]),
                 yes=lambda n=names[0], g=goal: self._ask_for_plan(g, n),
-                again=lambda t, g=goal: self._ask_for_plan(g, t))
+                again=lambda t, g=goal: self._ask_for_plan(g, t), pick=True)
         hit, _how = self._find_how(name)
         if not hit:
             return self._no_session(name,
@@ -1553,7 +1585,7 @@ class Friday:
             return self._offer(
                 "Which session is this plan for? " + ", ".join(names[:8]),
                 yes=lambda n=names[0], b=body: self._make_plan(n, b),
-                again=lambda t, b=body: self._make_plan(t, b))
+                again=lambda t, b=body: self._make_plan(t, b), pick=True)
         hit, how = self._find_how(name)
         if not hit:
             return self._no_session(name, lambda n: self._make_plan(n, body))
@@ -1751,7 +1783,7 @@ class Friday:
         # What it is ABOUT: whoever asked, if anybody did.
         title = "Meeting"
         try:
-            for _cid, m in reversed(list(self.inbox.last.items())):
+            for _cid, m in self._newest_messages():
                 title = f"{m['who']} ({m['where']})"
                 break
         except Exception:
@@ -1813,7 +1845,10 @@ class Friday:
             + ", ".join(pretty)
             + ". Which should I use? I'll remember it.",
             yes=lambda n=live[0]: (trackers.prefer(n), then(n))[1],
-            again=lambda t: self._pick_tracker(t, then))
+            again=lambda t: self._pick_tracker(t, then),
+            # A yes here picked alphabetically and PERSISTED it, so every later
+            # ticket went to a board nobody chose.
+            pick=True)
 
     def _pick_tracker(self, said: str, then) -> dict:
         name = nearest.pick((said or "").strip().lower(), trackers.names())
@@ -1847,7 +1882,7 @@ class Friday:
             # Fall back to what you were just looking at, so "file a ticket"
             # right after reading a thread does the obvious thing.
             last = None
-            for _cid, m in reversed(list(self.inbox.last.items())):
+            for _cid, m in self._newest_messages():
                 last = m
                 break
             if last:
@@ -1975,7 +2010,7 @@ class Friday:
         useful version of "reply for me" is a draft in your own register that
         you paste, and saying plainly that you are the one sending it."""
         last = None
-        for cid, m in reversed(list(self.inbox.last.items())):
+        for cid, m in self._newest_messages():
             last = m
             break
         if not last:
@@ -2360,7 +2395,7 @@ class Friday:
             return self._offer(
                 "Which one should I watch? " + ", ".join(names[:8]),
                 yes=lambda: self._watch(names[0]),
-                again=lambda t: self._watch(t))
+                again=lambda t: self._watch(t), pick=True)
         row = next((r for r in fleetcache.snapshot().values()
                     if (r.get("label") or "") == target), None)
         if not row:
@@ -3387,7 +3422,8 @@ class Friday:
                     yes=lambda: self._propose_tell(names[0], message,
                                                    want_answer),
                     again=lambda t: self._propose_tell(t, message,
-                                                       want_answer))
+                                                       want_answer),
+                    pick=True)
             name, said_exactly = self.target, True
         """TIER 0 when you named the session exactly (that was your
         confirmation), TIER 1 when Friday had to guess which one you meant."""
@@ -4109,13 +4145,21 @@ class Friday:
                               f"on something, or still working.")
         threading.Thread(target=_watch, daemon=True).start()
 
-    def _offer(self, question: str, yes, again=None, no: str = "") -> dict:
+    def _offer(self, question: str, yes, again=None, no: str = "",
+               pick: bool = False) -> dict:
         """Ask "did you mean X?" and remember what a yes means.
 
         Withholding a name Friday already has is the failure this replaces: it
         knows the real list, so the honest move is to put the closest one to you
-        rather than report that you said something unrecognisable."""
-        self._offered = {"yes": yes, "again": again, "no": no}
+        rather than report that you said something unrecognisable.
+
+        `pick=True` marks a question with SEVERAL answers ("which one? a, b,
+        c"). A yes is not one of them. Every one of these bound a yes to the
+        first option, and this is a voice product, so "yes" is the likeliest
+        spoken reply to any sentence ending in a question mark: "tell it to drop
+        the migrations table" then "yes" typed that into whichever session came
+        first, and reported it as sent."""
+        self._offered = {"yes": yes, "again": again, "no": no, "pick": pick}
         self.pending = None      # a "yes" must have exactly one meaning
         return self._say(question)
 

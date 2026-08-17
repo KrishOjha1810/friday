@@ -439,3 +439,55 @@ def test_the_ways_people_actually_ask_for_a_meeting():
     for said in ("the meeting was long", "nice to meet you",
                  "what did the meeting decide", "i met sam yesterday"):
         assert classify(said)[0] != "schedule", (said, classify(said))
+
+
+def test_the_half_of_the_day_you_named_is_the_one_it_books():
+    """Only the single word "tonight" was ever read, so "tomorrow at 8 in the
+    evening" booked eight in the morning and "at 7 in the morning" booked seven
+    at night: twelve hours out, on the most ordinary phrasing there is."""
+    import datetime as _dt
+    from friday import when as _w
+    monday = _dt.datetime(2026, 8, 17, 10, 0)
+    for said, want in (("tomorrow at 8 in the evening", "20:00"),
+                       ("sunday at 8 in the evening", "20:00"),
+                       ("wednesday evening at 8", "20:00"),
+                       ("tomorrow at 11 at night", "23:00"),
+                       ("let's talk at 7 in the morning tomorrow", "07:00"),
+                       ("tomorrow at 6 in the morning", "06:00")):
+        _stamp, reads = _w.moment(said, monday)
+        assert reads.endswith(want), (said, reads)
+    # "This evening" is today, not some other day.
+    assert _w.moment("this evening at 8", monday)[1] == "Monday 17 August at 20:00"
+
+
+def test_addressing_it_is_not_naming_a_day_when_reading():
+    """The word after the name decides. Somebody addressing the assistant
+    follows it with a question; somebody naming the day follows it with a noun.
+    Reading "friday, what did sam say?" as last Friday bounded the answer to one
+    day for a question that had no timeframe."""
+    import datetime as _dt
+    from friday import when as _w
+    monday = _dt.date(2026, 8, 17)
+    for said in ("friday, what did sam say?", "friday any update from sam?",
+                 "hey friday, anything from sam?",
+                 "thanks friday, what did sam say"):
+        assert _w.parse(said, monday)[2] == "", (said, _w.parse(said, monday))
+    for said in ("friday's messages, anything from sam?",
+                 "friday standup: what did we agree?",
+                 "what was said on friday"):
+        assert _w.parse(said, monday)[2].startswith("Friday"), said
+
+
+def test_a_move_books_where_it_is_going():
+    """A move names two times and usually only the ORIGIN carries the am or pm,
+    so "push the 3pm back to 4" left the meeting where it was and read that
+    back as agreement."""
+    import datetime as _dt
+    from friday import when as _w
+    monday = _dt.datetime(2026, 8, 17, 10, 0)
+    for said, want in (("push the 3pm back to 4", "16:00"),
+                       ("move the 4pm to 5", "17:00"),
+                       ("shift the 2pm to 3", "15:00"),
+                       ("reschedule the 11am to 1", "13:00")):
+        _stamp, reads = _w.moment(said, monday)
+        assert reads.endswith(want), (said, reads)

@@ -115,6 +115,18 @@ def test_the_steps_under_a_name_belong_to_it():
     assert [s["target"] for s in got] == ["api", "api", "web"], got
 
 
+def test_a_third_clause_goes_to_the_agent_it_names():
+    """"api: then deploy it" was cut at "then" into a bare label and an orphan,
+    and the orphan inherited the PREVIOUS agent: work for one agent was typed
+    into another, plus a prompt consisting of nothing but "api:"."""
+    f = _friday()
+    got = f._assign(f._steps_from(
+        "api: run the migration; web: rebuild; api: then deploy it"))
+    assert [(s["target"], s["text"]) for s in got] == [
+        ("api", "run the migration"), ("web", "rebuild"),
+        ("api", "deploy it")], got
+
+
 def test_a_name_that_is_not_a_session_is_a_person():
     """You would not name something Friday cannot see unless you meant a
     colleague, and asking is better than guessing it was a typo."""
