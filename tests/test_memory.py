@@ -180,3 +180,65 @@ if __name__ == "__main__":
         if name.startswith("test_") and callable(fn):
             fn()
     print("ok  memory: BM25, whole sessions, and length that actually counts")
+
+
+# ---- the path a project actually lives at ----------------------------------
+def test_a_hyphenated_project_gets_its_real_directory():
+    """Claude encodes the path by replacing "/" with "-", which is lossy the
+    moment a folder name contains a hyphen: `-Users-me-job-search-agent`
+    decoded to `/Users/me/job/search/agent`. That wrong path is handed to `cd`,
+    so reopening the project landed in a directory that does not exist and the
+    session never came back."""
+    import json as _j
+    import tempfile as _t
+    root = Path(_t.mkdtemp())
+    memory.PROJECTS = root
+    d = root / "-Users-me-job-search-agent"
+    d.mkdir()
+    (d / "a.jsonl").write_text(_j.dumps(
+        {"type": "user", "cwd": "/Users/me/job-search-agent",
+         "message": {"content": "hello"}}) + "\n")
+    assert memory._cwd_of(d) == "/Users/me/job-search-agent"
+
+
+def test_two_projects_with_one_name_are_still_findable():
+    """~/work/friday and ~/personal/friday both decode to "friday", and the
+    matcher refuses a tie by design, so an exact name resolved to nothing and
+    Friday denied the existence of a project you were working in."""
+    import json as _j
+    import tempfile as _t
+    root = Path(_t.mkdtemp())
+    memory.PROJECTS = root
+    for where in ("-Users-me-work-friday", "-Users-me-personal-friday"):
+        d = root / where
+        d.mkdir()
+        (d / "s.jsonl").write_text(_j.dumps(
+            {"type": "user", "message": {"content": "the friday work"}}) + "\n")
+    assert memory.by_project("friday"), "denied a project with live transcripts"
+
+
+def test_where_the_quote_sits_does_not_decide_the_ranking():
+    """Scoring read the whole file but the phrase check stopped at 60KB, so two
+    identical transcripts scored 1.43 and 0.96 depending on whether the quote
+    was at the top or the bottom. The loser came back with four matched terms
+    and an empty snippet to show for them."""
+    import json as _j
+    import tempfile as _t
+    root = Path(_t.mkdtemp())
+    memory.PROJECTS = root
+    d = root / "-Users-me-x"
+    d.mkdir()
+    needle = "the redis cluster migration failed"
+    filler = [{"type": "user",
+               "message": {"content": "other work about parsers and files"}}] * 900
+    for name, at_top in (("early", True), ("late", False)):
+        rows = list(filler)
+        rows.insert(0 if at_top else len(rows),
+                    {"type": "user", "message": {"content": needle}})
+        (d / f"{name}.jsonl").write_text(
+            "\n".join(_j.dumps(r) for r in rows))
+    got = memory.search(needle, limit=5)
+    assert len(got) == 2, got
+    assert abs(got[0]["score"] - got[1]["score"]) < 0.01, got
+    for h in got:
+        assert h["phrase"] and h["snippet"], h

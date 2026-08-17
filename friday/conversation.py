@@ -3111,7 +3111,13 @@ class Friday:
     def _resume_only(self, hit: dict) -> dict:
         ok = actions.resume_session(hit["sid"], cwd=hit.get("cwd", ""))
         fleetcache.bust()
-        return self._say(f"Reopened {hit['project']} in a new window."
+        # "Opening", not "Reopened". Nothing here waits for the session to
+        # come back: the AppleScript returns as soon as Terminal accepts the
+        # command, so the past tense was a claim about something that had not
+        # happened yet and might not.
+        return self._say(f"Opening {hit['project']} in a new window. Say "
+                         f"\"what's running\" in a moment to check it came "
+                         f"back."
                          if ok else
                          f"I couldn't reopen {hit['project']}.")
 

@@ -130,7 +130,15 @@ def by_project(name: str, limit: int = 5) -> list:
         return []
     # Reopening the wrong project is a window full of somebody else's work, so
     # this needs a clear match rather than the closest one.
-    picked = nearest.pick(name, [n for n, _d in rows], act=0.72)
+    # De-duplicated first. Two projects with the same folder name, ~/work/friday
+    # and ~/personal/friday, both decode to "friday", and `pick` refuses a tie
+    # by design, so an exact name resolved to nothing and Friday denied the
+    # existence of a project you were working in.
+    names = list(dict.fromkeys(n for n, _d in rows))
+    want = (name or "").strip().lower()
+    picked = next((n for n in names if n.lower() == want), "")
+    if not picked:
+        picked = nearest.pick(name, names, act=0.72)
     if not picked:
         return []
     out = []
@@ -154,7 +162,32 @@ def by_project(name: str, limit: int = 5) -> list:
 
 
 def _cwd_of(d) -> str:
-    """The working directory a project directory was named for."""
+    """The working directory a project directory was named for.
+
+    From INSIDE the transcript, because the directory name cannot be decoded.
+    Claude encodes the path by replacing every "/" with "-", which is lossy the
+    moment a folder has a hyphen in it: `-Users-me-job-search-agent` decoded to
+    `/Users/me/job/search/agent`, and the real path is `/Users/me/job-search-agent`.
+    That wrong path is handed to `cd`, so reopening any hyphenated project
+    landed in a directory that does not exist and the session never came back.
+
+    The transcripts carry the real cwd, so the guess is only a fallback for a
+    project with no readable transcript at all."""
+    try:
+        for f in sorted(d.glob("*.jsonl"),
+                        key=lambda p: p.stat().st_mtime, reverse=True)[:3]:
+            with open(f, "r", errors="ignore") as fh:
+                for _n, line in zip(range(40), fh):
+                    if '"cwd"' not in line:
+                        continue
+                    try:
+                        got = (json.loads(line) or {}).get("cwd")
+                    except Exception:
+                        continue
+                    if got and str(got).startswith("/"):
+                        return str(got)
+    except Exception:
+        pass
     name = d.name
     if not name.startswith("-"):
         return ""
@@ -257,8 +290,15 @@ def search(query: str, limit: int = 5) -> list:
             score += idf * (f * (K1 + 1)) / (f + K1 * (1 - B + B * dl / avgdl))
         if not score:
             continue
+        # The WHOLE file, not the first 60KB. The peek cap belongs to "what is
+        # this session about", which only needs the opening; using it here made
+        # the score depend on where in the file the quote sat. Two identical
+        # transcripts, the phrase at the top of one and the bottom of the
+        # other, scored 1.43 and 0.96: a fifty percent swing from byte position
+        # alone, and the loser was returned with four matched terms and an
+        # empty snippet to show for them.
         first_user, best_line, phrase = "", "", False
-        for role, text in _texts(path, limit=PEEK_BYTES):
+        for role, text in _texts(path):
             low = text.lower()
             if not first_user and role == "user" and len(text) > 12:
                 first_user = text[:110]

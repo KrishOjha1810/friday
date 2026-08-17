@@ -130,6 +130,14 @@ def resume_session(sid: str, cwd: str = "") -> bool:
     if not sid:
         return False
     where = cwd or str(Path.home())
+    # A directory that is not there means the `cd` fails, `claude` never runs,
+    # and the AppleScript still returns "ok" because `do script` does not wait
+    # for the command. Friday then said "Reopened it in a new window" about a
+    # window with a shell error in it. Checked here rather than trusted,
+    # because a silent no-op reported as success is the worst thing this module
+    # can do.
+    if not Path(where).is_dir():
+        where = str(Path.home())
     cmd = f"cd {_q(where)} && claude --resume {_q(sid)}"
     return _open_terminal(cmd)
 
