@@ -151,7 +151,11 @@ _TICKET_RE = re.compile(
     r"(?:(" + _TRACKERS + r")\s+)?(?:ticket|issue|bug|task)\b"
     r"(?:\s+(?:in|on)\s+(" + _TRACKERS + r"))?"
     r"(?:\s+(?:in|on|for)\s+([A-Z][A-Z0-9_]{1,9}))?"
-    r"(?:\s*[:,]\s*(.+))?$", re.I)
+    # "for the parser bug" and "about the login timeout" are how people say it
+    # at least as often as a colon, and neither matched: the sentence fell
+    # through to READING your tickets, so asking to file one answered with an
+    # unrelated existing one and nothing was created.
+    r"(?:\s*[:,]\s*(.+)|\s+(?:for|about|because|saying)\s+(.+))?$", re.I)
 # "use linear for tickets", "file tickets in jira from now on"
 _TRACKER_PREF_RE = re.compile(
     r"\b(?:use\s+(" + _TRACKERS + r")\s+for\s+(?:tickets?|issues?)"
@@ -603,7 +607,7 @@ def classify(text: str) -> tuple:
     if m:
         return TICKET, {"where": (m.group(1) or m.group(2) or "").lower(),
                         "project": (m.group(3) or "").upper(),
-                        "summary": (m.group(4) or "").strip()}
+                        "summary": (m.group(4) or m.group(5) or "").strip()}
     if _PLAN_STOP_RE.search(t):
         return PLAN_GO, {"stop": True}
     if _PLAN_WHERE_RE.search(t):
@@ -1640,8 +1644,19 @@ class Friday:
         if self.plans.running:
             return self._say("It's already running. Say \"where is the plan\" "
                              "to see how far it has got.")
-        left = [s for s in p["steps"] if s["state"] in (plans.PENDING,)]
+        # A step that FAILED is put back before starting, or "run the plan to
+        # retry those" does nothing at all and the steps queued behind the
+        # failure never run either. A retry that silently does nothing is worse
+        # than no retry, because you believe the work is queued.
+        again = plans._retry(p["id"])
+        p = plans.get(p["id"])
+        left = [s for s in p["steps"] if s["state"] == plans.PENDING]
         self.plans.start(p["id"])
+        if again:
+            which = ", ".join(f"{s.get('target') or 'a session'} "
+                              f"(step {s['seq'] + 1})" for s in again)
+            return self._say(f"Running it again, {len(left)} steps, including "
+                             f"the one that failed: {which}.")
         return self._say(f"Running it: {len(left)} step"
                          f"{'s' if len(left) != 1 else ''} left on "
                          f"{p['target']}. I'll tell you after each one, and "

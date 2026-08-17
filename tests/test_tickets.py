@@ -347,3 +347,17 @@ def test_a_real_tracker_beats_the_fallback():
         connectors.get = real
         connectors.allow_write(False)
         connectors.gh_allow_write(False)
+
+
+def test_the_ways_people_ask_for_a_ticket():
+    """"File a ticket for the parser bug" fell through to READING your tickets,
+    so asking to file one answered with an unrelated existing one and nothing
+    was created. The pattern only understood a colon."""
+    for said in ("file a ticket for the parser bug",
+                 "file a ticket about the login timeout",
+                 "file a ticket: the parser bug"):
+        intent, payload = classify(said)
+        assert intent == "ticket", (said, intent)
+        assert payload["summary"], (said, payload)
+    # And asking to READ them is still reading them.
+    assert classify("what are my tickets")[0] != "ticket"

@@ -294,7 +294,14 @@ def moment(text: str, now: _dt.datetime = None) -> tuple:
     # "at 4:99" reached datetime.time() and raised, which meant a plausible
     # typo crashed the request instead of being refused.
     found = [m for m in _CLOCK.finditer(low)
-             if int(m.group(1)) <= 23 and int(m.group(2) or 0) <= 59]
+             if int(m.group(1)) <= 23 and int(m.group(2) or 0) <= 59
+             # "at 22 baker street" is an address. A number followed by a word
+             # that belongs to a place is not the time, however much "at" in
+             # front of it looks like one.
+             and not re.match(r"\s*(?:street|st\b|road|rd\b|avenue|ave\b|"
+                              r"lane|drive|place|square|baker|floor|room|"
+                              r"people|minutes|mins|hours|hrs)",
+                              low[m.end():])]
     # A number is a TIME when it carries am or pm, or when "at" introduces it.
     # The "at" test used to look at the text before the match, and the pattern
     # itself starts with an optional "at", so the match already contained the

@@ -449,6 +449,20 @@ def running_plans() -> list:
     return [get(r[0]) for r in rows]
 
 
+def _retry(plan_id: int) -> list:
+    """Put FAILED steps back where they can run.
+
+    Nothing anywhere reset one, so the "say run the plan to retry those" the
+    runner offers was a no-op forever, and the pending steps queued behind the
+    failure were never named or run either. A retry that does nothing is worse
+    than no retry: you believe the work is queued."""
+    plan = get(plan_id)
+    dead = [s for s in (plan or {}).get("steps", []) if s["state"] == FAILED]
+    for st in dead:
+        set_step(st["id"], PENDING, "failed last time, trying again")
+    return dead
+
+
 def _release(plan_id: int) -> list:
     """Put steps left in flight back where they can run.
 

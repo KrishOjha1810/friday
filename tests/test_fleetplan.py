@@ -540,3 +540,20 @@ if __name__ == "__main__":
         if name.startswith("test_") and callable(fn):
             fn()
     print("ok  fleet plans: several agents at once, and a person is one of them")
+
+
+def test_running_the_plan_again_actually_retries_a_failed_step():
+    """Nothing anywhere reset a FAILED step, so the "say run the plan to retry
+    those" the runner offers did nothing forever, and the steps queued behind
+    the failure never ran either. A retry that silently does nothing is worse
+    than no retry, because you believe the work is queued."""
+    p = _plan({"text": "migrate", "target": "api"},
+              {"text": "rebuild", "target": "web"})
+    plans.set_step(p["steps"][0]["id"], plans.DONE)
+    plans.set_step(p["steps"][1]["id"], plans.FAILED, "couldn't reach it")
+    again = plans._retry(p["id"])
+    assert len(again) == 1, again
+    after = plans.get(p["id"])["steps"]
+    assert after[0]["state"] == plans.DONE, after
+    assert after[1]["state"] == plans.PENDING, after
+    assert [s["text"] for s in plans.runnable(plans.get(p["id"]))] == ["rebuild"]
