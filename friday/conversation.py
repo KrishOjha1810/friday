@@ -1686,7 +1686,10 @@ class Friday:
         # which turned "start PROJ-7" into "start proj-7". That is a key
         # somebody copies.
         head = pick[1][:1].upper() + pick[1][1:]
-        out = [f"{head}. {pick[2]}"]
+        # The reason is a sentence too, and it followed a full stop in
+        # lowercase: "Answer web. it has been stuck 10 minutes on: ...".
+        why = pick[2][:1].upper() + pick[2][1:] if pick[2] else ""
+        out = [f"{head}. {why}" if why else f"{head}."]
         if rest:
             out.append("After that: "
                        + "; ".join(f"{r[1]}" for r in rest) + ".")
