@@ -340,3 +340,88 @@ def test_booking_a_flight_is_not_booking_a_meeting():
                  "book a table for two at 8pm",
                  "can you add the release to the schedule for q4"):
         assert classify(said)[0] != "schedule", (said, classify(said))
+
+
+def test_a_number_that_is_not_the_time_does_not_become_the_time():
+    """A room number, a duration and a head count all trail the time in
+    ordinary speech. The tier that was supposed to prefer a number introduced
+    by "at" could never fire, because the pattern itself starts with an
+    optional "at", so the match already contained the word and the text before
+    it never ended in one. Every unmarked sentence fell to the last bare
+    number."""
+    import datetime as _dt
+    from friday import when as _w
+    monday = _dt.datetime(2026, 8, 17, 10, 0)
+    for said, want in (("put it in for tomorrow at 4 in room 12", "16:00"),
+                       ("book a call tomorrow at 4 for 15 minutes", "16:00"),
+                       ("put the sync in for thursday at 2 in room 10", "14:00")):
+        _stamp, reads = _w.moment(said, monday)
+        assert reads.endswith(want), (said, reads)
+
+
+def test_a_correction_books_the_corrected_time():
+    """The destination of a move and the correction in a self-correcting
+    sentence are both the LAST time named."""
+    import datetime as _dt
+    from friday import when as _w
+    monday = _dt.datetime(2026, 8, 17, 10, 0)
+    for said, want in (
+            ("book it for tomorrow at 3pm, actually make it 4pm", "16:00"),
+            ("move the 3pm call to 5pm tomorrow", "17:00"),
+            ("move it from 3 to 5 tomorrow", "17:00")):
+        _stamp, reads = _w.moment(said, monday)
+        assert reads.endswith(want), (said, reads)
+
+
+def test_a_dot_is_a_clock_too():
+    """"4.30" is at least as common in writing as "4:30", and without it the
+    minutes were dropped and the meeting was booked on the hour."""
+    import datetime as _dt
+    from friday import when as _w
+    monday = _dt.datetime(2026, 8, 17, 10, 0)
+    assert _w.moment("put it in for tomorrow at 4.30", monday)[1].endswith("16:30")
+
+
+def test_friday_is_the_day_when_no_other_day_is_named():
+    """This was wrong in both directions. Reading the wake word as a day booked
+    a greeting three days early; stripping it always booked "friday works, book
+    the call for 4" today, which is worse, because that is how people accept a
+    proposed slot."""
+    import datetime as _dt
+    from friday import when as _w
+    monday = _dt.datetime(2026, 8, 17, 10, 0)
+    for said, want in (("friday works, book the call for 4", "Friday"),
+                       ("friday at 4", "Friday"),
+                       ("friday is fine, put it in for 10", "Friday"),
+                       ("friday, what about thursday at 4", "Thursday"),
+                       ("hey friday schedule a call tomorrow at 3pm", "Tuesday")):
+        _stamp, reads = _w.moment(said, monday)
+        assert reads.startswith(want), (said, reads)
+    # And the reader agrees: "friday's messages" is about Friday.
+    assert _w.parse("friday's messages, anything from sam?",
+                    monday.date())[2].startswith("Friday")
+
+
+def test_the_refusal_names_the_right_failure():
+    """`names_a_day` did not strip the wake word while `moment` did, so the two
+    disagreed and "hey friday, schedule a call" was told its day "may have gone
+    already" when it had never named one."""
+    from friday import when as _w
+    assert _w.names_a_day("hey friday, schedule a call") is False
+    assert _w.names_a_day("put it in for yesterday at 4") is True
+
+
+def test_the_ways_people_actually_ask_for_a_meeting():
+    """These three were reported as falling through and the previous fix was
+    made to the guard, which they never reached: they failed the pattern
+    itself, which had no "meet", no "set up" and no "get"."""
+    for said in ("let's meet thursday at 4",
+                 "set up a call with sam tomorrow at 4",
+                 "can we get a meeting in the calendar for tomorrow at 4",
+                 "add a call with sam for tomorrow at 4",
+                 "can we meet at 4"):
+        assert classify(said)[0] == "schedule", (said, classify(said))
+    # And the word alone is not enough, or every mention becomes a booking.
+    for said in ("the meeting was long", "nice to meet you",
+                 "what did the meeting decide", "i met sam yesterday"):
+        assert classify(said)[0] != "schedule", (said, classify(said))

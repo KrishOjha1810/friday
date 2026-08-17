@@ -121,12 +121,25 @@ _NEXT_RE = re.compile(
 # matched when the word after the verb was one of the listed pronouns AND
 # something followed it, so the commonest phrasing of all fell through to the
 # model.
+# Three shapes, because people say it three ways and the first two were the
+# only ones here. "Let's meet Thursday at 4", "set up a call with Sam tomorrow
+# at 4" and "can we get a meeting in the calendar for tomorrow at 4" all fell
+# through to the model: the verb list had no "meet", no "set up" and no "get",
+# and the optional object arm swallowed "a call" and then demanded a
+# preposition where "with" stood.
 _SCHEDULE_RE = re.compile(
-    r"\b(?:put|add|book|schedule|pencil)\s+"
-    r"(?:(?:it|that|this|us|me|him|her|them|a\s+\w+|the\s+\w+)\s+)?"
-    r"(?:in|down|on)?\s*"
-    r"(?:for|at|on)\s+(.+?)\s*[.!]?$"
-    r"|\b(?:schedule|book)\s+(?:a\s+)?(?:meeting|call|sync)\b\s*(.*)$",
+    # put/add/book/schedule/pencil ... for|at|on <when>
+    r"\b(?:put|add|book|schedule|pencil|set\s+up|sort\s+out)\b.*?"
+    r"\b(?:for|at|on)\s+(.+?)\s*[.!]?$"
+    # book|schedule a meeting <when>
+    r"|\b(?:schedule|book|set\s+up)\s+(?:a\s+|an\s+)?"
+    r"(?:meeting|call|sync|standup|chat|catch\s?up)\b\s*(.*)$"
+    # let's meet <when> / can we meet <when>. The lookahead is load-bearing:
+    # without it "the meeting was long" and "nice to meet you" were calendar
+    # requests, because the arm matched any sentence containing the word.
+    r"|\b(?:meet|meeting)\b\s*(?:with\s+[\w.\-]+\s*)?"
+    r"(?=[^.!?]*(?:\d|today|tonight|tomorrow|mon|tue|wed|thu|fri|sat|sun))"
+    r"(.+?)\s*[.!]?$",
     re.I)
 
 # The tracker can be named two ways round, "file a linear ticket" and "file a

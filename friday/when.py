@@ -34,23 +34,33 @@ _SHORT_DAYS = {"mon", "tue", "tues", "wed", "weds", "thu", "thur", "thurs",
 # 3pm" booked Friday, and "friday, what did sam say?" searched last Friday. The
 # most natural way to talk to it was the one way guaranteed to get the wrong
 # day.
-_WAKE = re.compile(r"^\s*(?:hey|hi|ok|okay|yo)?\s*friday\b[\s,:!.-]*", re.I)
-# ...unless a time follows it, in which case "friday" is the day after all.
-# Stripping unconditionally ate the day out of "friday at 4" and booked today.
-_WAKE_IS_A_DAY = re.compile(
-    r"^\s*friday\s*(?:at\s+)?\d|^\s*friday\s+(?:morning|afternoon|evening|"
-    r"night)\b", re.I)
+_GREETING = re.compile(r"^\s*(?:hey|hi|ok|okay|yo)\s+friday\b[\s,:!.-]*", re.I)
+_LEADING_FRIDAY = re.compile(r"^\s*friday\b[\s,:!.\-']*", re.I)
+# Any OTHER day named in the sentence. If there is one, a leading "friday" was
+# how you addressed the assistant; if there is not, it was the day you meant.
+_SOME_OTHER_DAY = re.compile(
+    r"\b(?:today|tonight|tomorrow|tmrw|monday|tuesday|wednesday|thursday|"
+    r"saturday|sunday|mon|tue|tues|wed|weds|thu|thur|thurs|sat|sun)\b", re.I)
 
 
 def _unwake(text: str) -> str:
     """Drop the assistant's name when it is being addressed, not scheduled.
 
-    It is called Friday and Friday is also a weekday, so the first match in
-    "hey friday, schedule a call tomorrow at 3pm" was the wake word and the
-    meeting went in three days early."""
-    if _WAKE_IS_A_DAY.match(text or ""):
-        return text or ""
-    return _WAKE.sub("", text or "", count=1)
+    It is called Friday and Friday is also a weekday, and this has been wrong
+    in both directions. Reading the wake word as a day booked "hey friday,
+    schedule a call tomorrow at 3pm" three days early. Stripping it always
+    booked "friday works, book the call for 4" today, four days early, which is
+    worse because that is how people accept a proposed slot.
+
+    One rule covers both: a leading "friday" is the wake word when the sentence
+    greets it, or when some OTHER day is named. Otherwise it is the day."""
+    got = text or ""
+    if _GREETING.match(got):
+        return _GREETING.sub("", got, count=1)
+    m = _LEADING_FRIDAY.match(got)
+    if m and _SOME_OTHER_DAY.search(got[m.end():]):
+        return got[m.end():]
+    return got
 
 
 def _start_of(d: _dt.date) -> float:
@@ -123,8 +133,12 @@ def parse(text: str, today: _dt.date = None) -> tuple:
     return 0, 0, ""
 
 
+# "4.30" as well as "4:30". The dot form is at least as common in writing, and
+# without it the minutes were dropped and a meeting was quietly booked on the
+# hour, half an hour before the one you asked for.
 _CLOCK = re.compile(
-    r"\b(?:at\s+)?(\d{1,2})(?::(\d{2}))?\s*(am|pm|a\.m\.|p\.m\.)?\b", re.I)
+    r"\b(?:at\s+)?(\d{1,2})(?:[:.](\d{2}))?\s*(am|pm|a\.m\.|p\.m\.)?\b",
+    re.I)
 # Full names match anywhere, because nothing else is spelled like them.
 #
 # Abbreviations need day-context, because several of them are ordinary English
@@ -179,7 +193,10 @@ def names_a_day(text: str) -> bool:
     So a refusal can tell you which kind it was. "When?" in answer to
     "yesterday at 4" is baffling, because you did say when: Friday read it and
     would not use it."""
-    low = (text or "").lower()
+    # Through the same wake-word handling as moment(), or the two disagree
+    # about whether the word "friday" is a day, and the refusal tells you your
+    # day "may have gone already" when you never named one.
+    low = _unwake((text or "").lower())
     return bool(_DAY_WORD.search(low) or _A_DAY_WAS_MEANT.search(low))
 
 
@@ -239,10 +256,19 @@ def moment(text: str, now: _dt.datetime = None) -> tuple:
     # minutes tomorrow at 4" booked a quarter past three, and "book 1:1
     # tomorrow at 4" booked one in the afternoon.
     found = [m for m in _CLOCK.finditer(low) if int(m.group(1)) <= 23]
-    marked = [m for m in found if (m.group(3) or "")]
-    at_ones = [m for m in found
-               if re.search(r"\bat\s*$", low[:m.start()])]
-    ordered = marked or at_ones or list(reversed(found))
+    # A number is a TIME when it carries am or pm, or when "at" introduces it.
+    # The "at" test used to look at the text before the match, and the pattern
+    # itself starts with an optional "at", so the match already contained the
+    # word and the text before it never ended in one: the whole middle tier was
+    # dead, and every unmarked sentence fell through to the last bare number.
+    # A room number, a duration or a head count trailing the time then won.
+    strong = [m for m in found
+              if (m.group(3) or "")
+              or m.group(0).lower().lstrip().startswith("at")]
+    # LAST, in both tiers. The destination of a move and the correction in a
+    # self-correcting sentence are both the last time named: "at 3pm, actually
+    # make it 4pm" was booking three.
+    ordered = list(reversed(strong or found))
     hour = minute = None
     for m in ordered:
         h = int(m.group(1))
