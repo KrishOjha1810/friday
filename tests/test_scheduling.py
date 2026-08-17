@@ -195,3 +195,26 @@ def test_it_says_which_way_the_date_failed():
     assert "When?" in vague, vague
     assert "When?" not in unusable, unusable
     assert "gone" in unusable or "understand" in unusable, unusable
+
+
+def test_the_abbreviations_everybody_uses():
+    """"thurs at 4" named no day the parser knew, fell through to today, and
+    Friday confirmed "Thursday" as this afternoon: a confident answer, three
+    days early, which is the failure this module says is worse than making you
+    type it."""
+    import datetime as _dt
+    from friday import when as _w
+    monday = _dt.datetime(2026, 8, 17, 9, 0)
+    for said, want in (("thurs at 4", "Thursday"), ("thu at 4", "Thursday"),
+                       ("fri 2pm", "Friday"), ("wed at 3", "Wednesday"),
+                       ("tues at 5", "Tuesday"), ("weds 4pm", "Wednesday"),
+                       ("sat at 11am", "Saturday"), ("sun 6pm", "Sunday")):
+        stamp, reads = _w.moment(said, monday)
+        assert stamp and reads.startswith(want), (said, reads)
+
+
+def test_an_abbreviated_day_that_has_gone_is_still_refused():
+    import datetime as _dt
+    from friday import when as _w
+    monday = _dt.datetime(2026, 8, 17, 9, 0)
+    assert _w.moment("last thurs at 4", monday)[0] == 0

@@ -179,6 +179,14 @@ def _peek(path):
     got = _PEEKS.get(key)
     if got is None:
         got = list(_texts(path))
+        # One entry per FILE. Keying on (path, mtime, size) alone meant every
+        # append made a new key and the old one was never dropped, so an
+        # actively written transcript was cached once per search: sixty peeks
+        # at a growing file held twenty-nine times the file's own size. The
+        # count cap bounded entries, not bytes, and the biggest files are the
+        # ones most likely to fill it.
+        for old in [k for k in _PEEKS if k[0] == str(path)]:
+            _PEEKS.pop(old, None)
         if len(_PEEKS) > 400:
             _PEEKS.clear()          # bounded, and cheap to rebuild
         _PEEKS[key] = got

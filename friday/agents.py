@@ -57,6 +57,10 @@ class Claude:
         from . import replies
         return replies.tally(row.get("path", ""))
 
+    def spoke(self, row: dict) -> int:
+        from . import replies
+        return replies.spoke(row.get("path", ""))
+
     def resume(self, row: dict) -> list:
         return ["claude", "--resume", row.get("sid", "")]
 
@@ -202,6 +206,11 @@ class Codex:
     def tally(self, row: dict) -> int:
         got = self._read(Path(row.get("path", "")))
         return int(got.get("turns", 0)) if got else 0
+
+    def spoke(self, row: dict) -> int:
+        # Codex's reader only ever collects messages that carry text, so its
+        # turn count is already a count of things it SAID.
+        return self.tally(row)
 
     def resume(self, row: dict) -> list:
         return ["codex", "resume", row.get("sid", "")]
@@ -437,6 +446,18 @@ def last_said(row: dict) -> str:
         return vendor_of(row).last_said(row) or ""
     except Exception:
         return ""
+
+
+def spoke(row: dict) -> int:
+    """How many turns this agent has spoken, whoever made it.
+
+    Spoken, not acted: a tool call is a record with no words in it, and a step
+    must not be completed by an agent picking up a tool."""
+    try:
+        v = vendor_of(row)
+        return int(v.spoke(row)) if hasattr(v, "spoke") else 0
+    except Exception:
+        return 0
 
 
 def tally(row: dict) -> int:

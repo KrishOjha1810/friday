@@ -11,8 +11,11 @@ is what Friday will SAY it read, so the window and the claim can never disagree.
 import datetime as _dt
 import re
 
+# Every spelling anyone uses, to the weekday it means.
 _DAYS = {"monday": 0, "tuesday": 1, "wednesday": 2, "thursday": 3,
-         "friday": 4, "saturday": 5, "sunday": 6}
+         "friday": 4, "saturday": 5, "sunday": 6,
+         "mon": 0, "tue": 1, "tues": 1, "wed": 2, "weds": 2,
+         "thu": 3, "thur": 3, "thurs": 3, "fri": 4, "sat": 5, "sun": 6}
 
 
 def _start_of(d: _dt.date) -> float:
@@ -78,9 +81,14 @@ def parse(text: str, today: _dt.date = None) -> tuple:
 
 _CLOCK = re.compile(
     r"\b(?:at\s+)?(\d{1,2})(?::(\d{2}))?\s*(am|pm|a\.m\.|p\.m\.)?\b", re.I)
+# Abbreviations included, because everybody uses them. Without them "thurs at
+# 4" named no day the parser knew, fell through to today, and Friday confirmed
+# "Thursday" as this afternoon: a confident answer, three days early, which is
+# the exact failure this module says is worse than making you type it.
 _DAY_WORD = re.compile(
-    r"\b(today|tomorrow|tonight|monday|tuesday|wednesday|thursday|friday|"
-    r"saturday|sunday)\b", re.I)
+    r"\b(today|tonight|tomorrow|tmrw"
+    r"|mon(?:day)?|tues?(?:day)?|wed(?:s|nesday)?|thur?s?(?:day)?"
+    r"|fri(?:day)?|sat(?:urday)?|sun(?:day)?)\b", re.I)
 # A day that was named and NOT understood. "the 31st of February", "on the
 # 14th", "next month", "yesterday": each of these says plainly which day is
 # meant, and none of them is a day word. With no day word found the parser fell
@@ -93,7 +101,8 @@ _DAY_WORD = re.compile(
 # Only "last <weekday>" counts, and a month only when a number is near it.
 _A_DAY_WAS_MEANT = re.compile(
     r"\byesterday\b"
-    r"|\blast\s+(?:mon|tues|wednes|thurs|fri|satur|sun)day\b"
+    r"|\blast\s+(?:mon|tue|tues|wed|weds|wednes|thu|thur|thurs|fri|sat|satur"
+    r"|sun)(?:day)?\b"
     r"|\bnext\s+(?:week|month|year)\b"
     r"|\b\d{1,2}(?:st|nd|rd|th)\b"
     r"|\b\d{1,2}/\d{1,2}\b"
@@ -137,7 +146,7 @@ def moment(text: str, now: _dt.datetime = None) -> tuple:
             evening = word == "tonight"
         elif word == "tomorrow":
             day = now.date() + _dt.timedelta(days=1)
-        elif re.search(r"\blast\s+" + word + r"\b", low):
+        elif word in _DAYS and re.search(r"\blast\s+" + word + r"\b", low):
             # "last Tuesday" is a day that has gone. Reading it as next Tuesday
             # puts the meeting a week from the one you meant.
             return 0, ""

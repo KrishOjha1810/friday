@@ -375,6 +375,88 @@ def test_a_rotated_transcript_is_still_evidence():
     assert got["state"] == plans.DONE, (got["state"], got["steps"])
 
 
+def _wait_step(prime, after_send, settle=1.0, timeout=4):
+    """One step against an agent that does `after_send` when prompted."""
+    import json
+    import threading
+    room = _room()
+    path = room / "one.jsonl"
+    path.write_text("")
+    for rec in prime:
+        with open(path, "a") as fh:
+            fh.write(json.dumps(rec) + "\n")
+
+    def send(sid, text):
+        threading.Timer(0.2, lambda: after_send(path)).start()
+        return True
+
+    r = plans.Runner(announce=lambda *a, **k: None, send=send,
+                     look=lambda sid: {"status": "idle", "question": "",
+                                       "path": str(path), "vendor": "claude",
+                                       "sid": sid})
+    r.POLL, r.SETTLE, r.STEP_TIMEOUT = 0.2, settle, timeout
+    pid = plans.create("w", "api", ["do the thing"], sid="s1")
+    started = time.time()
+    r.start(pid)
+    while r.running and time.time() - started < timeout + 6:
+        time.sleep(0.05)
+    return plans.get(pid)["steps"][0]
+
+
+def _room():
+    from sandbox import use_temp_config as _u
+    return _u()
+
+
+def _said(text):
+    return {"type": "assistant",
+            "message": {"content": [{"type": "text", "text": text}]}}
+
+
+_TOOL = {"type": "assistant",
+         "message": {"content": [{"type": "tool_use", "name": "Bash",
+                                  "input": {}}]}}
+
+
+def test_picking_up_a_tool_is_not_answering():
+    """A tool call is an assistant record with no words in it, and most of a
+    turn is tool calls. Counting records rather than utterances completed a
+    step one poll after the send, with an empty answer written down."""
+    import json
+    got = _wait_step([], lambda p: open(p, "a").write(json.dumps(_TOOL) + "\n"))
+    assert got["state"] != plans.DONE, got
+    assert got["note"] != "", got
+
+
+def test_the_previous_steps_answer_is_not_this_steps_answer():
+    """With a tool call bumping the count and the text unchanged, step two was
+    marked done and quoted back with step one's reply. The record of the plan
+    becomes a lie you cannot spot from the announcement."""
+    import json
+    got = _wait_step([_said("Done with step one.")],
+                     lambda p: open(p, "a").write(json.dumps(_TOOL) + "\n"))
+    assert got["state"] != plans.DONE, got
+    assert "step one" not in (got["note"] or ""), got
+
+
+def test_a_genuinely_new_answer_completes_it():
+    import json
+    got = _wait_step([_said("Done with step one.")],
+                     lambda p: open(p, "a").write(
+                         json.dumps(_said("Step two is finished.")) + "\n"))
+    assert got["state"] == plans.DONE, got
+    assert got["note"].startswith("Step two"), got
+
+
+def test_the_same_words_twice_still_completes_it():
+    """"Done." to two steps in a row is the commonest reply there is."""
+    import json
+    got = _wait_step([_said("Done.")],
+                     lambda p: open(p, "a").write(
+                         json.dumps(_said("Done.")) + "\n"))
+    assert got["state"] == plans.DONE, got
+
+
 if __name__ == "__main__":
     for name, fn in sorted(globals().items()):
         if name.startswith("test_") and callable(fn):

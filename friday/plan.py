@@ -758,8 +758,14 @@ class Runner:
                      f"no session called {target}" if target
                      else "this step says who it is for nowhere")
             self._maybe_hold(plan["id"])
-            self.announce(f"I can't find a session called {target}, so that "
-                          f"part of the plan didn't run. The rest carries on.")
+            # The note already told these two apart and the spoken line did
+            # not, and the spoken line is the only one you hear: "a session
+            # called ," sent you looking for a session nobody named.
+            self.announce(
+                (f"I can't find a session called {target}, so that part of the "
+                 f"plan didn't run. The rest carries on.") if target else
+                (f"Step {step['seq'] + 1} doesn't say who it's for, so I "
+                 f"didn't send it anywhere. The rest carries on."))
             return False
         info = self.look(sid) or {}
         info.setdefault("sid", sid)
@@ -770,7 +776,11 @@ class Runner:
         # minutes and blamed the agent for silence. And it compared TEXT, so an
         # agent answering "Done." to two steps in a row was invisible the second
         # time.
-        before = agents.tally(info)
+        # Spoken turns, not records. A tool call is an assistant record with
+        # no words in it, and counting records meant a step could be completed
+        # by the agent picking up a tool, with the PREVIOUS step's answer
+        # written down as the reply to this one.
+        before = agents.spoke(info)
         before_text = agents.last_said(info)
         # A question the session was ALREADY sitting on is not an answer to a
         # prompt that has not been sent yet. Taken as one, the first poll after
@@ -797,7 +807,13 @@ class Runner:
             return False
 
         end = time.time() + self.STEP_TIMEOUT
-        settled_at, last_seen = 0.0, ""
+        # No settle is in progress yet, and `None` says so. Zero did not: the
+        # stability check is "has this been the same for SETTLE seconds", and
+        # against a start time of zero that is true from the first poll, so a
+        # step was completed one poll after the send with an empty answer
+        # recorded, defeating the settle entirely for any session that had not
+        # spoken yet.
+        settled_at, last_seen = None, None
         stop = stop or self._stop
         while time.time() < end and not stop.is_set():
             time.sleep(self.POLL)
@@ -822,17 +838,13 @@ class Runner:
                 return False
             if path:
                 said = agents.last_said(live)
-                # CHANGED, not merely greater. Transcripts get rotated and
-                # truncated, and a count that goes DOWN is still the file
-                # changing under us; requiring an increase meant a rotation
-                # mid-step waited the full fifteen minutes and then blamed the
-                # agent for silence. The text is the second signal, for a file
-                # rewritten to the same length.
-                # Greater, or the words changed. "Different" counted a falling
-                # count as a reply, and the count fell whenever Friday's own
-                # prompt pushed an old message out of the read window, so a
-                # whole plan could complete against an agent that never worked.
-                if agents.tally(live) > before or (said and said != before_text):
+                # It has ANSWERED when it has spoken a turn it had not spoken
+                # when the prompt went out. A new count covers an agent that
+                # replies "Done." twice, where the words are identical; the
+                # text covers a transcript rotated to the same length.
+                answered = said and (agents.spoke(live) > before
+                                     or said != before_text)
+                if answered:
                     # Wait for it to STOP talking, the same way the watchtower
                     # and wait_for_reply already do. Without this, an agent's
                     # first "Let me look at that" completes the step and the

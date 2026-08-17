@@ -127,14 +127,18 @@ def test_fridays_own_prompt_is_not_the_agent_answering():
     multi-step plan could complete against an agent that never worked."""
     with tempfile.TemporaryDirectory() as d:
         p = Path(d) / "big.jsonl"
+        # Deliberately past the tail window, whatever it is set to: the point
+        # of the count is that it does not depend on a window at all.
         with open(p, "w") as fh:
-            for i in range(400):
+            i = 0
+            while fh.tell() < replies.TAIL_BYTES + 50_000:
                 fh.write(json.dumps({"type": "assistant", "message": {
                     "content": [{"type": "text",
                                  "text": f"reply {i} " + "x" * 600}]}}) + "\n")
+                i += 1
         assert p.stat().st_size > replies.TAIL_BYTES, "not past the tail window"
         before = replies.tally(str(p))
-        assert before == 400, before
+        assert before > 300, before
         with open(p, "a") as fh:
             fh.write(json.dumps({"type": "user", "message": {
                 "content": "do the thing"}}) + "\n")

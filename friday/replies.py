@@ -22,7 +22,13 @@ import time
 
 # How much of the tail to read. Transcripts run to many megabytes, and the only
 # part that matters is the end.
-TAIL_BYTES = 200_000
+#
+# Two megabytes rather than two hundred kilobytes: a single large tool result
+# pushed the agent's actual reply out of the window, so `last_said` came back
+# empty and Friday reported silence about work that was finished. Reading two
+# megabytes costs a couple of milliseconds and covers any plausible tool
+# result.
+TAIL_BYTES = 2_000_000
 
 
 def _tail(path: str, limit: int = TAIL_BYTES) -> list:
@@ -119,6 +125,23 @@ def tally(path: str) -> int:
                     extra = f.readline()
                     chunk += extra
                 n += len(_SPOKE.findall(chunk + tail))
+    except Exception:
+        return 0
+
+
+def spoke(path: str) -> int:
+    """How many turns the agent has SPOKEN, as opposed to acted.
+
+    A tool call is an assistant record with no text in it, and most of a turn is
+    tool calls. Counting records rather than utterances meant a step could be
+    completed by the agent picking up a tool, with the previous step's answer
+    recorded as the reply to this one.
+
+    Read from the tail like everything else here, and that is the right trade:
+    this is asked once a poll and the answer only has to be comparable with
+    itself a moment later."""
+    try:
+        return len([m for m in _messages(path) if m[1] == "assistant" and m[2]])
     except Exception:
         return 0
 
