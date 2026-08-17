@@ -35,9 +35,21 @@ _SHORT_DAYS = {"mon", "tue", "tues", "wed", "weds", "thu", "thur", "thurs",
 # most natural way to talk to it was the one way guaranteed to get the wrong
 # day.
 _WAKE = re.compile(r"^\s*(?:hey|hi|ok|okay|yo)?\s*friday\b[\s,:!.-]*", re.I)
+# ...unless a time follows it, in which case "friday" is the day after all.
+# Stripping unconditionally ate the day out of "friday at 4" and booked today.
+_WAKE_IS_A_DAY = re.compile(
+    r"^\s*friday\s*(?:at\s+)?\d|^\s*friday\s+(?:morning|afternoon|evening|"
+    r"night)\b", re.I)
 
 
 def _unwake(text: str) -> str:
+    """Drop the assistant's name when it is being addressed, not scheduled.
+
+    It is called Friday and Friday is also a weekday, so the first match in
+    "hey friday, schedule a call tomorrow at 3pm" was the wake word and the
+    meeting went in three days early."""
+    if _WAKE_IS_A_DAY.match(text or ""):
+        return text or ""
     return _WAKE.sub("", text or "", count=1)
 
 

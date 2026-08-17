@@ -287,6 +287,22 @@ def test_the_assistants_own_name_is_not_a_weekday():
                     monday.date())[2].startswith("Friday")
 
 
+def test_the_wake_word_does_not_eat_a_real_friday():
+    """Stripping the assistant's name unconditionally took the day out of
+    "friday at 4" and booked today. It is only the wake word when a time does
+    not follow it."""
+    import datetime as _dt
+    from friday import when as _w
+    monday = _dt.datetime(2026, 8, 17, 10, 0)
+    for said, want in (("friday at 4", "Friday"), ("friday 2pm", "Friday"),
+                       ("on friday at 4", "Friday"),
+                       ("friday, put it in for friday at 4", "Friday"),
+                       ("friday, what about thursday at 4", "Thursday"),
+                       ("hey friday schedule a call tomorrow at 3pm", "Tuesday")):
+        _stamp, reads = _w.moment(said, monday)
+        assert reads.startswith(want), (said, reads)
+
+
 def test_the_number_that_means_a_time_is_the_one_it_takes():
     """It took the first number in the sentence, so a duration or a count
     became the meeting hour: "grab 15 minutes tomorrow at 4" booked a quarter
