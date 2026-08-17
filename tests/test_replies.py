@@ -156,6 +156,23 @@ def test_an_old_style_marker_that_looks_like_a_number():
         assert got == "", repr(got)
 
 
+def test_an_agent_quoting_a_transcript_is_not_two_turns():
+    """The count is a byte scan, and coding agents explain file formats all
+    day. It holds because JSON escapes the inner quotes, which is load-bearing
+    rather than lucky: a looser pattern would count every explanation of the
+    transcript format as a turn the agent took."""
+    with tempfile.TemporaryDirectory() as d:
+        p = Path(d) / "s.jsonl"
+        body = ('Here is the shape: {"type": "assistant", "message": {}} '
+                'and also {"role":"assistant"}')
+        with open(p, "w") as fh:
+            fh.write(json.dumps({"type": "user",
+                                 "message": {"content": body}}) + "\n")
+            fh.write(json.dumps({"type": "assistant", "message": {
+                "content": [{"type": "text", "text": body}]}}) + "\n")
+        assert replies.tally(str(p)) == 1, replies.tally(str(p))
+
+
 if __name__ == "__main__":
     for name, fn in sorted(globals().items()):
         if name.startswith("test_") and callable(fn):

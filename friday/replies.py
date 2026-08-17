@@ -79,6 +79,12 @@ def last_said(path: str) -> str:
 
 
 # Marks an assistant turn, in either transcript dialect, without parsing.
+#
+# Safe against an agent QUOTING a transcript, which coding agents do constantly,
+# because JSON escapes the inner quotes: a body containing {"type": "assistant"}
+# is stored as {\"type\": \"assistant\"} and the pattern below does not match
+# it. That is load-bearing. Loosening this to match bare `assistant` would
+# count every explanation of the file format as a turn the agent took.
 _SPOKE = re.compile(rb'"(?:type|role)"\s*:\s*"assistant"')
 
 
