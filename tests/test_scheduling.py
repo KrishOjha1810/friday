@@ -213,6 +213,21 @@ def test_the_abbreviations_everybody_uses():
         assert stamp and reads.startswith(want), (said, reads)
 
 
+def test_an_abbreviation_inside_an_ordinary_word_is_not_a_day():
+    """Several of the abbreviations are ordinary English words. Matching them
+    bare booked "sat down at 4" for Saturday and "the sun is out at 4" for
+    Sunday: the wrong DAY, stated as a confident confirmation. So an
+    abbreviation counts only where a day actually goes."""
+    import datetime as _dt
+    from friday import when as _w
+    monday = _dt.datetime(2026, 8, 17, 9, 0)
+    for said in ("sat down at 4", "the sun is out at 4", "sunset at 4",
+                 "wedding at 4", "satisfied at 4", "monitor at 4",
+                 "we sat at 4", "i wed at 4", "they sat at 4"):
+        _stamp, reads = _w.moment(said, monday)
+        assert reads.startswith("Monday"), (said, reads)
+
+
 def test_an_abbreviated_day_that_has_gone_is_still_refused():
     import datetime as _dt
     from friday import when as _w

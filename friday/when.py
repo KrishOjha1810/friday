@@ -81,14 +81,23 @@ def parse(text: str, today: _dt.date = None) -> tuple:
 
 _CLOCK = re.compile(
     r"\b(?:at\s+)?(\d{1,2})(?::(\d{2}))?\s*(am|pm|a\.m\.|p\.m\.)?\b", re.I)
-# Abbreviations included, because everybody uses them. Without them "thurs at
-# 4" named no day the parser knew, fell through to today, and Friday confirmed
-# "Thursday" as this afternoon: a confident answer, three days early, which is
-# the exact failure this module says is worse than making you type it.
+# Full names match anywhere, because nothing else is spelled like them.
+#
+# Abbreviations need day-context, because several of them are ordinary English
+# words. Matching them bare booked "sat down at 4" for Saturday and "the sun is
+# out at 4" for Sunday: the wrong DAY, stated as a confident confirmation. So an
+# abbreviation counts only where a day actually goes, which is next to a time or
+# after the words that introduce one, and never straight after a subject, where
+# "we sat at 4" and "i wed at 4" are past-tense verbs rather than days.
 _DAY_WORD = re.compile(
     r"\b(today|tonight|tomorrow|tmrw"
-    r"|mon(?:day)?|tues?(?:day)?|wed(?:s|nesday)?|thur?s?(?:day)?"
-    r"|fri(?:day)?|sat(?:urday)?|sun(?:day)?)\b", re.I)
+    r"|monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b"
+    r"|(?<![\w-])(?:on|by|next|this|come)\s+"
+    r"(mon|tue|tues|wed|weds|thu|thur|thurs|fri|sat|sun)(?![\w-])"
+    r"|(?<!\bwe )(?<!\bi )(?<!\bhe )(?<!\bshe )(?<!\bthey )(?<!\byou )"
+    r"(?<![\w-])(mon|tue|tues|wed|weds|thu|thur|thurs|fri|sat|sun)"
+    r"(?![\w-])\s*(?=(?:at\s+)?\d|at\s|morning|afternoon|evening|night)",
+    re.I)
 # A day that was named and NOT understood. "the 31st of February", "on the
 # 14th", "next month", "yesterday": each of these says plainly which day is
 # meant, and none of them is a day word. With no day word found the parser fell
@@ -140,7 +149,9 @@ def moment(text: str, now: _dt.datetime = None) -> tuple:
     # silently did nothing.
     dm = _DAY_WORD.search(low)
     if dm:
-        word = dm.group(1)
+        # Whichever alternative matched: the full name, or an abbreviation with
+        # a day-shaped context in front of it or a time behind it.
+        word = dm.group(1) or dm.group(2) or dm.group(3)
         if word in ("today", "tonight"):
             day, said_today = now.date(), True
             evening = word == "tonight"
