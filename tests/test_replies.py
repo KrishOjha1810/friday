@@ -177,6 +177,41 @@ def test_an_agent_quoting_a_transcript_is_not_two_turns():
         assert replies.tally(str(p)) == 1, replies.tally(str(p))
 
 
+def test_a_reply_buried_under_a_huge_tool_result_is_still_found():
+    """A large tool result following the answer pushed it out of the read
+    window, so the count went DOWN and the text came back empty. A count that
+    falls is indistinguishable from one that never rose, so the step timed out
+    and Friday reported silence about work that was finished."""
+    with tempfile.TemporaryDirectory() as d:
+        p = Path(d) / "s.jsonl"
+
+        def said(t):
+            return json.dumps({"type": "assistant", "message": {
+                "content": [{"type": "text", "text": t}]}})
+
+        p.write_text(said("The migration is complete.") + "\n")
+        before = replies.spoke(str(p))
+        with open(p, "a") as fh:
+            fh.write(said("Second answer.") + "\n")
+            fh.write(json.dumps({"type": "user", "message": {
+                "content": "tool result " + "z" * (replies.TAIL_BYTES + 500_000)
+            }}) + "\n")
+        assert replies.spoke(str(p)) == before + 1, replies.spoke(str(p))
+        assert replies.last_said(str(p)) == "Second answer."
+
+
+def test_a_tool_call_is_not_a_spoken_turn():
+    with tempfile.TemporaryDirectory() as d:
+        p = Path(d) / "s.jsonl"
+        with open(p, "w") as fh:
+            fh.write(json.dumps({"type": "assistant", "message": {
+                "content": [{"type": "text", "text": "Done."}]}}) + "\n")
+            fh.write(json.dumps({"type": "assistant", "message": {
+                "content": [{"type": "tool_use", "name": "Bash",
+                             "input": {}}]}}) + "\n")
+        assert replies.spoke(str(p)) == 1, replies.spoke(str(p))
+
+
 if __name__ == "__main__":
     for name, fn in sorted(globals().items()):
         if name.startswith("test_") and callable(fn):

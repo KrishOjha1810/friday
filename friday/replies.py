@@ -45,8 +45,13 @@ def _tail(path: str, limit: int = TAIL_BYTES) -> list:
 
 def _messages(path: str) -> list:
     """[(timestamp, role, text)] from the end of a transcript, in order."""
+    return _messages_from(_tail(path))
+
+
+def _messages_from(lines) -> list:
+    """The same parse, over lines from anywhere."""
     out = []
-    for line in _tail(path):
+    for line in lines:
         line = line.strip()
         if not line.startswith("{"):
             continue
@@ -73,6 +78,26 @@ def _messages(path: str) -> list:
     return out
 
 
+def _last_spoken_line(path: str) -> str:
+    """The last thing the agent said, found by reading the whole file.
+
+    Only used when the tail has none, which happens when a large tool result
+    follows the reply. Expensive and rare, and the alternative is telling you
+    an agent stayed quiet about work it has finished."""
+    found = ""
+    try:
+        with open(path, "rb") as f:
+            for line in f:
+                if _SPOKE.search(line) and _WORDS.search(line):
+                    found = line
+    except Exception:
+        return ""
+    if not found:
+        return ""
+    got = _messages_from([found.decode("utf-8", "ignore")])
+    return got[-1][2] if got else ""
+
+
 def last_said(path: str) -> str:
     """The last thing the AGENT said, ignoring what was said TO it.
 
@@ -81,7 +106,12 @@ def last_said(path: str) -> str:
     future plans of Friday?", which is the question. Only the agent's own words
     can ever be a reply."""
     msgs = [m for m in _messages(path) if m[1] == "assistant"]
-    return msgs[-1][2] if msgs else ""
+    if msgs:
+        return msgs[-1][2]
+    # Nothing in the tail. A large tool result can follow the reply and push it
+    # out of the window, and answering "" there is Friday reporting silence
+    # about work that is finished. Rare, so paying for a full read is right.
+    return _last_spoken_line(path)
 
 
 # Marks an assistant turn, in either transcript dialect, without parsing.
@@ -129,19 +159,32 @@ def tally(path: str) -> int:
         return 0
 
 
+# A text block, which is what separates a turn the agent SPOKE from one where
+# it only picked up a tool.
+_WORDS = re.compile(rb'"type"\s*:\s*"text"')
+
+
 def spoke(path: str) -> int:
     """How many turns the agent has SPOKEN, as opposed to acted.
 
-    A tool call is an assistant record with no text in it, and most of a turn is
-    tool calls. Counting records rather than utterances meant a step could be
-    completed by the agent picking up a tool, with the previous step's answer
-    recorded as the reply to this one.
+    A tool call is an assistant record with no text in it, and most of a turn
+    is tool calls. Counting records rather than utterances meant a step could
+    be completed by the agent picking up a tool, with the previous step's
+    answer recorded as the reply to this one.
 
-    Read from the tail like everything else here, and that is the right trade:
-    this is asked once a poll and the answer only has to be comparable with
-    itself a moment later."""
+    Over the whole file, not a tail, and that is the point. Read from a window
+    this went DOWN when a large tool result followed the reply, and a count
+    that falls is indistinguishable from a count that never rose: the step
+    timed out and Friday reported silence about work that was finished. One
+    JSON record per line, so a line carrying both markers is a turn with words
+    in it."""
     try:
-        return len([m for m in _messages(path) if m[1] == "assistant" and m[2]])
+        n = 0
+        with open(path, "rb") as f:
+            for line in f:
+                if _SPOKE.search(line) and _WORDS.search(line):
+                    n += 1
+        return n
     except Exception:
         return 0
 
