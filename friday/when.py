@@ -255,7 +255,11 @@ def moment(text: str, now: _dt.datetime = None) -> tuple:
     # and then the LAST one, because the first is usually a quantity. "Grab 15
     # minutes tomorrow at 4" booked a quarter past three, and "book 1:1
     # tomorrow at 4" booked one in the afternoon.
-    found = [m for m in _CLOCK.finditer(low) if int(m.group(1)) <= 23]
+    # Minutes checked as well as hours. Only the hour was, so "at 4.99" and
+    # "at 4:99" reached datetime.time() and raised, which meant a plausible
+    # typo crashed the request instead of being refused.
+    found = [m for m in _CLOCK.finditer(low)
+             if int(m.group(1)) <= 23 and int(m.group(2) or 0) <= 59]
     # A number is a TIME when it carries am or pm, or when "at" introduces it.
     # The "at" test used to look at the text before the match, and the pattern
     # itself starts with an optional "at", so the match already contained the

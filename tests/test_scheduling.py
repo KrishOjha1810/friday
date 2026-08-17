@@ -382,6 +382,20 @@ def test_a_dot_is_a_clock_too():
     assert _w.moment("put it in for tomorrow at 4.30", monday)[1].endswith("16:30")
 
 
+def test_an_impossible_time_is_refused_not_raised():
+    """Only the hour was checked, so "at 4.99" reached datetime.time() and
+    raised: a plausible typo crashed the request instead of being refused."""
+    import datetime as _dt
+    from friday import when as _w
+    monday = _dt.datetime(2026, 8, 17, 10, 0)
+    for said in ("tomorrow at 4.99", "tomorrow at 4:99", "tomorrow at 99:99",
+                 "tomorrow at 25"):
+        assert _w.moment(said, monday)[0] == 0, said
+    # A dot that is not a time is left alone rather than read as one.
+    assert _w.moment("version 1.30 at 4 tomorrow",
+                     monday)[1].endswith("16:00")
+
+
 def test_friday_is_the_day_when_no_other_day_is_named():
     """This was wrong in both directions. Reading the wake word as a day booked
     a greeting three days early; stripping it always booked "friday works, book
