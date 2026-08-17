@@ -268,3 +268,59 @@ def test_reading_a_past_day_does_not_match_an_abbreviation_bare():
                  "summarise the wed meeting notes"):
         assert _w.parse(said, monday)[2] == "", (said, _w.parse(said, monday))
     assert _w.parse("what was said on friday", monday)[2].startswith("Friday")
+
+
+def test_the_assistants_own_name_is_not_a_weekday():
+    """It is called Friday, which is also a weekday, and the first match wins.
+    So the most natural way to address it was the one guaranteed to get the
+    wrong day: "hey friday, schedule a call tomorrow at 3pm" booked Friday."""
+    import datetime as _dt
+    from friday import when as _w
+    monday = _dt.datetime(2026, 8, 17, 10, 0)
+    stamp, reads = _w.moment("hey friday schedule a call tomorrow at 3pm", monday)
+    assert reads.startswith("Tuesday"), reads
+    stamp, reads = _w.moment("friday, book me in for thursday at 4", monday)
+    assert reads.startswith("Thursday"), reads
+    assert _w.parse("friday, anything from sam?", monday.date())[2] == ""
+    # And a real one still reads.
+    assert _w.parse("what was said on friday",
+                    monday.date())[2].startswith("Friday")
+
+
+def test_the_number_that_means_a_time_is_the_one_it_takes():
+    """It took the first number in the sentence, so a duration or a count
+    became the meeting hour: "grab 15 minutes tomorrow at 4" booked a quarter
+    past three."""
+    import datetime as _dt
+    from friday import when as _w
+    monday = _dt.datetime(2026, 8, 17, 10, 0)
+    for said, want in (("grab 15 minutes tomorrow at 4", "16:00"),
+                       ("book 1:1 tomorrow at 4", "16:00"),
+                       ("meet 2 people tomorrow at 4", "16:00"),
+                       ("sync with the 3 leads on wed at 5pm", "17:00")):
+        _stamp, reads = _w.moment(said, monday)
+        assert reads.endswith(want), (said, reads)
+
+
+def test_a_named_day_is_not_quietly_turned_into_today():
+    """The guard against "we sat at 4" suppressed the abbreviation and then
+    fell through to today, so "is thurs at 4 ok" booked this afternoon. And it
+    stopped at the first candidate, so a real day later in the sentence was
+    never seen."""
+    import datetime as _dt
+    from friday import when as _w
+    monday = _dt.datetime(2026, 8, 17, 10, 0)
+    for said, want in (("is thurs at 4 ok", "Thursday"),
+                       ("that thurs at 4 works for me", "Thursday"),
+                       ("we sat at 4 on friday", "Friday")):
+        _stamp, reads = _w.moment(said, monday)
+        assert reads.startswith(want), (said, reads)
+
+
+def test_booking_a_flight_is_not_booking_a_meeting():
+    """"Book" and "schedule" count as their own confirmation, and the bare verb
+    accepted a flight, a cab and a table."""
+    for said in ("book a flight for tomorrow at 9am", "book a cab for 6am",
+                 "book a table for two at 8pm",
+                 "can you add the release to the schedule for q4"):
+        assert classify(said)[0] != "schedule", (said, classify(said))

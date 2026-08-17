@@ -22,6 +22,23 @@ _DAYS = {"monday": 0, "tuesday": 1, "wednesday": 2, "thursday": 3,
 # KeyError straight out of an unguarded caller: the request thread died and the
 # page got no reply at all, for a common spelling of "tomorrow".
 _RELATIVE = {"today": 0, "tonight": 0, "tomorrow": 1, "tmrw": 1}
+# Which spellings are abbreviations, stated rather than inferred from length. A
+# length test stood in for this, so any four-letter abbreviation added later
+# silently got bare matching and the wrong-day bug came back.
+_SHORT_DAYS = {"mon", "tue", "tues", "wed", "weds", "thu", "thur", "thurs",
+               "fri", "sat", "sun"}
+
+
+# Addressing the assistant. It is called Friday, which is also a weekday, and
+# `search` returns the FIRST match: "hey friday, schedule a call tomorrow at
+# 3pm" booked Friday, and "friday, what did sam say?" searched last Friday. The
+# most natural way to talk to it was the one way guaranteed to get the wrong
+# day.
+_WAKE = re.compile(r"^\s*(?:hey|hi|ok|okay|yo)?\s*friday\b[\s,:!.-]*", re.I)
+
+
+def _unwake(text: str) -> str:
+    return _WAKE.sub("", text or "", count=1)
 
 
 def _start_of(d: _dt.date) -> float:
@@ -34,7 +51,10 @@ def _end_of(d: _dt.date) -> float:
 
 def parse(text: str, today: _dt.date = None) -> tuple:
     """(oldest, latest, label) or (0, 0, "") when no time was named."""
-    t = " " + (text or "").lower() + " "
+    # The wake word first: it is called Friday and that is also a weekday, so
+    # "friday, what did sam say?" searched last Friday and labelled the answer
+    # as though the question had been understood.
+    t = " " + _unwake((text or "").lower()) + " "
     today = today or _dt.date.today()
 
     # Both named at once is a two-day span, not the older of the two: "yesterday
@@ -80,8 +100,8 @@ def parse(text: str, today: _dt.date = None) -> tuple:
     # "Sat (15 Aug)" and searched the wrong day, with a label that told you it
     # had understood.
     for name, idx in _DAYS.items():
-        pattern = (r"\b(?:on |last )?" + name + r"\b" if len(name) > 3
-                   else r"\b(?:on|last)\s+" + name + r"\b")
+        pattern = (r"\b(?:on|last)\s+" + name + r"\b" if name in _SHORT_DAYS
+                   else r"\b(?:on |last )?" + name + r"\b")
         if re.search(pattern, t):
             back = (today.weekday() - idx) % 7
             if back == 0:
@@ -116,8 +136,7 @@ _DAY_WORD = re.compile(
 # than an enumeration of the examples somebody happened to try.
 _NOT_BEFORE_A_DAY = {
     "the", "a", "an", "my", "your", "our", "their", "its", "his", "her",
-    "we", "i", "he", "she", "they", "you", "it", "was", "is", "were", "are",
-    "been", "had", "have", "has", "that", "which", "who",
+    "we", "i", "he", "she", "they", "you", "it",
 }
 # A day that was named and NOT understood. "the 31st of February", "on the
 # 14th", "next month", "yesterday": each of these says plainly which day is
@@ -162,18 +181,25 @@ def moment(text: str, now: _dt.datetime = None) -> tuple:
     if not text:
         return 0, ""
     now = now or _dt.datetime.now()
-    low = text.lower()
+    low = _unwake(text.lower())
 
     day, said_today, evening = None, False, False
     # Named separately from the clock match below, which reuses `m` in its own
     # loop: sharing the name meant a later check read the clock match and
     # silently did nothing.
-    dm = _DAY_WORD.search(low)
-    if dm and (dm.group(3) or ""):
-        # An abbreviation with a time after it. Check the word in front.
-        before = low[:dm.start(3)].split()
-        if before and before[-1].strip(",.;:") in _NOT_BEFORE_A_DAY:
-            dm = None
+    # Every candidate, not just the first, so a suppressed abbreviation does
+    # not hide a real day later in the sentence: "we sat at 4 on friday" means
+    # Friday. Suppressing and stopping turned a named day into today, which is
+    # the failure this file says is worse than making you type it.
+    dm = None
+    for cand in _DAY_WORD.finditer(low):
+        abbrev = cand.group(3) or ""
+        if abbrev:
+            before = low[:cand.start(3)].split()
+            if before and before[-1].strip(",.;:") in _NOT_BEFORE_A_DAY:
+                continue
+        dm = cand
+        break
     if dm:
         # Whichever alternative matched: the full name, or an abbreviation with
         # a day-shaped context in front of it or a time behind it.
@@ -195,11 +221,19 @@ def moment(text: str, now: _dt.datetime = None) -> tuple:
             ahead = (want - now.weekday()) % 7
             day = now.date() + _dt.timedelta(days=ahead or 7)
 
+    # Prefer a number that is actually a time: one carrying am/pm, or one
+    # introduced by "at". Only if there is neither does a bare number count,
+    # and then the LAST one, because the first is usually a quantity. "Grab 15
+    # minutes tomorrow at 4" booked a quarter past three, and "book 1:1
+    # tomorrow at 4" booked one in the afternoon.
+    found = [m for m in _CLOCK.finditer(low) if int(m.group(1)) <= 23]
+    marked = [m for m in found if (m.group(3) or "")]
+    at_ones = [m for m in found
+               if re.search(r"\bat\s*$", low[:m.start()])]
+    ordered = marked or at_ones or list(reversed(found))
     hour = minute = None
-    for m in _CLOCK.finditer(low):
+    for m in ordered:
         h = int(m.group(1))
-        if h > 23:
-            continue
         mer = (m.group(3) or "").replace(".", "")
         # A bare number is only a time if it could be one and the sentence is
         # about arranging something. 4 means 4pm to everybody arranging a

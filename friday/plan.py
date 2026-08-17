@@ -608,11 +608,6 @@ class Runner:
             self.announce(f"The plan stopped: {e}")
 
     MAX_AT_ONCE = 6           # more agents than anybody is actually running
-    # Extra grace for a session that has answered and still reports itself busy,
-    # which happens when the status comes from a live process rather than the
-    # conversation. Long enough that a genuinely mid-thought agent is not cut
-    # off, short enough that a stuck status does not cost the whole timeout.
-    STILL_BUSY = 20.0
 
     def _one(self, plan_id: int, step_id: int, stop=None) -> None:
         """One step, in its own thread, so a slow track blocks only itself."""
@@ -864,25 +859,31 @@ class Runner:
                     # next one is sent on top of work still in progress.
                     if said != last_seen:
                         last_seen, settled_at = said, time.time()
-                    elif time.time() - settled_at >= self.SETTLE:
-                        # Quiet for long enough. Normally that also means the
-                        # session has stopped working; when it does not, the
-                        # words are still the better evidence. Requiring idle
-                        # with no escape meant a session whose status never
-                        # clears threw its answer away and was reported as
-                        # having said nothing at all.
-                        idle = live.get("status") != "working"
-                        if idle or (time.time() - settled_at
-                                    >= self.SETTLE + self.STILL_BUSY):
-                            set_step(step["id"], DONE, said[:300])
-                            return True
+                    elif (time.time() - settled_at >= self.SETTLE
+                          and live.get("status") != "working"):
+                        set_step(step["id"], DONE, said[:300])
+                        return True
         if stop.is_set():
             return False
-        set_step(step["id"], HELD, "no answer in fifteen minutes")
+        # Say which kind of silence it was. A grace period that completed the
+        # step anyway was tried here and was worse: "working" is the normal
+        # state during a tool call, so a healthy agent whose tool call outlasted
+        # the grace had its throat-clearing recorded as the answer and the next
+        # step sent on top of live work. Holding is the safe end, and the
+        # honest thing is to say what was actually seen.
+        spoke_up = bool(last_seen and last_seen != before_text)
+        set_step(step["id"], HELD,
+                 "answered but never went idle" if spoke_up
+                 else "no answer in fifteen minutes")
         self._maybe_hold(plan["id"])
-        self.announce(f"{target} has been on step {step['seq'] + 1} for fifteen "
-                      f"minutes with no reply, so I've paused that one rather "
-                      f"than piling the next on top.")
+        self.announce(
+            (f"{target} answered step {step['seq'] + 1} but never stopped "
+             f"working, so I've paused rather than piling the next one on. It "
+             f"said: {last_seen[:160]}")
+            if spoke_up else
+            (f"{target} has been on step {step['seq'] + 1} for fifteen minutes "
+             f"with no reply, so I've paused that one rather than piling the "
+             f"next on top."))
         return False
 
     def _ask_person(self, plan: dict, step: dict) -> bool:

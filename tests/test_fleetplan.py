@@ -489,10 +489,14 @@ def test_words_spoken_before_the_prompt_are_not_the_answer():
     assert "last thing" not in (got["note"] or ""), got
 
 
-def test_an_agent_that_never_goes_idle_still_gets_its_answer_read():
-    """A status derived from a live process may never clear. Requiring idle
-    with no escape threw the answer away and reported that the agent had said
-    nothing at all."""
+def test_an_agent_that_never_goes_idle_is_held_and_quoted():
+    """A grace period that completed the step anyway was tried here and was
+    worse: "working" is the normal state during a tool call, so a healthy agent
+    whose tool call outlasted the grace had its throat-clearing recorded as the
+    answer and the next step sent on top of live work.
+
+    Holding is the safe end. What was wrong before was the REPORT: it claimed
+    the agent had said nothing while an answer was sitting there."""
     import json
     import threading
     room = _room()
@@ -508,15 +512,15 @@ def test_an_agent_that_never_goes_idle_still_gets_its_answer_read():
                      look=lambda sid: {"status": "working", "question": "",
                                        "path": str(path), "vendor": "claude",
                                        "sid": sid})
-    r.POLL, r.SETTLE, r.STILL_BUSY, r.STEP_TIMEOUT = 0.2, 0.5, 1.0, 8
+    r.POLL, r.SETTLE, r.STEP_TIMEOUT = 0.2, 0.5, 2
     pid = plans.create("busy", "api", ["do it"], sid="s1")
     started = time.time()
     r.start(pid)
     while r.running and time.time() - started < 12:
         time.sleep(0.05)
     got = plans.get(pid)["steps"][0]
-    assert got["state"] == plans.DONE, got
-    assert got["note"].startswith("Done, all green"), got
+    assert got["state"] == plans.HELD, got
+    assert "never went idle" in got["note"], got
 
 
 if __name__ == "__main__":

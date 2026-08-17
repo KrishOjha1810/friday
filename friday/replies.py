@@ -88,7 +88,8 @@ def _last_spoken_line(path: str) -> str:
     try:
         with open(path, "rb") as f:
             for line in f:
-                if _SPOKE.search(line) and _WORDS.search(line):
+                if (_SPOKE.search(line) and _WORDS.search(line)
+                        and _HAS_WORDS.search(line)):
                     found = line
     except Exception:
         return ""
@@ -159,9 +160,17 @@ def tally(path: str) -> int:
         return 0
 
 
-# A text block, which is what separates a turn the agent SPOKE from one where
-# it only picked up a tool.
+# A text block with something IN it, which is what separates a turn the agent
+# spoke from one where it only picked up a tool. The second half matters: a
+# block with an empty string counted as speech while the text read back as
+# nothing, so the count moved with no words behind it, which is the route by
+# which a step gets completed and the PREVIOUS step's answer written down as
+# the reply.
 _WORDS = re.compile(rb'"type"\s*:\s*"text"')
+# At least one character that is not whitespace, because `_messages` strips and
+# drops the result, so a whitespace-only block would count here and read as
+# nothing there. The two must agree on what counts as having spoken.
+_HAS_WORDS = re.compile(rb'"text"\s*:\s*"(?:\\[nrt ]|\s)*(?:\\[^nrt ]|[^"\\\s])')
 
 
 def spoke(path: str) -> int:
@@ -182,7 +191,8 @@ def spoke(path: str) -> int:
         n = 0
         with open(path, "rb") as f:
             for line in f:
-                if _SPOKE.search(line) and _WORDS.search(line):
+                if (_SPOKE.search(line) and _WORDS.search(line)
+                        and _HAS_WORDS.search(line)):
                     n += 1
         return n
     except Exception:

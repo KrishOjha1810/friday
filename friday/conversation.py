@@ -565,8 +565,14 @@ def classify(text: str) -> tuple:
     # have one, and the commonest phrasing there is fell through to the model.
     # "Put" and "add" still need one, because "put the kettle on" and "add it to
     # the ticket" are not calendar requests.
-    if m and re.search(r"\b(meet|meeting|call|sync|calendar|invite|catch\s?up|"
-                       r"put it in|pencil|schedule|book)\b", t, re.I):
+    # The calendar verbs count as their own confirmation only when what follows
+    # is a MEETING. "Book a flight for tomorrow at 9am" and "book a table for
+    # 8" are not calendar requests, and the bare verb accepted both.
+    if m and (re.search(r"\b(meet|meeting|call|sync|calendar|invite|"
+                        r"catch\s?up|put it in|pencil|standup|one.on.one|1:1)\b",
+                        t, re.I)
+              or re.search(r"\b(?:schedule|book)\s+"
+                           r"(?:it|that|this|me|us|him|her|them)\b", t, re.I)):
         return SCHEDULE, {"said": t}
     m = _MOVE_RE.search(t)
     if m:
