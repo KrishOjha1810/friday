@@ -1685,11 +1685,7 @@ class Friday:
             # silently stopped Friday ever proposing a ticket.
             rows = []
             for c in trackers.available():
-                try:
-                    rows += [r for r in (c.my_issues(5) or [])
-                             if not r.get("error")]
-                except Exception:
-                    continue
+                rows += [r for r in trackers.issues(c, 5) if not r.get("error")]
             if rows:
                 top = rows[0]
                 title = (top.get("summary") or top.get("title") or "").strip()
@@ -2996,11 +2992,7 @@ class Friday:
                              + connectors.hint(ji))
         blocks, broke = [], []
         for c in live:
-            try:
-                rows = c.my_issues(8) or []
-            except Exception as e:
-                broke.append(f"{trackers.describe(c)} ({str(e)[:60]})")
-                continue
+            rows = trackers.issues(c, 8)
             if rows and rows[0].get("error"):
                 # A tracker that errors is not a tracker with no work, and
                 # reporting the two the same way is how you miss a day of it.
@@ -3018,8 +3010,12 @@ class Friday:
             return self._say(f"Nothing open assigned to you in {where}.")
         out = "\n\n".join(blocks)
         if broke:
-            out += ("\n\nI couldn't reach " + ", ".join(broke)
-                    + ", so there may be more.")
+            # Joined, not appended: with every tracker erroring there are no
+            # blocks, and appending left the reply starting with two blank
+            # lines.
+            note = ("I couldn't reach " + ", ".join(broke)
+                    + (", so there may be more." if blocks else "."))
+            out = (out + "\n\n" + note) if out else note
         return self._say(out)
 
     def _slack(self, query: str) -> dict:

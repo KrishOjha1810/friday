@@ -336,3 +336,60 @@ if __name__ == "__main__":
             fn()
     trackers.forget()
     print("ok  trackers: yours, not whichever one Friday preferred")
+
+
+# ---- a tracker that answers oddly ------------------------------------------
+class _Junk:
+    """Every wrong shape an HTTP API or an MCP server might hand back."""
+
+    name = "jira"
+
+    def __init__(self, rows):
+        self.rows = rows
+
+    def ready(self):
+        return True
+
+    def setup_hint(self):
+        return "connect it"
+
+    def my_issues(self, limit=8):
+        if self.rows == "RAISE":
+            raise RuntimeError("network gone")
+        return self.rows
+
+
+def test_a_tracker_answering_oddly_does_not_take_down_the_reply():
+    """Every one of these is somebody else's API or a server nobody wrote code
+    for, so the shape coming back is a hope. Read raw, a string where a list
+    belonged crashed the reply and a dict of Nones rendered as "None [None]:".
+    Neither is the tracker's fault and both are Friday's problem."""
+    for rows in ("a string", ["a", "b"], [None, None],
+                 [{"key": None, "summary": None, "status": None}],
+                 [{}, {}], "RAISE", None, 7):
+        got = trackers.issues(_Junk(rows))
+        assert isinstance(got, list), (rows, got)
+        for r in got:
+            assert isinstance(r, dict), (rows, r)
+            if not r.get("error"):
+                assert r["key"] or r["summary"], (rows, r)
+
+
+def test_a_good_row_survives_the_normalising():
+    got = trackers.issues(_Junk([{"key": "PROJ-7", "summary": "the login bug",
+                                  "status": "Open", "url": "https://x/7"}]))
+    assert got == [{"key": "PROJ-7", "summary": "the login bug",
+                    "status": "Open", "url": "https://x/7"}], got
+
+
+def test_a_nested_field_is_flattened_rather_than_printed():
+    """Jira hands back {"status": {"name": "Open"}} and a status of
+    "{'name': 'Open'}" is not something to read out."""
+    got = trackers.issues(_Junk([{"key": "P-1", "summary": "x",
+                                  "status": {"name": "In Progress"}}]))
+    assert got[0]["status"] == "In Progress", got
+
+
+def test_a_tracker_that_raises_is_reported_as_unreachable():
+    got = trackers.issues(_Junk("RAISE"))
+    assert got and "network gone" in got[0].get("error", ""), got

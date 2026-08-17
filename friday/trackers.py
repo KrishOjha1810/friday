@@ -136,6 +136,48 @@ def can(c, verb: str) -> bool:
     return callable(getattr(c, verb, None))
 
 
+def issues(c, limit: int = 8) -> list:
+    """A tracker's issues, in the shape the rest of Friday reads.
+
+    Every connector here is either somebody else's HTTP API or an MCP server
+    nobody wrote code for, so the shape coming back is a hope rather than a
+    guarantee. Read raw, a string where a list belonged crashed the reply, and
+    a dict of Nones rendered as "None [None]:". Neither is the tracker's fault
+    and both are Friday's problem.
+
+    Anything that cannot be made into a ticket is dropped rather than shown,
+    because a line with no key and no words is not information."""
+    try:
+        rows = c.my_issues(limit)
+    except Exception as e:
+        return [{"error": str(e)[:120]}]
+    if isinstance(rows, dict):
+        rows = [rows]
+    if not isinstance(rows, (list, tuple)):
+        return []
+    out = []
+    for r in rows:
+        if not isinstance(r, dict):
+            continue
+        if r.get("error"):
+            out.append({"error": str(r["error"])[:160]})
+            continue
+        def _flat(v):
+            if isinstance(v, dict):
+                v = v.get("name") or v.get("value") or v.get("key") or ""
+            if isinstance(v, (list, tuple)):
+                v = v[0] if v else ""
+            return str(v).strip() if v is not None else ""
+        key = _flat(r.get("key"))[:60]
+        summary = _flat(r.get("summary") or r.get("title"))[:300]
+        if not (key or summary):
+            continue
+        out.append({"key": key, "summary": summary,
+                    "status": _flat(r.get("status"))[:40] or "open",
+                    "url": _flat(r.get("url"))[:400]})
+    return out
+
+
 def describe(c) -> str:
     """What to call it when speaking. `name` is a slug; some of these have a
     nicer form and none of them should be read out as a slug."""
