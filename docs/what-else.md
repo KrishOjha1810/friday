@@ -176,6 +176,24 @@ a sentence rather than where the grammar puts the thing it is looking for.
 The full set is in `tests/test_saying.py`, `tests/test_targets.py`,
 `tests/test_consent.py` and `tests/test_crowd.py`.
 
+### Four rounds of hunting
+
+Roughly forty-five of these were found by hunting rather than by use, in four
+rounds across the conversation layer, the plan runner, the proactive layer, the
+server and page, and the parts nobody had looked at. Two things are worth
+recording, because they will be true of the next round too.
+
+**The fixes were the richest source of new bugs.** Five of the thirty fixes in
+round two were themselves wrong, and the worst was a fix that only worked when a
+timing constant was zero, which is every test and no real run. A round that only
+looks for new bugs, and not at what the last round broke, will miss the worst of
+them.
+
+**Almost nothing found was malformed input.** They were sentences somebody would
+say, states a machine really reaches, and races that happen on an ordinary
+double-tap. The single most common shape was a pattern that matched anywhere in
+a sentence instead of where the grammar puts the thing it is looking for.
+
 ## What this does NOT include, and why
 
 - **Writing code.** Friday conducts agents that write code. The moment it starts
