@@ -82,17 +82,28 @@ def tally(path: str) -> int:
 
     Position, not content. "Has it said something new" was answered by
     comparing text, so an agent replying "Done." twice looked silent the second
-    time and the plan waited fifteen minutes for a reply it already had."""
+    time and the plan waited fifteen minutes for a reply it already had.
+
+    ASSISTANT messages only, matching the docstring and matching what
+    wait_for_reply counts. Counting every message meant the two disagreed by
+    however many times you had spoken, so the marker always looked stale and an
+    old reply was returned as though it were new."""
     try:
-        return len(_messages(path))
+        return len([m for m in _messages(path) if m[1] == "assistant"])
     except Exception:
         return 0
 
 
 def mark(path: str) -> str:
     """Where the transcript is now, so a later reply can be told apart from an
-    older one. Returns an opaque marker."""
-    return last_said(path)[:200]
+    older one. Returns an opaque marker.
+
+    Position AND text. It was the first 200 characters of the last reply, so an
+    agent that answered "Done." twice looked silent the second time: the most
+    common reply there is was the case Friday reported as no reply at all. The
+    count says something new arrived even when the words are identical; the
+    text still matters because a file can be rewritten to the same length."""
+    return f"{tally(path)}|{last_said(path)[:200]}"
 
 
 def wait_for_reply(path: str, marker: str, timeout: float = 120,
@@ -104,11 +115,17 @@ def wait_for_reply(path: str, marker: str, timeout: float = 120,
     and returning the first of those gives you 'Let me look' instead of the
     answer."""
     deadline = time.time() + timeout
+    was, _, was_text = (marker or "").partition("|")
+    try:
+        before = int(was)
+    except ValueError:
+        before, was_text = -1, marker or ""      # an old-style marker
     last, last_seen_at = "", 0.0
     while time.time() < deadline:
         msgs = [m for m in _messages(path) if m[1] == "assistant"]
         newest = msgs[-1][2] if msgs else ""
-        if newest and newest[:200] != marker:
+        moved = len(msgs) != before if before >= 0 else False
+        if newest and (moved or newest[:200] != was_text):
             if newest != last:
                 last, last_seen_at = newest, time.time()
             elif time.time() - last_seen_at >= settle:

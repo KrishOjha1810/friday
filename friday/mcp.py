@@ -24,6 +24,7 @@ import base64
 import hashlib
 import json
 import os
+import re
 import secrets
 import threading
 import time
@@ -41,9 +42,39 @@ TIMEOUT = 20.0
 # Tools whose names announce that they change something. Hidden unless the
 # server is explicitly marked writable, so "search my slack" can never become
 # "post to my slack" through a misheard word.
-_WRITE_HINTS = ("create", "update", "delete", "send", "post", "write", "add",
-                "remove", "edit", "merge", "close", "archive", "invite",
-                "transition", "assign", "comment", "upload", "move", "set")
+# Verbs that change something. Matched as whole words in the tool name, split
+# on the separators tool names actually use, because a substring scan called
+# `drop_table`, `execute_sql` and `grant_admin` reads (none contains a hint)
+# while hiding `get_asset`, `list_assets` and `search_addresses` as writes
+# ("set" inside "asset", "add" inside "addresses").
+_WRITE_HINTS = {
+    "create", "update", "delete", "send", "post", "write", "add", "remove",
+    "edit", "merge", "close", "archive", "invite", "transition", "assign",
+    "comment", "upload", "move", "set", "put", "patch", "drop", "truncate",
+    "purge", "execute", "exec", "run", "deploy", "restart", "kill", "revoke",
+    "grant", "disable", "enable", "cancel", "publish", "rename", "reset",
+    "insert", "modify", "apply", "install", "uninstall", "start", "stop",
+    "terminate", "destroy", "clear", "wipe", "reply", "share", "approve",
+}
+
+
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    """Refuse to follow a redirect at all.
+
+    urllib follows one by default and re-sends every header, so a server could
+    answer with `302 Location: http://somewhere-else/` and receive the Bearer
+    token Friday holds in your name, along with the session id. One line of
+    response from any MCP server you have connected, or from anyone able to
+    tamper with a plain http one.
+
+    Refused rather than stripped: an MCP endpoint that moves is a configuration
+    change you should make deliberately, not something to follow silently."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+_OPENER = urllib.request.build_opener(_NoRedirect)
 
 
 def _read_json(p: Path, default):
@@ -143,7 +174,7 @@ class Client:
             headers["Mcp-Session-Id"] = self.session_id
         req = urllib.request.Request(self.url, data=body, headers=headers)
         try:
-            with urllib.request.urlopen(req, timeout=timeout) as r:
+            with _OPENER.open(req, timeout=timeout) as r:
                 sid = r.headers.get("Mcp-Session-Id")
                 if sid:
                     self.session_id = sid
@@ -208,7 +239,7 @@ class Client:
         if self.session_id:
             headers["Mcp-Session-Id"] = self.session_id
         try:
-            urllib.request.urlopen(
+            _OPENER.open(
                 urllib.request.Request(self.url, data=body, headers=headers),
                 timeout=8)
         except Exception:
@@ -264,8 +295,14 @@ class Client:
 
 
 def _is_write(name: str) -> bool:
-    n = (name or "").lower()
-    return any(h in n for h in _WRITE_HINTS)
+    """Whether calling this tool would change something.
+
+    Whole words only. A substring scan is wrong in both directions and both
+    directions matter: it let `drop_table` and `execute_sql` through on a
+    server Friday had marked read-only, and it hid `get_asset` and
+    `search_addresses` from a connected one."""
+    parts = re.split(r"[^a-z0-9]+", (name or "").lower())
+    return any(part in _WRITE_HINTS for part in parts if part)
 
 
 def _parse_body(raw: str) -> dict:
@@ -402,7 +439,15 @@ def authorize(name: str, url: str, timeout: float = 180) -> dict:
         params["scope"] = " ".join(meta["scopes_supported"][:8])
 
     _Catcher.code, _Catcher.state, _Catcher.issuer = None, state, ""
-    srv = HTTPServer(("127.0.0.1", CALLBACK_PORT), _Catcher)
+    try:
+        srv = HTTPServer(("127.0.0.1", CALLBACK_PORT), _Catcher)
+    except OSError as e:
+        # A message, not a traceback. This raised straight out of authorize()
+        # when the port was busy, which was every OAuth connection after the
+        # first one in a session, because shutdown() does not close the socket.
+        return {"error": f"the port I need for the approval ({CALLBACK_PORT}) "
+                         f"is busy: {e}. Close whatever is using it, or wait a "
+                         f"moment and try again."}
     threading.Thread(target=srv.serve_forever, daemon=True).start()
     webbrowser.open(meta["authorization_endpoint"] + "?" +
                     urllib.parse.urlencode(params))
@@ -410,7 +455,13 @@ def authorize(name: str, url: str, timeout: float = 180) -> dict:
     t0 = time.time()
     while time.time() - t0 < timeout and not _Catcher.code:
         time.sleep(0.4)
+    # shutdown() stops serve_forever and LEAVES THE LISTENING SOCKET OPEN, so
+    # the next connection in the same session hit "address already in use".
     srv.shutdown()
+    try:
+        srv.server_close()
+    except Exception:
+        pass
     if not _Catcher.code:
         return {"error": "no approval came back in time, or the reply did not "
                          "match the request I sent"}
@@ -451,7 +502,7 @@ def _register(meta: dict, redirect: str) -> str:
     try:
         req = urllib.request.Request(ep, data=body, headers={
             "Content-Type": "application/json"})
-        with urllib.request.urlopen(req, timeout=12) as r:
+        with _OPENER.open(req, timeout=12) as r:
             return json.loads(r.read()).get("client_id", "")
     except Exception:
         return ""
@@ -469,7 +520,7 @@ def _exchange(meta: dict, client_id: str, code: str, verifier: str,
     try:
         req = urllib.request.Request(ep, data=data, headers={
             "Content-Type": "application/x-www-form-urlencoded"})
-        with urllib.request.urlopen(req, timeout=15) as r:
+        with _OPENER.open(req, timeout=15) as r:
             return json.loads(r.read()).get("access_token", "")
     except Exception:
         return ""

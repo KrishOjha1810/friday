@@ -173,8 +173,15 @@ class Watchtower:
             if not asking:
                 self.asked.pop(sid, None)
             if not text or text == self.seen.get(sid):
-                self.pending.pop(sid, None)
-                continue
+                # UNLESS it is waiting on you and has not been reported yet.
+                # The line above deleted the entry the blocked branch had just
+                # created, on the very next tick, three seconds into a four
+                # second settle. So the fix worked only when SETTLE was zero,
+                # which is every test and no real run: under stock settings the
+                # one category this exists for was still silently swallowed.
+                if not (asking and sid in self.pending):
+                    self.pending.pop(sid, None)
+                    continue
             prev = self.pending.get(sid)
             if not prev or prev[0] != text:
                 self.pending[sid] = (text, now)      # still talking, restart
@@ -493,9 +500,21 @@ _IMPERATIVE = {"run", "delete", "remove", "drop", "force-push", "push",
 
 
 def _outcome_of(text: str) -> set:
-    low = " " + " ".join((text or "").lower().split()) + " "
-    return {kind for kind, words in _OUTCOME.items()
-            if any(f" {w} " in low or f" {w}." in low for w in words)}
+    """Which way the message went: badly, well, or unstated.
+
+    On word boundaries. It tested for the word surrounded by spaces or followed
+    by a full stop, so "passed," and "failed," matched neither: ordinary
+    punctuation decided whether the anti-fabrication guard fired at all. It
+    threw away true summaries ("All 12 tests passed, and the branch is ready")
+    and waved through the reassuring rewrite it exists to catch."""
+    low = " ".join((text or "").lower().split())
+    out = set()
+    for kind, words in _OUTCOME.items():
+        for w in words:
+            if re.search(r"(?<![\w-])" + re.escape(w) + r"(?![\w-])", low):
+                out.add(kind)
+                break
+    return out
 
 
 def _drop_invented(summary: str, source: str) -> str:

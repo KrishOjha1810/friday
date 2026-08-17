@@ -1251,7 +1251,7 @@ class Friday:
             lines.append("I couldn't read GitHub or your repos just now.")
         try:
             sl = connectors.get("slack")
-            if sl and sl.ready():
+            if self._answers(sl):
                 unread = len(self.inbox.last)
                 if unread:
                     who = ", ".join(sorted({m["who"] for m
@@ -1321,7 +1321,7 @@ class Friday:
             return False, "posting is switched off"
         sl = connectors.get("slack")
         try:
-            if not (sl and sl.ready() and hasattr(sl, "dm")):
+            if not (self._answers(sl) and hasattr(sl, "dm")):
                 return False, "Slack isn't connected"
             r = sl.dm(who, text)
         except Exception as e:
@@ -1624,7 +1624,7 @@ class Friday:
         # 3. something of yours that is broken
         try:
             gh = connectors.get("github")
-            if gh and gh.ready():
+            if self._answers(gh):
                 for it in feeds.GitHubFeed().poll():
                     if "failing" in it.get("text", "") and it.get("urgency", 9) <= 1:
                         candidates.append((2, "fix the build", it["text"]))
@@ -1726,6 +1726,19 @@ class Friday:
         self.pending = {"kind": "event", "title": title, "at": stamp,
                         "reads": reads}
         return self._say(f"Put \"{title}\" in for {reads}?", needs_confirm=True)
+
+    @staticmethod
+    def _answers(c) -> bool:
+        """Whether a connector is usable, without trusting it not to throw.
+
+        `ready()` reaches the network for most of these, so it can raise for
+        every ordinary reason a network call raises. Called bare, one unhappy
+        connector took down the whole reply, including the replies you would
+        ask precisely because something was wrong."""
+        try:
+            return bool(c) and bool(c.ready())
+        except Exception:
+            return False
 
     def _tracker(self, want: str = ""):
         """Whichever tracker YOU use, which is not for Friday to decide.
@@ -2588,7 +2601,7 @@ class Friday:
 
     def _github(self, query: str) -> dict:
         gh = connectors.get("github")
-        if not gh.ready():
+        if not self._answers(gh):
             return self._say("GitHub isn't connected: " + connectors.hint(gh))
         if query:
             rows = gh.search(query, limit=4)
@@ -2618,13 +2631,13 @@ class Friday:
         # before falling back to whatever the grammar suggested.
         if said:
             sl = connectors.get("slack")
-            if sl.ready() and hasattr(sl, "channel_names"):
+            if self._answers(sl) and hasattr(sl, "channel_names"):
                 found = nearest.best_window(said, sl.channel_names(40))
                 if found:
                     return self._read_channel_named(found, said)
         if not (name or "").strip():
             sl = connectors.get("slack")
-            if not sl.ready():
+            if not self._answers(sl):
                 return self._say("Slack isn't connected yet. " + connectors.hint(sl))
             names = (sl.channel_names(40) if hasattr(sl, "channel_names") else [])
             if names:
@@ -2642,7 +2655,7 @@ class Friday:
         about this?' searches your sessions using what was just read, so you
         never have to retype the subject."""
         sl = connectors.get("slack")
-        if not sl.ready():
+        if not self._answers(sl):
             return self._say("Slack isn't connected yet. " + connectors.hint(sl))
         err = (lambda: sl.last_error() if hasattr(sl, "last_error") else "")
         ch = sl.find_channel(name)
@@ -2843,7 +2856,7 @@ class Friday:
 
     def _issues(self) -> dict:
         gh = connectors.get("github")
-        if not gh.ready():
+        if not self._answers(gh):
             return self._say("GitHub isn't connected: " + connectors.hint(gh))
         rows = gh.my_issues(8)
         if not rows:
@@ -2861,7 +2874,7 @@ class Friday:
         wrong. Repeats are counted, not listed, because ten failures of the
         same nightly job is one problem you have not looked at."""
         gh = connectors.get("github")
-        if not gh or not gh.ready():
+        if not self._answers(gh):
             return self._say("GitHub isn't connected, so I can't see your builds.")
         rows = gh.failing(6)
         if not rows:
@@ -2876,7 +2889,7 @@ class Friday:
 
     def _activity(self) -> dict:
         gh = connectors.get("github")
-        if not gh or not gh.ready():
+        if not self._answers(gh):
             return self._say("GitHub isn't connected.")
         rows = gh.activity(6)
         if not rows:
@@ -2890,7 +2903,7 @@ class Friday:
 
     def _mail(self, query: str) -> dict:
         gm = connectors.get("gmail")
-        if not gm.ready():
+        if not self._answers(gm):
             return self._say("Gmail isn't connected yet. " + connectors.hint(gm))
         rows = gm.search(query, limit=5)
         if not rows:
@@ -2909,7 +2922,7 @@ class Friday:
         if not se or not hasattr(se, "issues"):
             return self._say("I don't have Sentry connected. " + (
                 connectors.hint(se) if se else ""))
-        if not se.ready():
+        if not self._answers(se):
             return self._say("Sentry isn't connected yet. " + connectors.hint(se))
         rows = se.issues(limit=8)
         if rows and rows[0].get("error"):
@@ -2974,7 +2987,7 @@ class Friday:
 
     def _slack(self, query: str) -> dict:
         sl = connectors.get("slack")
-        if not sl.ready():
+        if not self._answers(sl):
             return self._say("Slack isn't connected yet. To fix that: "
                              + connectors.hint(sl))
         if not query:
@@ -3838,7 +3851,7 @@ class Friday:
         if _SUBJECT_RE.search(text):
             try:
                 sl = connectors.get("slack")
-                if sl.ready() and hasattr(sl, "channel_names"):
+                if self._answers(sl) and hasattr(sl, "channel_names"):
                     found = nearest.best_window(text, sl.channel_names(40))
                     if found:
                         return self._read_channel_named(found, text)

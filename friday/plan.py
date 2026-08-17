@@ -279,7 +279,18 @@ def get(plan_id: int) -> dict:
                 "state": p[4], "created": p[5], "updated": p[6],
                 "steps": [{"id": s[0], "seq": s[1], "text": s[2],
                            "state": s[3], "note": s[4],
-                           "target": s[5] or p[2], "sid": s[6] or p[3],
+                           "target": s[5] or p[2],
+                           # The plan's session ONLY for a step aimed at the
+                           # plan's own target. create() deliberately blanks
+                           # the sid for a step naming somebody else, and this
+                           # line put it straight back, so a step announced as
+                           # "web" was typed into the api terminal. That is the
+                           # multi-agent plan delivering one agent's
+                           # instructions to another.
+                           "sid": s[6] or (p[3] if not s[5]
+                                           or s[5].strip().lower()
+                                           == (p[2] or "").strip().lower()
+                                           else ""),
                            "kind": s[7] or "agent"} for s in steps]}
     finally:
         con.close()
@@ -516,8 +527,15 @@ class Runner:
             if self._thread and self._thread.is_alive():
                 return False
             set_plan(plan_id, RUNNING)
-            self._stop.clear()
-            self._thread = threading.Thread(target=self._run, args=(plan_id,),
+            # A FRESH event, not a cleared one. Step threads from a stopped run
+            # poll the event they were started with; clearing that same object
+            # brought them back to life alongside the new run, so one step had
+            # two owners writing its state, announcing it twice and starting
+            # two reminder loops. A new event means a stopped run's threads see
+            # a set event forever and can never be revived.
+            self._stop = threading.Event()
+            self._thread = threading.Thread(target=self._run,
+                                            args=(plan_id, self._stop),
                                             daemon=True)
             self._thread.start()
             return True
@@ -534,6 +552,11 @@ class Runner:
         t = self._thread
         if t and t.is_alive() and t is not threading.current_thread():
             t.join(timeout=2.0)
+        # The step threads hold this same event and will see it set; they are
+        # not joined because one may be mid-poll on a slow agent, and waiting
+        # for that would make "stop the plan" take fifteen minutes. The fresh
+        # event in start() is what keeps them from interfering with the next
+        # run.
         for plan in ([get(plan_id)] if plan_id else running_plans()):
             if not plan:
                 continue
@@ -544,15 +567,16 @@ class Runner:
     def running(self) -> bool:
         return bool(self._thread and self._thread.is_alive())
 
-    def _run(self, plan_id: int) -> None:
+    def _run(self, plan_id: int, stop=None) -> None:
         """Keep every free track moving until nothing can move.
 
         One thread per running step rather than one thread per plan. The plan
         is finished when no step can start and none is in flight; it is held
         when the only thing stopping it is somebody who has not answered."""
+        stop = stop or self._stop
         live = {}                       # step id -> thread
         try:
-            while not self._stop.is_set():
+            while not stop.is_set():
                 plan = get(plan_id)
                 if not plan or plan["state"] != RUNNING:
                     break
@@ -560,7 +584,8 @@ class Runner:
                     if st["state"] != PENDING or st["id"] in live:
                         continue
                     t = threading.Thread(
-                        target=self._one, args=(plan_id, st["id"]), daemon=True)
+                        target=self._one, args=(plan_id, st["id"], stop),
+                        daemon=True)
                     live[st["id"]] = t
                     t.start()
                     if len(live) >= self.MAX_AT_ONCE:
@@ -576,7 +601,7 @@ class Runner:
                             if st["state"] == PENDING]:
                         self._finish(plan)
                         break
-                self._stop.wait(self.POLL)
+                stop.wait(self.POLL)
         except Exception as e:
             self._log(f"friday plan: {e}")
             set_plan(plan_id, FAILED)
@@ -584,14 +609,14 @@ class Runner:
 
     MAX_AT_ONCE = 6           # more agents than anybody is actually running
 
-    def _one(self, plan_id: int, step_id: int) -> None:
+    def _one(self, plan_id: int, step_id: int, stop=None) -> None:
         """One step, in its own thread, so a slow track blocks only itself."""
         try:
             plan = get(plan_id)
             step = next((s for s in plan.get("steps", [])
                          if s["id"] == step_id), None)
             if plan and step:
-                self._do(plan, step)
+                self._do(plan, step, stop or self._stop)
         except Exception as e:
             self._log(f"friday plan step: {e}")
             set_step(step_id, FAILED, str(e)[:120])
@@ -684,7 +709,7 @@ class Runner:
                               f"\"where is the plan\" when you want it.")
         threading.Thread(target=_wait, daemon=True).start()
 
-    def _do(self, plan: dict, step: dict) -> bool:
+    def _do(self, plan: dict, step: dict, stop=None) -> bool:
         """One step, on its own track. True if the track may carry on.
 
         Everything here is per step rather than per plan now. A step names the
@@ -693,8 +718,32 @@ class Runner:
         from . import agents
         if step.get("kind") == "person":
             return self._ask_person(plan, step)
-        sid = step.get("sid") or plan.get("sid", "")
         target = step.get("target") or plan.get("target", "")
+        # The plan's session only when this step is FOR the plan's target.
+        # Falling back unconditionally undid the blanking above and sent a step
+        # announced as "web" into the api terminal.
+        same = (target or "").strip().lower() == \
+            (plan.get("target") or "").strip().lower()
+        sid = step.get("sid") or (plan.get("sid", "") if same else "")
+        if not sid:
+            # Resolve it by name from the live fleet, and refuse rather than
+            # guess. A step delivered to the wrong agent is worse than a step
+            # that says it could not be delivered.
+            try:
+                from . import fleetcache
+                for row in fleetcache.snapshot().values():
+                    if (row.get("label") or "").strip().lower() == \
+                            (target or "").strip().lower():
+                        sid = row.get("sid", "")
+                        break
+            except Exception:
+                sid = ""
+        if not sid:
+            set_step(step["id"], FAILED, f"no session called {target}")
+            self._maybe_hold(plan["id"])
+            self.announce(f"I can't find a session called {target}, so that "
+                          f"part of the plan didn't run. The rest carries on.")
+            return False
         info = self.look(sid) or {}
         info.setdefault("sid", sid)
         path = info.get("path", "")
@@ -713,9 +762,15 @@ class Runner:
         was_asking = (info.get("question") or "").strip()
         set_step(step["id"], RUNNING)
         # Named, because with several running at once "step 3" no longer tells
-        # you who is doing it.
+        # you who is doing it. And marked as a retry when it is one: a step
+        # interrupted mid-flight goes back to pending deliberately, since
+        # skipping it silently is worse, but the second attempt looked
+        # identical to the first and you had no way to know it might run twice.
+        again = "was in flight" in (step.get("note") or "")
         self.announce(f"{target}, step {step['seq'] + 1} of "
-                      f"{len(plan['steps'])}: {step['text']}")
+                      f"{len(plan['steps'])}: {step['text']}"
+                      + (" (sending again: this was interrupted, so it may "
+                         "have run already)" if again else ""))
         if not self.send(sid, step["text"]):
             set_step(step["id"], FAILED, "couldn't reach the session")
             self._maybe_hold(plan["id"])
@@ -726,7 +781,8 @@ class Runner:
 
         end = time.time() + self.STEP_TIMEOUT
         settled_at, last_seen = 0.0, ""
-        while time.time() < end and not self._stop.is_set():
+        stop = stop or self._stop
+        while time.time() < end and not stop.is_set():
             time.sleep(self.POLL)
             live = self.look(sid) or {}
             live.setdefault("sid", sid)
@@ -766,7 +822,7 @@ class Runner:
                           and live.get("status") != "working"):
                         set_step(step["id"], DONE, said[:300])
                         return True
-        if self._stop.is_set():
+        if stop.is_set():
             return False
         set_step(step["id"], HELD, "no answer in fifteen minutes")
         self._maybe_hold(plan["id"])

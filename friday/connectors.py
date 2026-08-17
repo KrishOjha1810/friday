@@ -2207,7 +2207,11 @@ def status() -> dict:
             ok = c.ready()
         except Exception:
             ok = False
-        out[name] = {"ready": ok, "hint": "" if ok else c.setup_hint()}
+        # Through hint(), which cannot raise. setup_hint() was called bare, so
+        # a connector unhappy enough to throw from ready() usually threw from
+        # here too, and "what's connected" (the question you ask BECAUSE
+        # something is wrong) died with a traceback.
+        out[name] = {"ready": ok, "hint": "" if ok else hint(c)}
     return out
 
 
@@ -2225,8 +2229,14 @@ def hint(c) -> str:
     try:
         t = (c.setup_hint() if c else "").strip()
     except Exception:
-        return ""
-    return t[:1].upper() + t[1:] if t else ""
+        t = ""
+    if not t:
+        # Never nothing. Callers paste this after "X isn't connected yet." and
+        # an empty hint leaves a sentence that reads as though it were cut off
+        # mid-word, which looks like a bug rather than a missing token.
+        name = getattr(c, "name", "") or "it"
+        return (f"Say \"connect {name}\" and I'll walk you through it.")
+    return t[:1].upper() + t[1:]
 
 
 def when(ts: float) -> str:

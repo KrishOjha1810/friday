@@ -87,12 +87,20 @@ _DAY_WORD = re.compile(
 # through to today, so "the 31st of February at 4" and "yesterday at 4" both
 # quietly became today at 16:00. A meeting in the wrong slot is worse than one
 # you had to type yourself, and a date in the PAST is not a slot at all.
+# Narrower than it first was. "last \w+" matched "let's do the last one at 4",
+# and a bare "may" matched "we may as well meet at 4", so ordinary English with
+# a perfectly clear time was refused and the error insisted you had named a day.
+# Only "last <weekday>" counts, and a month only when a number is near it.
 _A_DAY_WAS_MEANT = re.compile(
-    r"\b(?:yesterday|last\s+\w+|next\s+(?:week|month|year)|"
-    r"\d{1,2}(?:st|nd|rd|th)|"
-    r"jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|"
-    r"jul(?:y)?|aug(?:ust)?|sep(?:tember)?|oct(?:ober)?|nov(?:ember)?|"
-    r"dec(?:ember)?|\d{1,2}/\d{1,2})\b", re.I)
+    r"\byesterday\b"
+    r"|\blast\s+(?:mon|tues|wednes|thurs|fri|satur|sun)day\b"
+    r"|\bnext\s+(?:week|month|year)\b"
+    r"|\b\d{1,2}(?:st|nd|rd|th)\b"
+    r"|\b\d{1,2}/\d{1,2}\b"
+    r"|\b(?:jan(?:uary)?|feb(?:ruary)?|march|april|june|july|august"
+    r"|sep(?:tember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\b"
+    r"|\b(?:may|mar|apr|jun|jul|aug)\s+\d{1,2}\b"
+    r"|\b\d{1,2}\s+(?:may|mar|apr|jun|jul|aug)\b", re.I)
 
 
 def names_a_day(text: str) -> bool:

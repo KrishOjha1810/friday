@@ -163,18 +163,37 @@ class Handler(BaseHTTPRequestHandler):
             # key is the check in that mode and it is a real one: a page on
             # another origin cannot read it.
             return False
-        host = (self.headers.get("Host", "") or "").split(":")[0].strip().lower()
-        if host and host not in self._OURS:
+        # Parsed properly, because "[::1]:8765".split(":")[0] is "[" and the
+        # bracketed loopback form listed two lines up was itself refused.
+        raw = (self.headers.get("Host", "") or "").strip().lower()
+        if raw.startswith("["):
+            host = raw[1:raw.find("]")] if "]" in raw else raw
+        else:
+            host = raw.split(":")[0]
+        if host and host.strip("[]") not in self._OURS:
             return True
-        ours = tuple(f"http://{h}:{PORT}" for h in self._OURS)
-        origin = (self.headers.get("Origin", "") or "").strip().lower()
-        if origin and not origin.startswith(ours):
-            return True
-        # A post from another page carries no Origin in some browsers but does
-        # carry a Referer.
-        ref = (self.headers.get("Referer", "") or "").strip().lower()
-        if ref and not ref.startswith(ours):
-            return True
+        # Parsed and compared, not prefixed. startswith has no terminator, so
+        # with Friday on port 80 an Origin of http://localhost:8080 would have
+        # passed.
+        for header in ("Origin", "Referer"):
+            got = (self.headers.get(header, "") or "").strip()
+            if not got:
+                continue
+            try:
+                from urllib.parse import urlparse
+                u = urlparse(got)
+            except Exception:
+                return True
+            if u.scheme != "http":
+                return True
+            if (u.hostname or "").lower().strip("[]") not in self._OURS:
+                return True
+            try:
+                port = u.port or 80
+            except ValueError:
+                return True          # a port outside 0-65535 is not ours
+            if port != PORT:
+                return True
         return False
 
     def _authed(self) -> bool:

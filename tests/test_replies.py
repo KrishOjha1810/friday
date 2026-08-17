@@ -38,7 +38,11 @@ def test_an_answer_is_told_apart_from_what_was_said_before():
         p = Path(d) / "s.jsonl"
         _write(p, [("user", "hi"), ("assistant", "an older answer")])
         mark = replies.mark(str(p))
-        assert mark.startswith("an older answer")
+        # The marker carries the position as well as the words now: an agent
+        # that answers "Done." twice was invisible the second time, and a short
+        # confirmation is the most common reply there is.
+        assert "an older answer" in mark
+        assert mark.split("|")[0].isdigit(), mark
         got = replies.wait_for_reply(str(p), mark, timeout=1.2, settle=0.2)
         assert got == "", "reported an old message as the reply: " + got
 
@@ -73,7 +77,7 @@ def test_the_question_is_never_reported_as_the_answer():
         _write(p, [("assistant", "an earlier answer"),
                    ("user", "what are the future plans of Friday?")])
         assert replies.last_said(str(p)) == "an earlier answer"
-        assert replies.mark(str(p)).startswith("an earlier answer")
+        assert "an earlier answer" in replies.mark(str(p))
         got = replies.wait_for_reply(str(p), replies.mark(str(p)),
                                      timeout=1.0, settle=0.2)
         assert got == "", "reported the prompt as a reply: " + got
@@ -98,7 +102,22 @@ def test_tool_noise_is_not_mistaken_for_an_answer():
             f.write(json.dumps({"type": "assistant", "message": {"content": [
                 {"type": "tool_use", "name": "Bash", "input": {"command": "ls"}}
             ]}}) + "\n")
-        assert replies.mark(str(p)) == "", "a tool call was read as speech"
+        # The marker carries a position now, so "nothing was said" is an empty
+        # text half rather than an empty string.
+        assert replies.last_said(str(p)) == "", "a tool call was read as speech"
+        assert replies.mark(str(p)).endswith("|"), replies.mark(str(p))
+
+
+def test_the_same_words_twice_is_still_a_new_reply():
+    """"Done.", "Yes.", "All tests pass." Comparing text meant the second one
+    was reported as silence, after waiting the full timeout."""
+    with tempfile.TemporaryDirectory() as d:
+        p = Path(d) / "s.jsonl"
+        _write(p, [("assistant", "Done.")])
+        mark = replies.mark(str(p))
+        _write(p, [("assistant", "Done."), ("assistant", "Done.")])
+        got = replies.wait_for_reply(str(p), mark, timeout=4, settle=0.2)
+        assert got == "Done.", repr(got)
 
 
 if __name__ == "__main__":
