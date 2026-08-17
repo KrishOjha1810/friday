@@ -117,9 +117,14 @@ _NEXT_RE = re.compile(
     r"|\bwhat'?s?\s+next\b|\bwhere\s+(?:should|do)\s+i\s+start\b"
     r"|\bwhat\s+should\s+i\s+be\s+doing\b", re.I)
 
+# The optional group needed to be optional. "schedule it for thurs at 4" only
+# matched when the word after the verb was one of the listed pronouns AND
+# something followed it, so the commonest phrasing of all fell through to the
+# model.
 _SCHEDULE_RE = re.compile(
-    r"\b(?:put|add|book|schedule|pencil)\s+(?:it|that|a\s+\w+|the\s+\w+|"
-    r"us|me)?\s*(?:in|down|on)?\b.*?"
+    r"\b(?:put|add|book|schedule|pencil)\s+"
+    r"(?:(?:it|that|this|us|me|him|her|them|a\s+\w+|the\s+\w+)\s+)?"
+    r"(?:in|down|on)?\s*"
     r"(?:for|at|on)\s+(.+?)\s*[.!]?$"
     r"|\b(?:schedule|book)\s+(?:a\s+)?(?:meeting|call|sync)\b\s*(.*)$",
     re.I)
@@ -555,8 +560,13 @@ def classify(text: str) -> tuple:
     if _NEXT_RE.search(t):
         return NEXT, {}
     m = _SCHEDULE_RE.search(t)
+    # The calendar verbs count as the confirmation themselves. "Schedule it for
+    # Thursday at 4" carries no other meeting word, so it needed one and did not
+    # have one, and the commonest phrasing there is fell through to the model.
+    # "Put" and "add" still need one, because "put the kettle on" and "add it to
+    # the ticket" are not calendar requests.
     if m and re.search(r"\b(meet|meeting|call|sync|calendar|invite|catch\s?up|"
-                       r"put it in|pencil)\b", t, re.I):
+                       r"put it in|pencil|schedule|book)\b", t, re.I):
         return SCHEDULE, {"said": t}
     m = _MOVE_RE.search(t)
     if m:

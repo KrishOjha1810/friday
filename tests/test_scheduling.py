@@ -233,3 +233,38 @@ def test_an_abbreviated_day_that_has_gone_is_still_refused():
     from friday import when as _w
     monday = _dt.datetime(2026, 8, 17, 9, 0)
     assert _w.moment("last thurs at 4", monday)[0] == 0
+
+
+def test_a_spelling_of_tomorrow_does_not_kill_the_request():
+    """"tmrw" was listed as a day word and not as a weekday, so it fell into
+    the weekday lookup and raised out of an unguarded caller: the request
+    thread died and the page got no reply at all."""
+    import datetime as _dt
+    from friday import when as _w
+    monday = _dt.datetime(2026, 8, 17, 10, 0)
+    stamp, reads = _w.moment("book a meeting tmrw at 4", monday)
+    assert stamp and reads.startswith("Tuesday"), reads
+
+
+def test_scheduling_verbs_are_their_own_confirmation():
+    """"Schedule it for Thursday at 4" carries no other meeting word, so it
+    needed one, did not have one, and the commonest phrasing there is fell
+    through to the model."""
+    for said in ("schedule it for thurs at 4", "book a meeting sat at 4",
+                 "pencil me in for wed at 3", "put it in for Thursday at 4"):
+        assert classify(said)[0] == "schedule", (said, classify(said))
+    # And the ambiguous verbs still need one.
+    assert classify("put the kettle on")[0] != "schedule"
+
+
+def test_reading_a_past_day_does_not_match_an_abbreviation_bare():
+    """"What did it say when I sat down" reported "Sat (15 Aug)" and searched
+    the wrong day, with a label that told you it had understood."""
+    import datetime as _dt
+    from friday import when as _w
+    monday = _dt.date(2026, 8, 17)
+    for said in ("what did it say when I sat down",
+                 "what happened while the sun was up",
+                 "summarise the wed meeting notes"):
+        assert _w.parse(said, monday)[2] == "", (said, _w.parse(said, monday))
+    assert _w.parse("what was said on friday", monday)[2].startswith("Friday")

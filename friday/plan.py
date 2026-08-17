@@ -608,6 +608,11 @@ class Runner:
             self.announce(f"The plan stopped: {e}")
 
     MAX_AT_ONCE = 6           # more agents than anybody is actually running
+    # Extra grace for a session that has answered and still reports itself busy,
+    # which happens when the status comes from a live process rather than the
+    # conversation. Long enough that a genuinely mid-thought agent is not cut
+    # off, short enough that a stuck status does not cost the whole timeout.
+    STILL_BUSY = 20.0
 
     def _one(self, plan_id: int, step_id: int, stop=None) -> None:
         """One step, in its own thread, so a slow track blocks only itself."""
@@ -798,6 +803,14 @@ class Runner:
                       f"{len(plan['steps'])}: {step['text']}"
                       + (" (sending again: this was interrupted, so it may "
                          "have run already)" if again else ""))
+        # Re-read the baseline immediately before the prompt goes out. It was
+        # taken above, before the announcement, and announcing speaks aloud,
+        # which takes seconds. Anything the agent said while finishing its
+        # PREVIOUS turn in that window read as the answer to this one: the step
+        # completed, recorded the wrong words, and the next step went out on top
+        # of work still in flight.
+        before = agents.spoke(info)
+        before_text = agents.last_said(info)
         if not self.send(sid, step["text"]):
             set_step(step["id"], FAILED, "couldn't reach the session")
             self._maybe_hold(plan["id"])
@@ -851,10 +864,18 @@ class Runner:
                     # next one is sent on top of work still in progress.
                     if said != last_seen:
                         last_seen, settled_at = said, time.time()
-                    elif (time.time() - settled_at >= self.SETTLE
-                          and live.get("status") != "working"):
-                        set_step(step["id"], DONE, said[:300])
-                        return True
+                    elif time.time() - settled_at >= self.SETTLE:
+                        # Quiet for long enough. Normally that also means the
+                        # session has stopped working; when it does not, the
+                        # words are still the better evidence. Requiring idle
+                        # with no escape meant a session whose status never
+                        # clears threw its answer away and was reported as
+                        # having said nothing at all.
+                        idle = live.get("status") != "working"
+                        if idle or (time.time() - settled_at
+                                    >= self.SETTLE + self.STILL_BUSY):
+                            set_step(step["id"], DONE, said[:300])
+                            return True
         if stop.is_set():
             return False
         set_step(step["id"], HELD, "no answer in fifteen minutes")

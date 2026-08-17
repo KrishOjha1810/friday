@@ -16,6 +16,12 @@ _DAYS = {"monday": 0, "tuesday": 1, "wednesday": 2, "thursday": 3,
          "friday": 4, "saturday": 5, "sunday": 6,
          "mon": 0, "tue": 1, "tues": 1, "wed": 2, "weds": 2,
          "thu": 3, "thur": 3, "thurs": 3, "fri": 4, "sat": 5, "sun": 6}
+# Spellings that mean a day but not a WEEKDAY, kept apart from the lookup above
+# so that adding one cannot crash the parser. "tmrw" was listed as a day word
+# and not as a weekday, so it fell through to `_DAYS[word]` and raised a
+# KeyError straight out of an unguarded caller: the request thread died and the
+# page got no reply at all, for a common spelling of "tomorrow".
+_RELATIVE = {"today": 0, "tonight": 0, "tomorrow": 1, "tmrw": 1}
 
 
 def _start_of(d: _dt.date) -> float:
@@ -69,8 +75,14 @@ def parse(text: str, today: _dt.date = None) -> tuple:
 
     # "on Friday", "on Monday": the most recent one that has already happened,
     # because you are asking about something that was said.
+    # Full names only, and abbreviations solely after "on" or "last". Looking
+    # for every spelling bare meant "what did it say when I sat down" reported
+    # "Sat (15 Aug)" and searched the wrong day, with a label that told you it
+    # had understood.
     for name, idx in _DAYS.items():
-        if re.search(r"\b(?:on |last )?" + name + r"\b", t):
+        pattern = (r"\b(?:on |last )?" + name + r"\b" if len(name) > 3
+                   else r"\b(?:on|last)\s+" + name + r"\b")
+        if re.search(pattern, t):
             back = (today.weekday() - idx) % 7
             if back == 0:
                 back = 7          # "on Friday" said on a Friday means last one
@@ -94,10 +106,19 @@ _DAY_WORD = re.compile(
     r"|monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b"
     r"|(?<![\w-])(?:on|by|next|this|come)\s+"
     r"(mon|tue|tues|wed|weds|thu|thur|thurs|fri|sat|sun)(?![\w-])"
-    r"|(?<!\bwe )(?<!\bi )(?<!\bhe )(?<!\bshe )(?<!\bthey )(?<!\byou )"
-    r"(?<![\w-])(mon|tue|tues|wed|weds|thu|thur|thurs|fri|sat|sun)"
+    r"|(?<![\w-])(mon|tue|tues|wed|weds|thu|thur|thurs|fri|sat|sun)"
     r"(?![\w-])\s*(?=(?:at\s+)?\d|at\s|morning|afternoon|evening|night)",
     re.I)
+# What cannot come immediately before a weekday abbreviation. A determiner or a
+# subject means the word is doing its ordinary English job: "the sun at 4" is
+# not Sunday and "we sat at 4" is not Saturday. Listing the pronouns alone left
+# every other subject walking through, so this is the grammatical rule rather
+# than an enumeration of the examples somebody happened to try.
+_NOT_BEFORE_A_DAY = {
+    "the", "a", "an", "my", "your", "our", "their", "its", "his", "her",
+    "we", "i", "he", "she", "they", "you", "it", "was", "is", "were", "are",
+    "been", "had", "have", "has", "that", "which", "who",
+}
 # A day that was named and NOT understood. "the 31st of February", "on the
 # 14th", "next month", "yesterday": each of these says plainly which day is
 # meant, and none of them is a day word. With no day word found the parser fell
@@ -148,18 +169,26 @@ def moment(text: str, now: _dt.datetime = None) -> tuple:
     # loop: sharing the name meant a later check read the clock match and
     # silently did nothing.
     dm = _DAY_WORD.search(low)
+    if dm and (dm.group(3) or ""):
+        # An abbreviation with a time after it. Check the word in front.
+        before = low[:dm.start(3)].split()
+        if before and before[-1].strip(",.;:") in _NOT_BEFORE_A_DAY:
+            dm = None
     if dm:
         # Whichever alternative matched: the full name, or an abbreviation with
         # a day-shaped context in front of it or a time behind it.
         word = dm.group(1) or dm.group(2) or dm.group(3)
-        if word in ("today", "tonight"):
-            day, said_today = now.date(), True
+        if word in _RELATIVE:
+            day = now.date() + _dt.timedelta(days=_RELATIVE[word])
+            said_today = _RELATIVE[word] == 0
             evening = word == "tonight"
-        elif word == "tomorrow":
-            day = now.date() + _dt.timedelta(days=1)
         elif word in _DAYS and re.search(r"\blast\s+" + word + r"\b", low):
             # "last Tuesday" is a day that has gone. Reading it as next Tuesday
             # puts the meeting a week from the one you meant.
+            return 0, ""
+        elif word not in _DAYS:
+            # A day word nobody taught the lookup. Refusing beats raising, and
+            # beats guessing.
             return 0, ""
         else:
             want = _DAYS[word]

@@ -457,6 +457,68 @@ def test_the_same_words_twice_still_completes_it():
     assert got["state"] == plans.DONE, got
 
 
+def test_words_spoken_before_the_prompt_are_not_the_answer():
+    """The baseline was taken before the announcement, and announcing speaks
+    aloud, which takes seconds. Anything the agent said while finishing its
+    PREVIOUS turn in that window read as the answer to this one: the step
+    completed, recorded the wrong words, and the next went out on top of work
+    still in flight."""
+    import json
+    room = _room()
+    path = room / "race.jsonl"
+    path.write_text(json.dumps(_said("older")) + "\n")
+
+    def announce(text, **k):
+        # The agent finishes its previous turn while Friday is talking.
+        with open(path, "a") as fh:
+            fh.write(json.dumps(_said("Actually I finished the last thing.")) + "\n")
+        time.sleep(0.4)
+
+    r = plans.Runner(announce=announce, send=lambda sid, t: True,
+                     look=lambda sid: {"status": "idle", "question": "",
+                                       "path": str(path), "vendor": "claude",
+                                       "sid": sid})
+    r.POLL, r.SETTLE, r.STEP_TIMEOUT = 0.2, 0.5, 3
+    pid = plans.create("race", "api", ["do it"], sid="s1")
+    started = time.time()
+    r.start(pid)
+    while r.running and time.time() - started < 9:
+        time.sleep(0.05)
+    got = plans.get(pid)["steps"][0]
+    assert got["state"] != plans.DONE, got
+    assert "last thing" not in (got["note"] or ""), got
+
+
+def test_an_agent_that_never_goes_idle_still_gets_its_answer_read():
+    """A status derived from a live process may never clear. Requiring idle
+    with no escape threw the answer away and reported that the agent had said
+    nothing at all."""
+    import json
+    import threading
+    room = _room()
+    path = room / "busy.jsonl"
+    path.write_text(json.dumps(_said("older")) + "\n")
+
+    def send(sid, text):
+        threading.Timer(0.2, lambda: open(path, "a").write(
+            json.dumps(_said("Done, all green.")) + "\n")).start()
+        return True
+
+    r = plans.Runner(announce=lambda *a, **k: None, send=send,
+                     look=lambda sid: {"status": "working", "question": "",
+                                       "path": str(path), "vendor": "claude",
+                                       "sid": sid})
+    r.POLL, r.SETTLE, r.STILL_BUSY, r.STEP_TIMEOUT = 0.2, 0.5, 1.0, 8
+    pid = plans.create("busy", "api", ["do it"], sid="s1")
+    started = time.time()
+    r.start(pid)
+    while r.running and time.time() - started < 12:
+        time.sleep(0.05)
+    got = plans.get(pid)["steps"][0]
+    assert got["state"] == plans.DONE, got
+    assert got["note"].startswith("Done, all green"), got
+
+
 if __name__ == "__main__":
     for name, fn in sorted(globals().items()):
         if name.startswith("test_") and callable(fn):
